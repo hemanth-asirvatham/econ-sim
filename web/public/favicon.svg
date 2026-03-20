@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="econ-sim-favicon-bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#7d5333" />
+      <stop offset="100%" stop-color="#d7b07a" />
+    </linearGradient>
+    <linearGradient id="econ-sim-favicon-glow" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fff3de" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#f1dfbf" stop-opacity="0.6" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#econ-sim-favicon-bg)" />
+  <path d="M16 46V20h6v20h8V16h6v24h8V24h6v22H16Z" fill="#24160d" />
+  <path d="M18 18h28c6.5 0 11.5 4.7 11.5 11.2v.8h-5v-.7c0-4-2.9-6.6-7-6.6H18v-4.7Z" fill="url(#econ-sim-favicon-glow)" />
+</svg>
