@@ -104,6 +104,8 @@ async def test_update_personas_prompt_requests_spoken_first_person_updates(
     assert "let some people first talk about feeling more capable, less dependent on scarce experts" in recorded["prompt"]
     assert "if the best update is mostly good news, let it be mostly good news" in recorded["prompt"]
     assert "if the best update is mostly indirect, let it stay indirect" in recorded["prompt"]
+    assert "town_hall_question must be the one direct question this person would ask a candidate" in recorded["prompt"]
+    assert "town_hall_cue should be one short backstage note" in recorded["prompt"]
     assert updated.loc[0, "display_name"] == "Melissa Anne Whitaker"
 
 

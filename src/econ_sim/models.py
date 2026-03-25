@@ -19,7 +19,7 @@ def new_id(prefix: str) -> str:
 ReasoningEffort = Literal["none", "low", "medium", "high"]
 ConversationSpeaker = Literal["user", "assistant", "system"]
 ConversationMode = Literal["text", "voice", "system"]
-StartingWorldMode = Literal["default", "advanced", "radical"]
+FeaturetteStatus = Literal["idle", "queued", "generating", "ready", "error"]
 
 
 class SimulationStatus(str, Enum):
@@ -97,6 +97,8 @@ class CitizenSnapshot(BaseModel):
     voice_notes: str = ""
     baseline_ai_instinct: str = ""
     baseline_priority: str = ""
+    town_hall_question: str = ""
+    town_hall_cue: str = ""
     summary: str
     current_update: str
     approval_band: ApprovalBand
@@ -175,6 +177,18 @@ class StageProgress(BaseModel):
     percent: int = Field(default=0, ge=0, le=100)
 
 
+class DocumentaryFeaturette(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("reel"))
+    subject: str
+    question: str = ""
+    title: str
+    logline: str
+    status: FeaturetteStatus = "queued"
+    narrative_beats: list[NarrativeBeat] = Field(default_factory=list)
+    error: str | None = None
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
 class StagePackage(BaseModel):
     index: int
     phase_label: str = "Transition stage"
@@ -188,12 +202,19 @@ class StagePackage(BaseModel):
     dominant_upside: str = ""
     main_split: str = ""
     pro_adoption_constituency: str = ""
+    household_income_system: str = ""
+    capability_access_norm: str = ""
+    firm_structure_norm: str = ""
+    ownership_regime: str = ""
+    public_service_norm: str = ""
     state_of_world: str
     detailed_summary: str
     room_briefing: str
+    authored_room_briefing: str = ""
     economic_indicators: list[str]
     tension_points: list[str]
     suggested_policy_axes: list[str]
+    authored_policy_axes: list[str] = Field(default_factory=list)
     narrative_beats: list[NarrativeBeat]
     sample_citizens: list[CitizenSnapshot]
     tracking: StageTracking
@@ -201,6 +222,9 @@ class StagePackage(BaseModel):
     queued_poll_questions: list[str]
     policy_notes: list[str] = Field(default_factory=list)
     policy_board_manual: bool = False
+    featurettes: list[DocumentaryFeaturette] = Field(default_factory=list)
+    featurettes_status: FeaturetteStatus = "idle"
+    featurettes_error: str | None = None
     debate_reply: DebateReply | None = None
     resolution: StageResolution | None = None
     orchestrator_response_id: str | None = None
@@ -226,7 +250,6 @@ class SimulationConfig(BaseModel):
     topic_lens: str = ""
     premise: str = ""
     stakes: str = ""
-    starting_world_mode: StartingWorldMode = "default"
     persona_count: int = Field(default=64, ge=8, le=256)
     stage_count: int = Field(default=5, ge=3, le=8)
     visual_style: str
@@ -269,7 +292,6 @@ class SimulationCreateRequest(BaseModel):
     topic_lens: str | None = None
     premise: str | None = None
     stakes: str | None = None
-    starting_world_mode: StartingWorldMode = "default"
     persona_count: int = Field(default=48, ge=8, le=256)
     stage_count: int = Field(default=5, ge=3, le=8)
     visual_style: str | None = None
@@ -290,7 +312,6 @@ class SetupSessionPatchRequest(BaseModel):
     topic_lens: str | None = None
     premise: str | None = None
     stakes: str | None = None
-    starting_world_mode: StartingWorldMode | None = None
     persona_count: int | None = Field(default=None, ge=8, le=256)
     stage_count: int | None = Field(default=None, ge=3, le=8)
     visual_style: str | None = None
@@ -373,6 +394,7 @@ class RealtimeSessionRequest(BaseModel):
     citizen_id: str | None = None
     advisor_mode: AdvisorMode = AdvisorMode.solo
     auditorium_mode: AuditoriumMode = AuditoriumMode.debate
+    auto_response: bool | None = None
 
 
 class RealtimeToolResult(BaseModel):
@@ -442,6 +464,7 @@ class CouncilTurnResponse(BaseModel):
     thread_key: str
     lead: str
     urgencies: dict[str, int]
+    speaker_order: list[str] = Field(default_factory=list)
     contrast: list[str] = Field(default_factory=list)
     reason: str | None = None
     yield_after_turn: bool = False

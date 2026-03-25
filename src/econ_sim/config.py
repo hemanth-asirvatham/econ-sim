@@ -42,8 +42,9 @@ class AppSettings(BaseSettings):
         "family structure, ideology, ethnicity, age, and AI exposure."
     )
     default_visual_style: str = (
-        "Naturalistic civic documentary with grounded people, varied institutions and neighborhoods, "
-        "tactile materials, observed light, painterly realism, and no glossy CGI or cartoon exaggeration."
+        "Cezanne-Monet-Matisse civic impressionism with grounded people, public institutions, visible brushwork, "
+        "broad color planes, softened edges, luminous atmosphere, and simplified human forms; "
+        "never glossy CGI, stock-photo realism, or cartoon stylization."
     )
     max_stage_count: int = 5
     default_persona_count: int = 64

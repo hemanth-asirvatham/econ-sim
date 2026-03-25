@@ -7,9 +7,9 @@ const { execSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 
 const TARGET_URL =
-  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_515e64b42952&advisor=multi&auditorium=town_hall";
+  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_7db636bffb06&advisor=multi&auditorium=debate";
 const OUT_DIR =
-  process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-townhall-check";
+  process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-reels-check";
 const GCFT_BIN =
   process.env.PLAYWRIGHT_GCFT_BIN ||
   path.join(
@@ -19,7 +19,6 @@ const GCFT_BIN =
 const RUNTIME_DIR =
   process.env.PLAYWRIGHT_RUNTIME_DIR ||
   path.join("/Users/hemanth/code/econ-sim/output/playwright", "runtime");
-const SKIP_CALL = process.env.PLAYWRIGHT_SKIP_TOWNHALL_CALL === "1";
 
 function ensureRuntime() {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
@@ -77,7 +76,7 @@ async function run() {
       notes.push(`[console:${message.type()}] ${message.text()}`);
     });
     page.on("pageerror", (error) => {
-      notes.push(`[pageerror] ${error.stack || error.message}`);
+      notes.push(`[pageerror] ${error.message}`);
     });
 
     await page.goto(TARGET_URL, { waitUntil: "domcontentloaded" });
@@ -92,58 +91,61 @@ async function run() {
       await page.waitForTimeout(2200);
     }
 
-    if ((await page.locator(".debate-room").count()) === 0) {
-      const auditoriumHotspot = page.getByText(/^AUDITORIUM$/i).first();
-      if (await auditoriumHotspot.count()) {
-        await auditoriumHotspot.click();
-        notes.push("Clicked auditorium hotspot.");
-        await page.waitForTimeout(1800);
+    await page.screenshot({ path: path.join(OUT_DIR, "01-stage.png"), fullPage: true });
+
+    const reelTrigger = page.getByTestId("topbar-reels-button").or(
+      page.getByRole("button", { name: /Future reels|Explore future|Reels/i }),
+    ).first();
+    await reelTrigger.click();
+    await page.waitForTimeout(1200);
+    await page.screenshot({ path: path.join(OUT_DIR, "02-overlay.png"), fullPage: true });
+
+    let directOverlayOpen = (await page.locator(".featurette-overlay").count()) > 0;
+    if (!directOverlayOpen) {
+      const drawerOpenButton = page.getByRole("button", { name: /Open future reels/i }).first();
+      if (await drawerOpenButton.count()) {
+        notes.push("Topbar reels button did not open the overlay directly.");
+        await drawerOpenButton.click();
+        await page.waitForTimeout(1000);
+        directOverlayOpen = (await page.locator(".featurette-overlay").count()) > 0;
       }
     }
 
-    const townHallTab = page.getByTestId("auditorium-tab-town-hall");
-    const debateTab = page.getByTestId("auditorium-tab-debate");
-    let townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
-    if (!townHallSelected && await townHallTab.count()) {
-      await townHallTab.click();
-      await page.waitForTimeout(1400);
-      townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
-    }
-    const debateSelected = (await debateTab.getAttribute("aria-selected").catch(() => null)) === "true";
+    const cards = directOverlayOpen
+      ? page.locator(".featurette-overlay .featurette-card")
+      : page.locator(".immersive-drawer__reel-card, .featurette-card");
+    const reelTitles = await cards.locator("strong").evaluateAll((nodes) =>
+      nodes.map((node) => (node.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean),
+    );
+    const reelQuestions = await cards.locator(".featurette-card__question, p").evaluateAll((nodes) =>
+      nodes.map((node) => (node.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean),
+    );
 
-    await page.screenshot({ path: path.join(OUT_DIR, "01-room.png"), fullPage: true });
-
-    const questionPanel = page.locator(".debate-room__audience-floor-note").nth(1).locator("p").first();
-    const questionPreview = await questionPanel.innerText().catch(() => null);
-    const callButton = page.getByTestId("townhall-call-on-voter");
-    const callVisible = await callButton.isVisible().catch(() => false);
-    if (callVisible && !SKIP_CALL) {
-      await callButton.click();
-      notes.push("Clicked Give them the mic.");
-      try {
-        await page.waitForFunction(
-          (previousText) => {
-            const note = document.querySelectorAll(".debate-room__audience-floor-note")[1];
-            const nextText = note?.querySelector("p")?.textContent?.trim() ?? "";
-            return Boolean(nextText) && nextText !== (previousText || "").trim();
-          },
-          questionPreview,
-          { timeout: 10000 },
-        );
-      } catch {
-        await page.waitForTimeout(3000);
-      }
+    let viewerTitle = null;
+    let reelAutoplayLabel = null;
+    const openableCard = directOverlayOpen
+      ? page.locator(".featurette-overlay .featurette-card.featurette-card--ready").first()
+      : page.locator(".featurette-card.featurette-card--ready, .immersive-drawer__reel-card.immersive-drawer__reel-card--ready").first();
+    if (await openableCard.count()) {
+      await openableCard.click();
+      await page.waitForTimeout(1000);
+      await page.screenshot({ path: path.join(OUT_DIR, "03-viewer.png"), fullPage: true });
+      viewerTitle = await page
+        .locator(".featurette-cinema__title strong, .featurette-viewer h3")
+        .first()
+        .innerText()
+        .catch(() => null);
+      reelAutoplayLabel = await page.getByRole("button", { name: /Stop reel|Replay reel|Play reel/i }).first().innerText().catch(() => null);
     }
 
-    await page.screenshot({ path: path.join(OUT_DIR, "02-townhall.png"), fullPage: true });
-    const questionText = await questionPanel.innerText().catch(() => null);
     const summary = {
       url: page.url(),
-      townHallSelected,
-      debateSelected,
-      callVisible,
-      questionPreview,
-      questionText,
+      directOverlayOpen,
+      reelCardCount: await cards.count(),
+      reelTitles,
+      reelQuestions,
+      viewerTitle,
+      reelAutoplayLabel,
       notes,
     };
     fs.writeFileSync(path.join(OUT_DIR, "summary.json"), JSON.stringify(summary, null, 2));
@@ -153,9 +155,7 @@ async function run() {
   }
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+run().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

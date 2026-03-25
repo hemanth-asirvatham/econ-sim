@@ -13,73 +13,82 @@ export interface TownHallQuestion {
   cue: string;
 }
 
-function normalize(text: string) {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+function compactLine(text: string, max = 116) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  const clipped = normalized.slice(0, max);
+  const breakAt = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, breakAt > 24 ? breakAt : max).trim()}...`;
 }
 
-function hasNeedle(text: string, needles: string[]) {
-  const normalized = normalize(text);
-  return needles.some((needle) => normalized.includes(needle));
+function firstSentence(text: string, max = 132) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  const sentence = normalized.split(/(?<=[.!?])\s+/)[0]?.trim() ?? normalized;
+  return compactLine(sentence.replace(/[.?!]+$/g, "").trim(), max).replace(/\.{3}$/, "");
 }
 
-function latestPlayerDebateCase(turns: ConversationTurn[]) {
-  return turns
-    .filter((turn) => turn.speaker === "user")
-    .map((turn) => turn.text.trim())
-    .filter(Boolean)
-    .slice(-4)
-    .join(" ");
+function keywordBag(text: string) {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((word) => word.length >= 5)
+    .filter((word) => !["their", "there", "about", "which", "where", "would", "could", "still", "while", "people", "because", "being"].includes(word));
 }
 
-function questionForCitizen(stage: StagePackage, playerCase: string, index: number) {
-  const citizen = stage.sample_citizens[index];
+function cueForCitizen(stage: StagePackage, citizen = stage.sample_citizens[0]) {
+  if (!citizen) {
+    return "";
+  }
+  if (citizen.town_hall_cue.trim()) {
+    return citizen.town_hall_cue.trim();
+  }
+  const source =
+    citizen.current_worries ||
+    citizen.current_update ||
+    citizen.current_hopes ||
+    citizen.recent_ai_moment ||
+    citizen.summary;
+  if (source.trim()) {
+    return compactLine(source);
+  }
+  if (stage.main_split.trim()) {
+    return compactLine(stage.main_split);
+  }
+  return compactLine(citizen.support_label || citizen.role);
+}
+
+function fallbackQuestionForCitizen(stage: StagePackage, citizen = stage.sample_citizens[0]) {
+  if (!citizen) {
+    return "";
+  }
+  const focus = firstSentence(
+    citizen.current_worries ||
+      citizen.current_hopes ||
+      citizen.recent_ai_moment ||
+      citizen.summary ||
+      citizen.current_update ||
+      stage.main_split ||
+      citizen.role,
+    140,
+  );
+  if (!focus) {
+    return "What does your plan actually do for people like me?";
+  }
+  const lead = focus.slice(0, 1).toUpperCase() + focus.slice(1);
+  if (/^(?:i|my|we|our)\b/i.test(focus)) {
+    return `${lead}. What does your plan do for people like me?`;
+  }
+  return `${lead}. What would you do about that?`;
+}
+
+function questionForCitizen(stage: StagePackage, citizen = stage.sample_citizens[0]) {
   if (!citizen) {
     return null;
-  }
-
-  const playerCaseNormalized = normalize(playerCase);
-  const restrictionHeavy = hasNeedle(playerCaseNormalized, ["tax", "taxes", "slow", "pause", "license", "licensing", "cap", "caps", "permit", "permits", "regulate"]);
-  const speedHeavy = hasNeedle(playerCaseNormalized, ["build faster", "ship faster", "diffuse", "open access", "faster rollout", "move faster", "accelerate"]);
-  const lowExposure = hasNeedle(citizen.ai_exposure, ["low", "minimal", "rare", "barely"]);
-  const positiveCitizen = hasNeedle(citizen.support_label, ["approve", "open", "hopeful", "support"]);
-  const skepticalCitizen = hasNeedle(citizen.support_label, ["disapprove", "angry", "against", "skeptical"]);
-  const teacherLike = hasNeedle(citizen.role, ["teacher", "student", "professor", "school"]);
-  const careLike = hasNeedle(citizen.role, ["nurse", "doctor", "care", "hospital", "therapist", "clinic"]);
-  const builderLike = hasNeedle(citizen.role, ["owner", "founder", "manager", "developer", "engineer", "contractor", "shop"]);
-  const familyCue = citizen.current_hopes || citizen.current_worries || citizen.current_update || citizen.summary;
-
-  let question = "";
-  let cue = "";
-
-  if (restrictionHeavy && positiveCitizen) {
-    question = "If these tools are already helping me, what exactly are you willing to slow down?";
-    cue = "This voter likes some of the gains already and wants to know what your brake would cost them.";
-  } else if (speedHeavy && skepticalCitizen) {
-    question = "If you move faster, who is actually protecting people when the gains pile up at the top?";
-    cue = "This voter wants a real answer on fairness and leverage before they trust a speed-first line.";
-  } else if (teacherLike) {
-    question = "What changes for students who can suddenly do expert-level work, and what still needs a real teacher in the room?";
-    cue = "Good education question: capability jump plus the human role that does not vanish.";
-  } else if (careLike) {
-    question = "If AI keeps getting better in care, what becomes safer or cheaper, and what do you refuse to automate away?";
-    cue = "Good care question: visible upside first, then the limit you would defend.";
-  } else if (builderLike && positiveCitizen) {
-    question = "How do you keep smaller firms and ordinary people getting the upside, instead of letting a few giants lock it up?";
-    cue = "This voter is open to diffusion but worried about concentration.";
-  } else if (lowExposure) {
-    question = "I barely touch AI myself, so why should I believe your plan changes my life at all?";
-    cue = "Good grounding question when the voter feels outside the current wave.";
-  } else if (skepticalCitizen) {
-    question = "What would you say to someone who thinks this mostly makes life feel shakier, not better?";
-    cue = "This voter wants you to answer the fear directly instead of talking past it.";
-  } else {
-    question = "What feels better because of AI right now, and what still needs a real public guardrail?";
-    cue = "Balanced audience question: keep the gains visible and force a real limit.";
-  }
-
-  const livedLine = familyCue.replace(/\s+/g, " ").trim();
-  if (livedLine) {
-    cue = `${cue} Their current read: ${livedLine.slice(0, 110)}${livedLine.length > 110 ? "..." : ""}`;
   }
 
   return {
@@ -91,19 +100,49 @@ function questionForCitizen(stage: StagePackage, playerCase: string, index: numb
     voice: citizen.voice,
     supportLabel: citizen.support_label,
     aiExposure: citizen.ai_exposure,
-    question,
-    cue,
+    question: (citizen.town_hall_question || "").split(/\s+/).filter(Boolean).join(" ").trim() || fallbackQuestionForCitizen(stage, citizen),
+    cue: cueForCitizen(stage, citizen),
   } satisfies TownHallQuestion;
 }
 
 export function buildTownHallQuestions(stage: StagePackage, debateTurns: ConversationTurn[]) {
-  const playerCase = latestPlayerDebateCase(debateTurns);
-  return stage.sample_citizens
+  const latestPlayerText = [...debateTurns]
+    .reverse()
+    .find((turn) => turn.speaker === "user" && turn.text.trim())
+    ?.text ?? "";
+  const liveKeywords = new Set(
+    keywordBag([latestPlayerText, stage.main_split, ...stage.policy_notes].join(" ")).slice(0, 8),
+  );
+  const priorCitizenTurns = new Set(
+    debateTurns
+      .filter((turn) => turn.speaker === "assistant" && turn.speaker_name)
+      .map((turn) => turn.speaker_name?.toLowerCase().trim() ?? ""),
+  );
+
+  return [...stage.sample_citizens]
+    .sort((left, right) => {
+      const scoreCitizen = (citizen: StagePackage["sample_citizens"][number]) => {
+        const citizenText = [
+          citizen.current_update,
+          citizen.current_worries,
+          citizen.current_hopes,
+          citizen.recent_ai_moment,
+          citizen.town_hall_question,
+          citizen.summary,
+          citizen.role,
+          citizen.region,
+        ].join(" ");
+        const overlap = keywordBag(citizenText).filter((word) => liveKeywords.has(word)).length;
+        const unseenBonus = priorCitizenTurns.has(citizen.display_name.toLowerCase()) ? 0 : 3;
+        return unseenBonus + overlap;
+      };
+      return scoreCitizen(right) - scoreCitizen(left);
+    })
     .slice(0, 6)
-    .map((_, index) => questionForCitizen(stage, playerCase, index))
+    .map((citizen) => questionForCitizen(stage, citizen))
     .filter((item): item is TownHallQuestion => Boolean(item));
 }
 
 export function townHallPrompt(question: TownHallQuestion) {
-  return `Town hall question from ${question.displayName}, ${question.role} in ${question.region}: ${question.question} Answer the voter directly in one short sentence and then stop so I can answer too.`;
+  return `Town hall question from ${question.displayName}, ${question.role} in ${question.region}: ${question.question} Answer this voter directly and concretely before you move on.`;
 }

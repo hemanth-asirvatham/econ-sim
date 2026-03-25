@@ -73,13 +73,6 @@ function asReasoning(value: unknown): SetupDraft["orchestrator_reasoning_effort"
   return undefined;
 }
 
-function asStartingWorldMode(value: unknown): SetupDraft["starting_world_mode"] | undefined {
-  if (value === "default" || value === "advanced" || value === "radical") {
-    return value;
-  }
-  return undefined;
-}
-
 function setupRoot(payload: unknown): Record<string, unknown> {
   if (!isRecord(payload)) {
     return {};
@@ -117,7 +110,6 @@ function normalizeSetupDraft(payload: unknown, fallbackDraft: SetupDraft): Setup
     opponent_voice: asString(draftSource.opponent_voice) ?? fallbackDraft.opponent_voice,
     premise: asString(draftSource.premise) ?? fallbackDraft.premise,
     stakes: asString(draftSource.stakes) ?? fallbackDraft.stakes,
-    starting_world_mode: asStartingWorldMode(draftSource.starting_world_mode) ?? fallbackDraft.starting_world_mode,
     persona_count: asNumber(draftSource.persona_count) ?? fallbackDraft.persona_count,
     stage_count: asNumber(draftSource.stage_count) ?? fallbackDraft.stage_count,
     visual_style: asString(draftSource.visual_style) ?? fallbackDraft.visual_style,
@@ -634,6 +626,7 @@ export function createRealtimeSession(
   citizenId?: string,
   advisorMode: AdvisorMode = "solo",
   auditoriumMode: AuditoriumMode = "debate",
+  autoResponse?: boolean,
 ) {
   return request<RealtimeSessionResponse>(`/api/simulations/${simulationId}/realtime/session`, {
     method: "POST",
@@ -642,6 +635,7 @@ export function createRealtimeSession(
       citizen_id: citizenId,
       advisor_mode: role === "advisor" ? advisorMode : "solo",
       auditorium_mode: role === "debate" ? auditoriumMode : "debate",
+      auto_response: autoResponse ?? null,
     }),
   });
 }

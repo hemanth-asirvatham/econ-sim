@@ -7,9 +7,9 @@ const { execSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 
 const TARGET_URL =
-  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_515e64b42952&advisor=multi&auditorium=town_hall";
+  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_2e7152bb4306&advisor=multi&auditorium=debate";
 const OUT_DIR =
-  process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-townhall-check";
+  process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-speak-check";
 const GCFT_BIN =
   process.env.PLAYWRIGHT_GCFT_BIN ||
   path.join(
@@ -19,7 +19,6 @@ const GCFT_BIN =
 const RUNTIME_DIR =
   process.env.PLAYWRIGHT_RUNTIME_DIR ||
   path.join("/Users/hemanth/code/econ-sim/output/playwright", "runtime");
-const SKIP_CALL = process.env.PLAYWRIGHT_SKIP_TOWNHALL_CALL === "1";
 
 function ensureRuntime() {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
@@ -92,58 +91,19 @@ async function run() {
       await page.waitForTimeout(2200);
     }
 
-    if ((await page.locator(".debate-room").count()) === 0) {
-      const auditoriumHotspot = page.getByText(/^AUDITORIUM$/i).first();
-      if (await auditoriumHotspot.count()) {
-        await auditoriumHotspot.click();
-        notes.push("Clicked auditorium hotspot.");
-        await page.waitForTimeout(1800);
-      }
-    }
+    await page.screenshot({ path: path.join(OUT_DIR, "01-before.png"), fullPage: true });
+    const speakTrigger = page.locator(".scene__voice-trigger").first();
+    await speakTrigger.click();
+    notes.push("Clicked scene Speak trigger.");
+    await page.waitForTimeout(2400);
+    await page.screenshot({ path: path.join(OUT_DIR, "02-after.png"), fullPage: true });
 
-    const townHallTab = page.getByTestId("auditorium-tab-town-hall");
-    const debateTab = page.getByTestId("auditorium-tab-debate");
-    let townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
-    if (!townHallSelected && await townHallTab.count()) {
-      await townHallTab.click();
-      await page.waitForTimeout(1400);
-      townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
-    }
-    const debateSelected = (await debateTab.getAttribute("aria-selected").catch(() => null)) === "true";
-
-    await page.screenshot({ path: path.join(OUT_DIR, "01-room.png"), fullPage: true });
-
-    const questionPanel = page.locator(".debate-room__audience-floor-note").nth(1).locator("p").first();
-    const questionPreview = await questionPanel.innerText().catch(() => null);
-    const callButton = page.getByTestId("townhall-call-on-voter");
-    const callVisible = await callButton.isVisible().catch(() => false);
-    if (callVisible && !SKIP_CALL) {
-      await callButton.click();
-      notes.push("Clicked Give them the mic.");
-      try {
-        await page.waitForFunction(
-          (previousText) => {
-            const note = document.querySelectorAll(".debate-room__audience-floor-note")[1];
-            const nextText = note?.querySelector("p")?.textContent?.trim() ?? "";
-            return Boolean(nextText) && nextText !== (previousText || "").trim();
-          },
-          questionPreview,
-          { timeout: 10000 },
-        );
-      } catch {
-        await page.waitForTimeout(3000);
-      }
-    }
-
-    await page.screenshot({ path: path.join(OUT_DIR, "02-townhall.png"), fullPage: true });
-    const questionText = await questionPanel.innerText().catch(() => null);
     const summary = {
       url: page.url(),
-      townHallSelected,
-      debateSelected,
-      callVisible,
-      questionPreview,
-      questionText,
+      drawerOpen: (await page.locator(".immersive-drawer--open").count()) > 0,
+      roomPaneVisible: (await page.locator(".immersive-drawer__pane--active .voice-dock, .immersive-drawer__pane--active .debate-room").count()) > 0,
+      liveModeLabel: await page.locator(".voice-dock__mode").first().textContent({ timeout: 1200 }).catch(() => null),
+      errorText: await page.locator(".voice-dock__error").first().textContent({ timeout: 1200 }).catch(() => null),
       notes,
     };
     fs.writeFileSync(path.join(OUT_DIR, "summary.json"), JSON.stringify(summary, null, 2));
@@ -153,9 +113,7 @@ async function run() {
   }
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+run().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

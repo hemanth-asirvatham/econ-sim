@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { callRealtimeTool, createRealtimeSession, generateCouncilTurn, syncConversation, synthesizeSpeech } from "../lib/api";
 import { COUNCIL_ADVISORS, splitCouncilLines, type CouncilTurnContext } from "../lib/council";
 import { makeRealtimeTurnDetection, REALTIME_TURN_DETECTION } from "../lib/realtimeConfig";
-import type { AdvisorMode, AuditoriumMode, ConversationTurn, RealtimeRole, ScenePresence, SessionStatus, SimulationState } from "../types";
+import type { AdvisorMode, AuditoriumMode, ConversationTurn, RealtimeRole, RoomName, ScenePresence, SessionStatus, SimulationState } from "../types";
 
 interface UseRealtimeSessionOptions {
   simulationId?: string;
@@ -10,6 +10,7 @@ interface UseRealtimeSessionOptions {
   citizenId?: string;
   advisorMode?: AdvisorMode;
   auditoriumMode?: AuditoriumMode;
+  autoResponse?: boolean;
   councilContext?: CouncilTurnContext;
   initialTurns: ConversationTurn[];
   onSimulationSync?: (simulation: SimulationState) => void;
@@ -19,6 +20,12 @@ interface UseRealtimeSessionOptions {
     contrast: string[];
     reason?: string;
   } | null) => void;
+  onModeCommand?: (command: {
+    room?: RoomName;
+    advisorMode?: AdvisorMode;
+    auditoriumMode?: AuditoriumMode;
+    citizenName?: string;
+  }) => Promise<boolean> | boolean;
 }
 
 const EMPTY_PRESENCE: ScenePresence = {
@@ -141,9 +148,12 @@ function compactRealtimeToolOutput(payload: unknown) {
 
 type ResponseDeliveryMode = "audio" | "text";
 type LocalTurnInput = Pick<ConversationTurn, "speaker" | "speaker_name" | "speaker_voice" | "text" | "mode">;
-const COUNCIL_MAX_CONTINUATION_MS = 28000;
+const COUNCIL_MAX_CONTINUATION_MS = 16000;
+const COUNCIL_PLAYER_URGENCY_YIELD = 8;
+const COUNCIL_MAX_AUTO_CONTINUATION_BEATS = 1;
+const COUNCIL_MAX_FIGHT_CONTINUATION_BEATS = 2;
 const COUNCIL_REPEAT_REPLAN_PROMPT =
-  "The council is starting to repeat itself. Either let a different advisor add one genuinely new point or direct question, or yield clearly to the president now.";
+  "The council is starting to repeat itself. Let the next advisor add one genuinely new mechanism, objection, or direct question, or yield clearly to the president now.";
 
 function councilVoiceForSpeaker(speaker?: string | null) {
   const normalized = (speaker ?? "").trim().toLowerCase();
@@ -158,16 +168,144 @@ function councilTurnSignature(turns: LocalTurnInput[]) {
     .join(" | ");
 }
 
+function titleCaseCommandValue(text: string) {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function interpretBareModeCommand(normalized: string): {
+  room?: RoomName;
+  advisorMode?: AdvisorMode;
+  auditoriumMode?: AuditoriumMode;
+} | null {
+  const trimmed = normalized
+    .replace(/^(?:please\s+|let's\s+|lets\s+)/, "")
+    .replace(/\s+please$/, "")
+    .trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^(?:town hall|town hall floor)$/.test(trimmed)) {
+    return { room: "debate", auditoriumMode: "town_hall" };
+  }
+  if (/^(?:debate|debate stage|auditorium|podium)$/.test(trimmed)) {
+    return { room: "debate", auditoriumMode: "debate" };
+  }
+  if (/^(?:multi-advisor|advisor table|council table|council room)$/.test(trimmed)) {
+    return { room: "advisor", advisorMode: "council" };
+  }
+  if (/^(?:single advisor|chief advisor|chief of staff)$/.test(trimmed)) {
+    return { room: "advisor", advisorMode: "solo" };
+  }
+  if (/^(?:street|citizens|people)$/.test(trimmed)) {
+    return { room: "citizens" };
+  }
+  if (/^(?:briefing|documentary|intro)$/.test(trimmed)) {
+    return { room: "briefing" };
+  }
+  if (/^(?:advisor|war room)$/.test(trimmed)) {
+    return { room: "advisor" };
+  }
+  return null;
+}
+
+function interpretModeCommand(text: string): {
+  room?: RoomName;
+  advisorMode?: AdvisorMode;
+  auditoriumMode?: AuditoriumMode;
+  citizenName?: string;
+} | null {
+  const raw = text.replace(/\s+/g, " ").trim();
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw.toLowerCase();
+  const bareCommand = interpretBareModeCommand(normalized);
+  if (bareCommand) {
+    return bareCommand;
+  }
+  if (!/\b(go to|take me to|bring me to|move me to|return to|back to|head to|switch to|let's go to|i want to go to|i'm ready to go to|i am ready to go to|talk to|speak to|speak with)\b/.test(normalized)) {
+    return null;
+  }
+  if (normalized.includes("town hall")) {
+    return { room: "debate", auditoriumMode: "town_hall" };
+  }
+  if (normalized.includes("debate") || normalized.includes("auditorium") || normalized.includes("podium")) {
+    return { room: "debate", auditoriumMode: "debate" };
+  }
+  if (normalized.includes("multi-advisor") || normalized.includes("council table") || normalized.includes("council room") || normalized.includes("advisor table")) {
+    return { room: "advisor", advisorMode: "council" };
+  }
+  if (normalized.includes("single advisor") || normalized.includes("chief advisor") || normalized.includes("chief of staff")) {
+    return { room: "advisor", advisorMode: "solo" };
+  }
+  if (normalized.includes("street") || normalized.includes("citizens") || normalized.includes("people")) {
+    return { room: "citizens" };
+  }
+  if (normalized.includes("briefing") || normalized.includes("documentary") || normalized.includes("intro")) {
+    return { room: "briefing" };
+  }
+  if (normalized.includes("advisor") || normalized.includes("war room")) {
+    return { room: "advisor" };
+  }
+  const citizenMatch = raw.match(/(?:talk to|speak to|speak with)\s+([A-Za-z][A-Za-z' -]{1,40})/i);
+  if (!citizenMatch) {
+    return null;
+  }
+  const citizenName = citizenMatch[1]
+    .replace(/\b(?:out there|on the street|in the street|nearby)\b/gi, "")
+    .trim();
+  if (!citizenName || /\b(?:street|citizen|people|advisor|debate|town hall|briefing)\b/i.test(citizenName)) {
+    return null;
+  }
+  return {
+    room: "citizens",
+    citizenName: titleCaseCommandValue(citizenName),
+  };
+}
+
+function mergeConversationTurns(current: ConversationTurn[], incoming: ConversationTurn[]) {
+  const merged = new Map<string, ConversationTurn>();
+  for (const turn of [...current, ...incoming]) {
+    const existing = merged.get(turn.id);
+    merged.set(turn.id, existing ? { ...existing, ...turn } : turn);
+  }
+  return [...merged.values()]
+    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+    .slice(-48);
+}
+
+function requestsCouncilFight(text: string) {
+  const normalized = text.toLowerCase();
+  return [
+    "let the room argue it out",
+    "let them argue it out",
+    "let the room debate",
+    "let them debate",
+    "i want the room to disagree",
+    "i want the room to really disagree",
+    "argue about",
+    "fight it out",
+    "debate among yourselves",
+    "full council",
+  ].some((phrase) => normalized.includes(phrase));
+}
+
 export function useRealtimeSession({
   simulationId,
   role,
   citizenId,
   advisorMode = "solo",
   auditoriumMode = "debate",
+  autoResponse = true,
   councilContext,
   initialTurns,
   onSimulationSync,
   onCouncilFloorChange,
+  onModeCommand,
 }: UseRealtimeSessionOptions) {
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -179,6 +317,14 @@ export function useRealtimeSession({
   const [recordingVoiceTurn, setRecordingVoiceTurn] = useState(false);
   const [awaitingVoiceReply, setAwaitingVoiceReply] = useState(false);
   const councilMode = role === "advisor" && advisorMode === "council";
+  const sessionScopeKey = [
+    simulationId ?? "",
+    role,
+    citizenId ?? "",
+    role === "advisor" ? advisorMode : "-",
+    role === "debate" ? auditoriumMode : "-",
+    role === "debate" ? String(Boolean(autoResponse)) : "-",
+  ].join("|");
   const statusRef = useRef<SessionStatus>("idle");
   statusRef.current = status;
   const connectionRef = useRef<RTCPeerConnection | null>(null);
@@ -552,11 +698,35 @@ export function useRealtimeSession({
     await persistTurns([turn]);
   });
 
+  const handleModeCommand = useEffectEvent(async (text: string) => {
+    const command = interpretModeCommand(text);
+    if (!command) {
+      return false;
+    }
+    if (onModeCommand) {
+      return Boolean(await onModeCommand(command));
+    }
+    if (!simulationId) {
+      return false;
+    }
+    const result = command.citizenName
+      ? await callRealtimeTool(simulationId, role, "focus_citizen_by_name", { citizen_name: command.citizenName })
+      : command.room
+        ? await callRealtimeTool(simulationId, role, "move_room_focus", { room: command.room })
+        : null;
+    const maybeSimulation = result?.data?.simulation as SimulationState | undefined;
+    if (maybeSimulation?.simulation_id) {
+      onSimulationSync?.(maybeSimulation);
+    }
+    return Boolean(result);
+  });
+
   const runCouncilTurn = useEffectEvent(async (text: string, requestedMode: "text" | "voice") => {
     const trimmed = sanitizeRealtimeText(text);
     if (!trimmed || !simulationId || responseInFlightRef.current) {
       return;
     }
+    const explicitFightRequest = requestsCouncilFight(trimmed);
     const loopGeneration = nextCouncilLoopGeneration();
     const userTurn: LocalTurnInput = { speaker: "user", text: trimmed, mode: requestedMode };
     appendLocalTurn(userTurn);
@@ -576,6 +746,10 @@ export function useRealtimeSession({
       const loopStartedAt = Date.now();
       let lastAssistantSignature = "";
       let repeatedAssistantSignatureCount = 0;
+      let continuationBeatCount = 0;
+      const maxContinuationBeats = explicitFightRequest
+        ? COUNCIL_MAX_FIGHT_CONTINUATION_BEATS
+        : COUNCIL_MAX_AUTO_CONTINUATION_BEATS;
       while (true) {
         if (councilLoopGenerationRef.current !== loopGeneration) {
           return;
@@ -592,7 +766,8 @@ export function useRealtimeSession({
           reason: response.reason ?? undefined,
         });
         councilLeadRef.current = response.lead;
-        const shouldYieldToPlayer = response.yield_after_turn;
+        const shouldYieldToPlayer =
+          response.yield_after_turn || response.player_proxy_urgency >= COUNCIL_PLAYER_URGENCY_YIELD;
         const assistantTurns = response.turns
           .map((turn) => ({
             speaker: turn.speaker,
@@ -620,28 +795,33 @@ export function useRealtimeSession({
         }
 
         if (requestedMode === "voice" && !mutedRef.current) {
-          const spokenTurns = await playCouncilSpeechTurns(assistantTurns, (turn) => {
-            appendLocalTurn(turn);
-          });
+          assistantTurns.forEach((turn) => appendLocalTurn(turn));
+          const persistPromise = persistTurns(
+            assistantTurns,
+            response.board_notes.length > 0 ? { boardNotes: response.board_notes } : undefined,
+          );
+          await playCouncilSpeechTurns(assistantTurns);
           if (councilLoopGenerationRef.current !== loopGeneration) {
             return;
           }
-          if (spokenTurns.length !== assistantTurns.length) {
-            if (spokenTurns.length > 0) {
-              await persistTurns(spokenTurns);
-            }
-            return;
-          }
-          await persistTurns(
-            spokenTurns,
-            response.board_notes.length > 0 ? { boardNotes: response.board_notes } : undefined,
-          );
+          await persistPromise;
         } else {
           assistantTurns.forEach((turn) => appendLocalTurn(turn));
           await persistTurns(assistantTurns, { boardNotes: response.board_notes });
         }
 
-        if (shouldYieldToPlayer) {
+        const directQuestionToPlayer = assistantTurns.some((turn) => /\?\s*$/.test(sanitizeRealtimeText(turn.text)));
+        const sharpContrast = response.contrast.some((name) => {
+          const leadUrgency = response.urgencies[response.lead] ?? 0;
+          const contrastUrgency = response.urgencies[name] ?? 0;
+          return contrastUrgency >= Math.max(6, leadUrgency - 1);
+        });
+        const keepAutoDebating =
+          explicitFightRequest ||
+          sharpContrast ||
+          assistantTurns.length > 1;
+        const shouldForceFollowupBeat = explicitFightRequest && continuationBeatCount === 0 && !directQuestionToPlayer;
+        if ((shouldYieldToPlayer || !keepAutoDebating) && !shouldForceFollowupBeat) {
           return;
         }
         if (Date.now() - loopStartedAt >= COUNCIL_MAX_CONTINUATION_MS) {
@@ -650,8 +830,14 @@ export function useRealtimeSession({
         if (requestedMode === "voice" && (mutedRef.current || liveModeRef.current !== "voice" || statusRef.current !== "connected")) {
           return;
         }
+        if (!shouldForceFollowupBeat && continuationBeatCount >= maxContinuationBeats) {
+          return;
+        }
+        continuationBeatCount += 1;
         continueDialogue = true;
-        if (repeatedAssistantSignatureCount >= 2) {
+        if (shouldForceFollowupBeat) {
+          nextText = "Keep the council argument going from the strongest unresolved objection, mechanism, or political consequence. Do not yield to the president yet unless there is no real second beat.";
+        } else if (repeatedAssistantSignatureCount >= 2) {
           if (repeatedAssistantSignatureCount >= 4) {
             return;
           }
@@ -661,7 +847,7 @@ export function useRealtimeSession({
         }
         if (requestedMode === "voice") {
           setAwaitingVoiceReply(true);
-          await new Promise((resolve) => window.setTimeout(resolve, repeatedAssistantSignatureCount >= 2 ? 220 : 120));
+          await new Promise((resolve) => window.setTimeout(resolve, repeatedAssistantSignatureCount >= 2 ? 60 : 10));
         }
       }
     } catch (caught) {
@@ -960,7 +1146,7 @@ export function useRealtimeSession({
           return;
         }
         setRecordingVoiceTurn(false);
-        setAwaitingVoiceReply(true);
+        setAwaitingVoiceReply(autoResponse);
         return;
       }
       if (eventType === "conversation.interrupted") {
@@ -979,6 +1165,9 @@ export function useRealtimeSession({
           return;
         }
         dropPendingVoiceResponsesRef.current = false;
+        if (await handleModeCommand(transcript)) {
+          return;
+        }
         void runCouncilTurn(transcript, "voice");
         return;
       }
@@ -1051,7 +1240,7 @@ export function useRealtimeSession({
         return;
       }
       setRecordingVoiceTurn(false);
-      setAwaitingVoiceReply(true);
+      setAwaitingVoiceReply(autoResponse);
       return;
     }
     if (eventType === "output_audio_buffer.started" || eventType === "response.output_audio.delta") {
@@ -1083,6 +1272,9 @@ export function useRealtimeSession({
       }
       const transcript = String(payload.transcript ?? "").trim();
       if (!transcript) {
+        return;
+      }
+      if (await handleModeCommand(transcript)) {
         return;
       }
       if (councilMode) {
@@ -1329,7 +1521,7 @@ export function useRealtimeSession({
     let localAudioElement: HTMLAudioElement | null = null;
     let localSyntheticCleanup: (() => void) | null = null;
     try {
-      const session = await createRealtimeSession(simulationId, role, citizenId, advisorMode, auditoriumMode);
+      const session = await createRealtimeSession(simulationId, role, citizenId, advisorMode, auditoriumMode, autoResponse);
       if (!generationMatches()) {
         clearPendingRealtimeTransportRefs();
         return;
@@ -1547,6 +1739,12 @@ export function useRealtimeSession({
       return;
     }
     if (councilMode) {
+      if (await handleModeCommand(trimmed)) {
+        return;
+      }
+      if (responseInFlightRef.current || assistantSpeakingRef.current || audioOutputPlayingRef.current) {
+        invalidateCouncilLoop();
+      }
       const requestedMode =
         statusRef.current === "connected" && liveModeRef.current === "voice"
           ? "voice"
@@ -1575,7 +1773,7 @@ export function useRealtimeSession({
           content: [{ type: "input_text", text: trimmed }],
         },
       });
-      if (useVoiceReply) {
+      if (useVoiceReply && autoResponse) {
         activeInputEpochRef.current = voiceEpochRef.current;
         awaitFreshInputRef.current = false;
         dropPendingVoiceResponsesRef.current = false;
@@ -1587,7 +1785,7 @@ export function useRealtimeSession({
             output_modalities: ["audio"],
           },
         });
-      } else {
+      } else if (autoResponse) {
         pendingResponseDeliveryModeRef.current = "text";
         sendEvent({
           type: "response.create",
@@ -1595,6 +1793,8 @@ export function useRealtimeSession({
             output_modalities: ["text"],
           },
         });
+      } else {
+        setAwaitingVoiceReply(false);
       }
       void persistTurns([{ speaker: "user", text: trimmed, mode: "text" }]).catch((caught) => {
         const message = caught instanceof Error ? caught.message : "Failed to sync text turn";
@@ -1651,14 +1851,12 @@ export function useRealtimeSession({
 
   async function toggleVoiceCapture() {
     if (connectionRequestedRef.current && status !== "connected") {
-      disconnect();
       return;
     }
     if (voiceToggleInFlightRef.current) {
       return;
     }
     if (status === "connecting") {
-      disconnect();
       return;
     }
     if (status === "connected" && liveModeRef.current === "voice") {
@@ -1667,10 +1865,6 @@ export function useRealtimeSession({
     }
     await enableVoice();
   }
-
-  useEffect(() => {
-    setEvents(initialTurns);
-  }, [initialTurns]);
 
   useEffect(() => {
     const basePresence: ScenePresence = {
@@ -1724,7 +1918,11 @@ export function useRealtimeSession({
     disconnect();
     setEvents(initialTurns);
     setError(null);
-  }, [advisorMode, citizenId, role, simulationId]);
+  }, [sessionScopeKey]);
+
+  useEffect(() => {
+    setEvents((current) => mergeConversationTurns(current, initialTurns));
+  }, [initialTurns]);
 
   useEffect(() => () => disconnect(), []);
 

@@ -46,8 +46,12 @@ function loadPlaywright() {
 
 async function clickIfVisible(page, label) {
   const button = page.getByRole("button", { name: label }).first();
-  if (await button.count()) {
-    await button.click();
+  if (await button.count() && await button.isVisible().catch(() => false)) {
+    try {
+      await button.click();
+    } catch {
+      await button.click({ force: true });
+    }
     return true;
   }
   return false;
@@ -104,28 +108,60 @@ async function run() {
       await page.waitForTimeout(2200);
     }
 
-    if (await clickIfVisible(page, /War room/i)) {
+    if (await clickIfVisible(page, /^Street$/i)) {
+      notes.push("Moved to street.");
+      await page.waitForTimeout(2200);
+    }
+    if (await clickIfVisible(page, /^War Room$/i)) {
       notes.push("Moved to war room.");
       await page.waitForTimeout(2200);
+    }
+    if (await clickIfVisible(page, /^Intel$/i)) {
+      notes.push("Opened immersive drawer.");
+      await page.waitForTimeout(1200);
+    }
+    if (await clickIfVisible(page, /^Room$/i)) {
+      notes.push("Focused room drawer tab.");
+      await page.waitForTimeout(1200);
+    }
+    const multiAdvisorTab = page.getByRole("button", { name: /^Multi-advisor$/i }).first();
+    if (await multiAdvisorTab.count()) {
+      const selected = await multiAdvisorTab.getAttribute("aria-selected").catch(() => null);
+      if (selected !== "true") {
+          await multiAdvisorTab.click();
+        notes.push("Switched to multi-advisor mode.");
+        await page.waitForTimeout(1400);
+      }
     }
 
     await page.screenshot({ path: path.join(OUT_DIR, "01-room.png") });
 
-    const mic = page.locator(".scene__voice-trigger").first();
-    notes.push(`Initial mic: ${await mic.innerText()}`);
-    await mic.click();
-    await page.waitForFunction(
-      () => document.querySelector(".scene__voice-trigger strong")?.textContent?.includes("Stop"),
-      { timeout: 10000 },
-    ).catch(() => {});
-    await page.waitForTimeout(800);
-    notes.push(`After connect mic: ${await mic.innerText()}`);
-    await page.screenshot({ path: path.join(OUT_DIR, "02-voice-live.png") });
-
-    const input = page.locator(".scene__inline-composer input").first();
+    const drawerTextareas = page.locator(".voice-dock textarea");
+    const drawerCount = await drawerTextareas.count();
+    notes.push(`Drawer composer count: ${drawerCount}`);
+    const inlineInputs = page.locator(".scene__inline-composer input");
+    const inlineCount = await inlineInputs.count();
+    notes.push(`Inline composer count: ${inlineCount}`);
+    const input = drawerCount > 0 ? drawerTextareas.first() : inlineCount > 0 ? inlineInputs.nth(inlineCount - 1) : page.locator(".voice-dock textarea").first();
     await input.fill(PROMPT);
-    await page.locator(".scene__inline-composer button").first().click();
-    await page.waitForTimeout(9000);
+    const drawerSend = page.locator(".voice-dock .btn.btn--primary").first();
+    if (drawerCount > 0 && await drawerSend.count()) {
+      await drawerSend.click();
+    } else {
+      const inlineButtons = page.locator(".scene__inline-composer button");
+      const buttonCount = await inlineButtons.count();
+      notes.push(`Inline send button count: ${buttonCount}`);
+      if (buttonCount > 0) {
+        await inlineButtons.nth(buttonCount - 1).click();
+      } else {
+        await page.getByRole("button", { name: /^Send$/i }).first().click();
+      }
+    }
+    await page.waitForFunction(
+      () => document.querySelectorAll(".voice-log__entry").length >= 2 || Boolean(document.querySelector(".scene-council-floor")),
+      { timeout: 20000 },
+    ).catch(() => {});
+    await page.waitForTimeout(3000);
 
     const floor = await safeText(page.locator(".scene-council-floor"));
     const caption = await safeText(page.locator(".scene__caption p"));
@@ -135,12 +171,7 @@ async function run() {
     notes.push(`Caption: ${caption}`);
     notes.push(`Labels: ${labels.join(" | ")}`);
     notes.push(`Voice entries: ${voiceEntries.join(" || ")}`);
-    await page.screenshot({ path: path.join(OUT_DIR, "03-after-prompt.png") });
-
-    await mic.click();
-    await page.waitForTimeout(2200);
-    notes.push(`After stop mic: ${await mic.innerText()}`);
-    await page.screenshot({ path: path.join(OUT_DIR, "04-stopped.png") });
+    await page.screenshot({ path: path.join(OUT_DIR, "02-after-prompt.png") });
 
     const summary = {
       url: page.url(),

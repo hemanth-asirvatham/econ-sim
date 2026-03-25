@@ -139,7 +139,7 @@ class OpenAIGateway:
                 return
             raise RuntimeError("Image generation returned neither b64_json nor url")
 
-        await asyncio.to_thread(_call)
+        await self._run_with_retries(_call)
 
     async def synthesize(self, *, text: str, output_path: Path) -> None:
         if not self.live:
@@ -154,7 +154,7 @@ class OpenAIGateway:
             )
             return audio.read()
 
-        output_path.write_bytes(await asyncio.to_thread(_call))
+        output_path.write_bytes(await self._run_with_retries(_call))
 
     async def synthesize_bytes(self, *, text: str, voice: str | None = None) -> bytes:
         if not self.live:
@@ -169,7 +169,36 @@ class OpenAIGateway:
             )
             return audio.read()
 
-        return await asyncio.to_thread(_call)
+        return await self._run_with_retries(_call)
+
+    async def _run_with_retries(self, fn, *, attempts: int = 3):
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await asyncio.to_thread(fn)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts - 1 or not self._is_retryable_transport_error(exc):
+                    raise
+                await asyncio.sleep(0.8 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    def _is_retryable_transport_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "broken pipe",
+                "connection",
+                "timeout",
+                "timed out",
+                "temporarily unavailable",
+                "transport",
+                "stream closed",
+                "connection reset",
+            )
+        )
 
     async def transcribe_audio(
         self,

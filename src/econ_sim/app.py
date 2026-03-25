@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import AppSettings, get_settings
@@ -248,6 +249,32 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
     return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
+def resolve_asset_file(asset_path: str, settings: AppSettings, web_dist: Path | None = None) -> Path | None:
+    requested = Path(asset_path)
+    if requested.is_absolute() or ".." in requested.parts:
+        return None
+
+    web_assets = (web_dist or Path("web/dist")) / "assets"
+    for root in (web_assets, settings.runs_dir):
+        candidate = (root / requested).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@app.get("/assets/{asset_path:path}")
+async def get_asset(asset_path: str):
+    settings = get_settings()
+    asset_file = resolve_asset_file(asset_path, settings)
+    if asset_file is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(asset_file)
+
+
 def mount_static_files(fastapi_app: FastAPI, settings: AppSettings) -> None:
     fastapi_app.add_middleware(
         CORSMiddleware,
@@ -256,7 +283,6 @@ def mount_static_files(fastapi_app: FastAPI, settings: AppSettings) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    fastapi_app.mount("/assets", StaticFiles(directory=str(settings.runs_dir)), name="assets")
     web_dist = Path("web/dist")
     if web_dist.exists():
         fastapi_app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="web")

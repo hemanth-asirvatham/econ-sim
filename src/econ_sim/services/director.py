@@ -82,6 +82,8 @@ class SimulationDirector:
         self.orchestrator = orchestrator
         self.realtime_prompts = realtime_prompts
         self._tasks: dict[str, asyncio.Task] = {}
+        self._featurette_tasks: dict[tuple[str, int], asyncio.Task] = {}
+        self._town_hall_tasks: dict[tuple[str, int], asyncio.Task] = {}
 
     def _build_default_config(self) -> SimulationConfig:
         ticket = self.settings.random_candidate_ticket()
@@ -100,7 +102,6 @@ class SimulationDirector:
             topic_lens="",
             premise="",
             stakes="",
-            starting_world_mode="default",
             persona_count=min(self.settings.default_persona_count, 48),
             stage_count=self.settings.max_stage_count,
             visual_style=self.settings.default_visual_style,
@@ -126,7 +127,7 @@ class SimulationDirector:
                 "Make this the Swiss education system, with students, parents, teachers, and cantonal administrators as the core electorate.",
                 "Make this a Texas governor run and focus on grid power, logistics, and local manufacturing.",
                 "Keep the national setup, but make the argument more about AI in schools and public services.",
-                "visual_style: Naturalistic campaign documentary with warm civic interiors and industrial wide shots.",
+                "visual_style: Lyrical civic impressionism with bold brushwork, softened edges, and abstracted industrial and household scenes.",
             ],
         )
 
@@ -155,7 +156,6 @@ class SimulationDirector:
             topic_lens=request.topic_lens or defaults.topic_lens,
             premise=request.premise or defaults.premise,
             stakes=request.stakes or defaults.stakes,
-            starting_world_mode=request.starting_world_mode or defaults.starting_world_mode,
             persona_count=request.persona_count,
             stage_count=request.stage_count,
             visual_style=request.visual_style or defaults.visual_style or self.settings.default_visual_style,
@@ -463,12 +463,15 @@ class SimulationDirector:
                 request.role,
                 None,
                 AdvisorMode.solo,
-                AuditoriumMode.debate,
+                request.auditorium_mode,
             )
-            instructions = self.realtime_prompts.debate_instructions(state, thread_turns)
+            if request.auditorium_mode == AuditoriumMode.town_hall:
+                instructions = self.realtime_prompts.town_hall_instructions(state, thread_turns)
+            else:
+                instructions = self.realtime_prompts.debate_instructions(state, thread_turns)
             tools = self.realtime_prompts.tools_for(request.role)
             selected_voice = state.config.opponent_voice
-            create_response = True
+            create_response = request.auditorium_mode == AuditoriumMode.debate
         else:
             citizens = {citizen.citizen_id: citizen for citizen in current_stage.sample_citizens}
             citizen = citizens.get(request.citizen_id or "")
@@ -484,7 +487,7 @@ class SimulationDirector:
             tools=tools,
             model=state.config.realtime_model,
             voice=selected_voice,
-            create_response=create_response,
+            create_response=request.auto_response if request.auto_response is not None else create_response,
         )
         return RealtimeSessionResponse(
             client_secret=client_secret,
@@ -577,6 +580,7 @@ class SimulationDirector:
         thread_key = self._thread_key(state.active_stage_index, RealtimeRole.advisor, None, AdvisorMode.council)
         prior_turns = list(state.conversation_threads.get(thread_key, []))
         working_turns = prior_turns
+        trailing_advisor_beats = self._trailing_council_advisor_beats(prior_turns)
         input_text = "Continue the council exchange from the latest spoken line."
         if request.continue_dialogue:
             if not prior_turns:
@@ -586,7 +590,10 @@ class SimulationDirector:
                 "React directly to that last spoken line instead of restarting from the president's original prompt. "
                 "Pick the single best next voice unless a second interruption is essential. "
                 "If the room should now wait for the president, set yield_after_turn true and leave advisor text empty. "
-                "If the room is still productively arguing among itself, keep yield_after_turn false and let the strongest reply take the next beat."
+                "If the room is still productively arguing among itself, keep yield_after_turn false and let the strongest reply take the next beat. "
+                f"There have already been {trailing_advisor_beats} advisor beat(s) since the player last spoke. "
+                "If the disagreement is already legible, yield instead of restating the same fight. "
+                "If the player explicitly asked the room to fight it out and the tradeoff is still live, prefer one more genuinely new beat over a rushed summary."
             )
         else:
             user_turn = ConversationTurn(speaker="user", text=text, mode=request.mode)
@@ -596,14 +603,27 @@ class SimulationDirector:
                 "Start the council response from that player turn. "
                 "If the player asked the room to argue it out, let the first advisor beat land and then rely on continuation beats for the rest of the exchange."
             )
+            if self._turn_requests_council_fight(text):
+                input_text += (
+                    " The player explicitly wants an internal argument. "
+                    "Make the first beat substantive, and if a second advisor has the real objection, political warning, or strategic consequence, let that disagreement surface now or in the very next beat."
+                )
+        council_reasoning = (
+            "low"
+            if self.orchestrator.resolve_starting_world_mode(state.config.premise, state.config.topic_lens, state.config.stakes)
+            != "default"
+            or self._turn_requests_council_fight(text)
+            else "none"
+        )
         instructions = self.realtime_prompts.council_turn_generation_instructions(state, working_turns)
         parsed, _ = await self.gateway.parse(
             model=self.settings.debate_model,
             instructions=instructions,
             input_text=input_text,
             text_format=CouncilTurnPlan,
-            reasoning_effort="none",
-            max_output_tokens=1400,
+            reasoning_effort=council_reasoning,
+            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}",
+            max_output_tokens=420,
             verbosity="low",
         )
 
@@ -613,6 +633,7 @@ class SimulationDirector:
         board_notes = self._dedupe_policy_notes(
             [self._normalize_policy_note(note) for note in parsed.board_notes if str(note).strip()]
         )[:4]
+        speaker_order = [turn.speaker_name for turn in assistant_turns if turn.speaker_name]
 
         urgencies = {
             advisor.name: 0 for advisor in COUNCIL_ADVISORS
@@ -620,15 +641,19 @@ class SimulationDirector:
         for beat in parsed.advisors:
             urgencies[beat.name] = max(0, min(10, int(beat.urgency)))
         contrast = [
-            turn.speaker_name
-            for turn in assistant_turns[1:]
-            if turn.speaker_name
-        ]
+            name
+            for name, urgency in sorted(
+                urgencies.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+            if name != parsed.lead and urgency >= max(6, urgencies.get(parsed.lead, 0) - 1)
+        ][:2]
         return CouncilTurnResponse(
             simulation=state,
             thread_key=thread_key,
             lead=parsed.lead,
             urgencies=urgencies,
+            speaker_order=speaker_order,
             contrast=contrast,
             reason=parsed.reason,
             yield_after_turn=parsed.yield_after_turn,
@@ -636,6 +661,66 @@ class SimulationDirector:
             board_notes=board_notes,
             turns=assistant_turns,
         )
+
+    async def _draft_town_hall_question(
+        self,
+        *,
+        state: SimulationState,
+        citizen: CitizenSnapshot,
+        thread_turns: list[ConversationTurn],
+        live_refresh: bool,
+    ) -> tuple[str, str]:
+        fallback_question = self._fallback_town_hall_question(state, citizen)
+        stored_question_raw = " ".join(citizen.town_hall_question.split()).strip()
+        stored_question = self._normalize_town_hall_question_text(
+            stored_question_raw
+        )
+        fallback_question = self._normalize_town_hall_question_text(fallback_question) or fallback_question
+        stored_cue = " ".join(citizen.town_hall_cue.split()).strip()
+        fallback_cue = self._town_hall_pressure_cue(citizen)
+        seed_question = stored_question or fallback_question
+        seed_question_for_prompt = stored_question_raw or seed_question
+        seed_cue = stored_cue or fallback_cue
+        try:
+            instructions = self.realtime_prompts.town_hall_question_generation_instructions(state, citizen, thread_turns)
+            if live_refresh:
+                input_text = (
+                    f"Generate the next audience question from {citizen.display_name}, "
+                    f"{citizen.role} in {citizen.region}.\n"
+                    f"Main pressure from this person's life: {seed_cue}\n"
+                    f"If useful, here is a rough earlier phrasing from the citizen profile: {seed_question_for_prompt}\n"
+                    "Keep the same person and stake, but let the current debate sharpen the exact wording at mic time."
+                )
+            else:
+                input_text = (
+                    f"Write one natural town hall question for {citizen.display_name}, "
+                    f"{citizen.role} in {citizen.region}.\n"
+                    f"Main pressure from this person's life: {seed_cue}\n"
+                    f"If useful, here is a rough earlier phrasing from the citizen profile: {seed_question_for_prompt}\n"
+                    "Keep it grounded in this person's own life. Do not make it sound like a moderator prompt or a debate memo."
+                )
+            parsed, _ = await self.gateway.parse(
+                model=self.settings.debate_model,
+                instructions=instructions,
+                input_text=input_text,
+                text_format=TownHallQuestionDraft,
+                reasoning_effort="low",
+                prompt_cache_key=f"{state.simulation_id}:townhall:{state.active_stage_index}:{citizen.citizen_id}",
+                max_output_tokens=420,
+                verbosity="low",
+            )
+        except Exception:
+            parsed = TownHallQuestionDraft(
+                question=seed_question,
+                cue=seed_cue,
+            )
+        final_question = (
+            self._normalize_town_hall_question_text(str(parsed.question or "").strip())
+            or stored_question
+            or fallback_question
+        )
+        final_cue = self._normalize_town_hall_cue(str(parsed.cue or "").strip() or seed_cue) or seed_cue
+        return final_question, final_cue
 
     async def generate_town_hall_question(
         self,
@@ -646,26 +731,27 @@ class SimulationDirector:
         self._ensure_stage_ready(state)
         stage = state.stages[state.active_stage_index]
         citizen = self._resolve_town_hall_citizen(stage, request.citizen_id)
-        thread_key = self._thread_key(state.active_stage_index, RealtimeRole.debate, None, AdvisorMode.solo, AuditoriumMode.debate)
-        thread_turns = list(state.conversation_threads.get(thread_key, []))
-        instructions = self.realtime_prompts.town_hall_question_generation_instructions(state, citizen, thread_turns)
-        parsed, _ = await self.gateway.parse(
-            model=self.settings.debate_model,
-            instructions=instructions,
-            input_text=(
-                f"Generate the next audience question from {citizen.display_name}, "
-                f"{citizen.role} in {citizen.region}."
-            ),
-            text_format=TownHallQuestionDraft,
-            reasoning_effort="none",
-            max_output_tokens=700,
-            verbosity="low",
+        thread_key = self._thread_key(
+            state.active_stage_index,
+            RealtimeRole.debate,
+            None,
+            AdvisorMode.solo,
+            AuditoriumMode.town_hall,
         )
+        thread_turns = list(state.conversation_threads.get(thread_key, []))
+        final_question, final_cue = await self._draft_town_hall_question(
+            state=state,
+            citizen=citizen,
+            thread_turns=thread_turns,
+            live_refresh=True,
+        )
+        citizen.town_hall_question = final_question
+        citizen.town_hall_cue = final_cue
         question_turn = ConversationTurn(
             speaker="assistant",
             speaker_name=citizen.display_name,
             speaker_voice=citizen.voice,
-            text=parsed.question.strip(),
+            text=final_question,
             mode=request.mode,
         )
         self._append_turns(state, thread_key, [question_turn])
@@ -674,7 +760,7 @@ class SimulationDirector:
         return TownHallQuestionResponse(
             simulation=state,
             thread_key=thread_key,
-            cue=parsed.cue.strip(),
+            cue=final_cue,
             question_turn=question_turn,
         )
 
@@ -696,10 +782,10 @@ class SimulationDirector:
             return RealtimeToolResult(
                 data={
                     "summary": stage.detailed_summary,
-                    "room_briefing": stage.room_briefing,
+                    "room_briefing": stage.authored_room_briefing or stage.room_briefing,
                     "metrics": [metric.model_dump(mode="json") for metric in stage.tracking.as_list()],
                     "tension_points": stage.tension_points,
-                    "policy_axes": stage.suggested_policy_axes,
+                    "policy_axes": stage.authored_policy_axes or stage.suggested_policy_axes,
                     "policy_notes": stage.policy_notes,
                 }
             )
@@ -937,7 +1023,7 @@ class SimulationDirector:
             role_updates = self._auto_role_updates_for_country(config=config, next_config=next_config, updates=updates)
             if role_updates:
                 next_config = next_config.model_copy(update=role_updates)
-        focus_fields = {"country", "region_focus", "topic_lens", "premise"}
+        focus_fields = {"country", "region_focus", "topic_lens"}
         if "population_description" not in updates and focus_fields.intersection(updates):
             current_population = " ".join(str(config.population_description or "").split()).strip()
             if self._looks_generated_population_frame(current_population):
@@ -1128,7 +1214,6 @@ class SimulationDirector:
             "topic_lens": "topic_lens",
             "premise": "premise",
             "stakes": "stakes",
-            "starting_world_mode": "starting_world_mode",
             "persona_count": "persona_count",
             "stage_count": "stage_count",
             "visual_style": "visual_style",
@@ -1173,7 +1258,7 @@ class SimulationDirector:
         existing: str | None = None,
     ) -> str:
         existing_text = " ".join(str(existing or "").split()).strip()
-        focus = " ".join(part for part in [region_focus or "", topic_lens or "", premise or ""] if part).lower()
+        focus = " ".join(part for part in [region_focus or "", topic_lens or ""] if part).lower()
         if existing_text and not self._looks_generated_population_frame(existing_text):
             return existing_text
         if any(keyword in focus for keyword in ("education", "school", "student", "teacher", "municipal", "classroom", "tutoring", "grading", "pupil")):
@@ -1292,6 +1377,7 @@ class SimulationDirector:
                 extra_questions=list(state.queued_poll_questions),
             )
             stage.sample_citizens = self.gabriel_service.pick_sample_citizens(personas, stage=stage)
+            self._backfill_sample_citizen_town_hall_questions(state, stage)
             stage.poll_summaries = poll_summaries
             stage.tracking = tracking
             stage.queued_poll_questions = [item.question for item in state.queued_poll_questions]
@@ -1301,6 +1387,9 @@ class SimulationDirector:
                 poll_summaries=poll_summaries,
                 sample_citizens=stage.sample_citizens,
             )
+            stage.featurettes = []
+            stage.featurettes_status = "queued"
+            stage.featurettes_error = None
             self._decorate_asset_urls(stage)
             state.approval_rating = tracking.approval.value
             state.standard_questions = self.gabriel_service.standard_questions(
@@ -1325,6 +1414,8 @@ class SimulationDirector:
             state.updated_at = utc_now()
             await self._save_personas(simulation_id, personas)
             await self.store.save(state)
+            self._queue_stage_featurettes(simulation_id, stage.index)
+            self._queue_stage_town_hall_questions(simulation_id, stage.index)
         except Exception as exc:  # pragma: no cover - surfaced through API
             state.status = SimulationStatus.error
             state.error = str(exc)
@@ -1374,6 +1465,8 @@ class SimulationDirector:
                 return f"stage:{stage_index}:advisor:council"
             return f"stage:{stage_index}:advisor"
         if role == RealtimeRole.debate:
+            if auditorium_mode == AuditoriumMode.town_hall:
+                return f"stage:{stage_index}:debate:town_hall"
             return f"stage:{stage_index}:debate"
         return f"stage:{stage_index}:citizen:{citizen_id}"
 
@@ -1399,9 +1492,13 @@ class SimulationDirector:
             lead_entry = next((beat for beat in plan.advisors if beat.name == plan.lead and beat.text.strip()), None)
             if lead_entry is not None:
                 selected = [lead_entry]
+        if selected:
+            lead_selection = next((beat for beat in selected if beat.name == plan.lead), None)
+            if lead_selection is not None:
+                selected = [lead_selection, *[beat for beat in selected if beat.name != plan.lead]]
         turns: list[ConversationTurn] = []
-        for beat in selected[:4]:
-            cleaned_text = " ".join(beat.text.split()).strip().strip("\"'“”‘’").strip()
+        for beat in selected[:2]:
+            cleaned_text = self._normalize_council_speech(beat.text)
             if not cleaned_text:
                 continue
             turns.append(
@@ -1414,6 +1511,148 @@ class SimulationDirector:
                 )
             )
         return turns
+
+    def _normalize_council_speech(self, text: str) -> str:
+        cleaned = self._plain_language_cleanup(" ".join(str(text or "").split()).strip()).strip("\"'“”‘’").strip()
+        if not cleaned:
+            return ""
+        cleaned = self._collapse_adjacent_word_repetitions(cleaned)
+        cleaned = re.sub(
+            r"(?<=[a-z0-9])\.\s+([a-z][a-z'-]*)",
+            lambda match: f". {match.group(1)}"
+            if match.group(1).lower() in {"the", "a", "an", "this", "that", "these", "those", "it", "we", "they", "you", "he", "she", "there"}
+            else f", {match.group(1)}",
+            cleaned,
+        )
+        cleaned = re.sub(r"\s*;\s*", ". ", cleaned)
+        cleaned = re.sub(r"\s*[–—]\s*", ". ", cleaned)
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+        sentences = [
+            f"{sentence[:1].upper()}{sentence[1:]}" if sentence and sentence[:1].islower() else sentence
+            for sentence in sentences
+        ]
+        if len(sentences) > 1 and re.match(r"^(the win is|the point is|the upside is|the risk is|the catch is)\b", sentences[1], flags=re.IGNORECASE):
+            cleaned = sentences[0].strip()
+        elif len(sentences) > 1 and len(sentences[0].split()) >= 18 and len(" ".join(sentences).split()) >= 26:
+            cleaned = sentences[0].strip()
+        elif len(sentences) > 2:
+            cleaned = " ".join(sentences[:2]).strip()
+        else:
+            cleaned = " ".join(sentences).strip()
+        words = cleaned.split()
+        if len(words) > 38:
+            first_sentence = sentences[0].strip() if sentences else cleaned
+            if len(first_sentence.split()) <= 38:
+                cleaned = first_sentence
+            else:
+                trimmed_words = first_sentence.split()[:38]
+                while trimmed_words and trimmed_words[-1].lower() in {"a", "an", "the", "and", "or", "to", "of", "for", "with", "in", "on"}:
+                    trimmed_words.pop()
+                cleaned = " ".join(trimmed_words).rstrip(",;:")
+                if "," in cleaned:
+                    comma_clipped = cleaned.rsplit(",", 1)[0].rstrip(",;: ")
+                    if len(comma_clipped.split()) >= 10:
+                        cleaned = comma_clipped
+        cleaned = self._collapse_adjacent_word_repetitions(cleaned.strip())
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
+        return cleaned
+
+    def _collapse_adjacent_word_repetitions(self, text: str) -> str:
+        cleaned = str(text or "")
+        pattern = re.compile(r"\b([A-Za-z][A-Za-z'-]*)\b(\s+\1\b)+", flags=re.IGNORECASE)
+        previous = None
+        while cleaned != previous:
+            previous = cleaned
+            cleaned = pattern.sub(lambda match: match.group(1), cleaned)
+        return cleaned
+
+    def _plain_language_cleanup(self, text: str) -> str:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if not cleaned:
+            return ""
+        replacements = (
+            (r"\bcivic ai accounts\b", "public AI accounts"),
+            (r"\bcivic ai account\b", "public AI account"),
+            (r"\bcivic accounts\b", "public accounts"),
+            (r"\bcivic account\b", "public account"),
+            (r"\bmachine dividends\b", "monthly machine checks"),
+            (r"\bmachine dividend\b", "monthly machine check"),
+            (r"\bservice credits\b", "monthly help credits"),
+            (r"\bservice credit\b", "monthly help credit"),
+            (r"\bpublic ai utilities\b", "public AI systems run like basic services"),
+            (r"\bpublic ai utility\b", "public AI system run like a basic service"),
+        )
+        for pattern, replacement in replacements:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        return " ".join(cleaned.split()).strip()
+
+    def _normalize_town_hall_cue(self, text: str, *, max_chars: int = 132) -> str:
+        cleaned = self._plain_language_cleanup(" ".join(str(text or "").split()).strip()).strip("\"'“”‘’")
+        if not cleaned:
+            return ""
+        cleaned = self._collapse_adjacent_word_repetitions(cleaned)
+        cleaned = re.sub(r"\s*([,;:.!?])", r"\1", cleaned)
+        cleaned = cleaned[:max_chars].rstrip(" ,.;:-")
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
+        return cleaned
+
+    def _normalize_town_hall_question_text(self, text: str) -> str:
+        cleaned = self._plain_language_cleanup(" ".join(str(text or "").split()).strip()).strip("\"'“”‘’")
+        if not cleaned:
+            return ""
+        cleaned = self._collapse_adjacent_word_repetitions(cleaned)
+        cleaned = re.sub(r"\s*([,;:.!?])", r"\1", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        words = cleaned.split()
+        if len(words) > 42:
+            first_sentence = re.split(r"(?<=[?!])\s+|(?<=\.)\s+", cleaned, maxsplit=1)[0].strip()
+            cleaned = first_sentence if len(first_sentence.split()) <= 42 else " ".join(first_sentence.split()[:42]).rstrip(" ,;:.!?")
+        if self._town_hall_question_has_dangling_ending(cleaned):
+            return ""
+        if cleaned and cleaned[-1] not in "?!":
+            cleaned = f"{cleaned}?"
+        return cleaned
+
+    def _town_hall_question_has_dangling_ending(self, text: str) -> bool:
+        stripped = str(text or "").strip().rstrip(".!?")
+        if not stripped:
+            return True
+        if re.search(r"\b(?:can't|cannot|can not|cant)\s+just(?:\s+[A-Za-z'-]+){1,2}$", stripped, flags=re.IGNORECASE):
+            return True
+        if re.search(
+            r"\b(?:once|when|if|while|because)\s+(?:i'm|you're|we're|they're|he's|she's|it's|that's|there's|here's)\s+[A-Za-z'-]+$",
+            stripped,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        tail = stripped.split()[-1].lower()
+        return tail in {
+            "and",
+            "or",
+            "but",
+            "because",
+            "if",
+            "when",
+            "while",
+            "that",
+            "which",
+            "just",
+            "once",
+            "i'm",
+            "you're",
+            "we're",
+            "they're",
+            "he's",
+            "she's",
+            "it's",
+            "that's",
+            "there's",
+            "here's",
+            "using",
+            "stuck",
+        }
 
     def _maybe_apply_council_board_notes(self, stage: StagePackage, board_notes: list[str]) -> list[str]:
         normalized = self._dedupe_policy_notes(
@@ -1430,6 +1669,59 @@ class SimulationDirector:
                 if citizen.citizen_id == citizen_id:
                     return citizen
         return stage.sample_citizens[0]
+
+    def _town_hall_pressure_cue(self, citizen: CitizenSnapshot) -> str:
+        source = (
+            citizen.current_worries
+            or citizen.current_update
+            or citizen.current_hopes
+            or citizen.recent_ai_moment
+            or citizen.summary
+            or citizen.support_label
+        )
+        cleaned = " ".join(str(source or "").split()).strip()
+        if not cleaned:
+            return "One live question from the crowd."
+        return self._normalize_town_hall_cue(cleaned, max_chars=116) or "One live question from the crowd."
+
+    def _fallback_town_hall_question(self, state: SimulationState, citizen: CitizenSnapshot) -> str:
+        source_options = [
+            citizen.current_worries,
+            citizen.current_hopes,
+            citizen.recent_ai_moment,
+            citizen.summary,
+            citizen.current_update,
+            state.stages[state.active_stage_index].main_split,
+            citizen.role,
+        ]
+        cleaned = ""
+        backup = ""
+        for source in source_options:
+            candidate = " ".join(str(source or "").split()).strip().strip("\"'“”‘’")
+            if not candidate:
+                continue
+            candidate = re.split(r"(?<=[.!?])\s+", candidate, maxsplit=1)[0].strip().rstrip(".!?")
+            candidate = candidate.rstrip(".")
+            if not backup:
+                backup = candidate
+            if candidate and not candidate.endswith("..") and "..." not in candidate:
+                cleaned = candidate
+                break
+        if not cleaned:
+            cleaned = backup
+        if not cleaned:
+            return "What does your plan actually do for people like me?"
+        lead = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+        if re.match(r"^(?:i|my|we|our)\b", cleaned, flags=re.IGNORECASE):
+            return self._normalize_town_hall_question_text(f"{lead}. What does your plan do for people like me?")
+        return self._normalize_town_hall_question_text(f"{lead}. What would you do about that?")
+
+    def _backfill_sample_citizen_town_hall_questions(self, state: SimulationState, stage: StagePackage) -> None:
+        for citizen in stage.sample_citizens:
+            question = self._normalize_town_hall_question_text(" ".join(citizen.town_hall_question.split()).strip())
+            citizen.town_hall_question = question or self._fallback_town_hall_question(state, citizen)
+            cue = self._normalize_town_hall_cue(" ".join(citizen.town_hall_cue.split()).strip())
+            citizen.town_hall_cue = cue or self._town_hall_pressure_cue(citizen)
 
     def _turn_signals_policy_commitment(self, text: str) -> bool:
         normalized = " ".join(text.lower().split())
@@ -1456,6 +1748,36 @@ class SimulationDirector:
         if any(cue in normalized for cue in cues):
             return True
         return normalized.startswith(("keep ", "drop ", "remove ", "replace ", "add ", "fund ", "speed ", "open ", "require ", "offer ", "share "))
+
+    def _turn_requests_council_fight(self, text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            return False
+        cues = (
+            "argue it out",
+            "fight it out",
+            "disagree",
+            "debate each other",
+            "debate among yourselves",
+            "have the room debate",
+            "let the room debate",
+            "let them argue",
+            "full council",
+            "where do you disagree",
+            "i want the room to really disagree",
+            "argue about whether",
+        )
+        return any(cue in normalized for cue in cues)
+
+    def _trailing_council_advisor_beats(self, turns: list[ConversationTurn]) -> int:
+        advisor_names = {advisor.name for advisor in COUNCIL_ADVISORS}
+        count = 0
+        for turn in reversed(turns):
+            if turn.speaker == "user":
+                break
+            if turn.speaker == "assistant" and turn.speaker_name in advisor_names:
+                count += 1
+        return count
 
     def _policy_clauses(self, text: str) -> list[str]:
         cleaned = " ".join(text.replace("\n", " ").split())
@@ -1721,6 +2043,152 @@ class SimulationDirector:
                 beat.image_url = self.store.asset_url(Path(beat.image_path))
             if beat.audio_path:
                 beat.audio_url = self.store.asset_url(Path(beat.audio_path))
+        for featurette in stage.featurettes:
+            for beat in featurette.narrative_beats:
+                if beat.image_path:
+                    beat.image_url = self.store.asset_url(Path(beat.image_path))
+                if beat.audio_path:
+                    beat.audio_url = self.store.asset_url(Path(beat.audio_path))
+
+    def _queue_stage_featurettes(self, simulation_id: str, stage_index: int) -> None:
+        key = (simulation_id, stage_index)
+        existing = self._featurette_tasks.get(key)
+        if existing and not existing.done():
+            return
+        self._featurette_tasks[key] = asyncio.create_task(self._prepare_stage_featurettes(simulation_id, stage_index))
+
+    async def _merge_stage_featurettes(
+        self,
+        simulation_id: str,
+        stage_index: int,
+        *,
+        featurettes,
+        featurettes_status: str,
+        featurettes_error: str | None = None,
+    ) -> SimulationState | None:
+        latest = await self.get_simulation(simulation_id)
+        if stage_index >= len(latest.stages):
+            return None
+        stage = latest.stages[stage_index]
+        stage.featurettes = featurettes
+        stage.featurettes_status = featurettes_status
+        stage.featurettes_error = featurettes_error
+        self._decorate_asset_urls(stage)
+        latest.updated_at = utc_now()
+        await self.store.save(latest)
+        return latest
+
+    async def _prepare_stage_featurettes(self, simulation_id: str, stage_index: int) -> None:
+        state = await self.get_simulation(simulation_id)
+        if stage_index >= len(state.stages):
+            return
+        stage = state.stages[stage_index]
+        if stage.featurettes_status == "ready" and stage.featurettes:
+            return
+        await self._merge_stage_featurettes(
+            simulation_id,
+            stage_index,
+            featurettes=[],
+            featurettes_status="generating",
+        )
+        try:
+            featurettes = await self.orchestrator.compose_stage_featurettes(state=state, stage=stage)
+            if not featurettes:
+                await self._merge_stage_featurettes(
+                    simulation_id,
+                    stage_index,
+                    featurettes=[],
+                    featurettes_status="ready",
+                )
+                return
+            for featurette in featurettes:
+                featurette.status = "generating"
+                featurette.error = None
+            await self._merge_stage_featurettes(
+                simulation_id,
+                stage_index,
+                featurettes=featurettes,
+                featurettes_status="generating",
+            )
+            for slot, featurette in enumerate(featurettes):
+                featurette_dir = self.store.asset_dir(simulation_id, stage_index) / "featurettes" / f"{slot + 1:02d}-{featurette.id}"
+                await self.orchestrator.materialize_featurette_media(featurette=featurette, asset_dir=featurette_dir)
+                featurette.status = "ready"
+                await self._merge_stage_featurettes(
+                    simulation_id,
+                    stage_index,
+                    featurettes=featurettes,
+                    featurettes_status="generating",
+                )
+            await self._merge_stage_featurettes(
+                simulation_id,
+                stage_index,
+                featurettes=featurettes,
+                featurettes_status="ready",
+            )
+        except Exception as exc:  # pragma: no cover - best effort background media
+            latest = await self.get_simulation(simulation_id)
+            if stage_index >= len(latest.stages):
+                return
+            stage = latest.stages[stage_index]
+            featurettes = stage.featurettes
+            for featurette in featurettes:
+                if featurette.status != "ready":
+                    featurette.status = "error"
+                    featurette.error = str(exc)
+            stage.featurettes_status = "error"
+            stage.featurettes_error = str(exc)
+            latest.updated_at = utc_now()
+            await self.store.save(latest)
+
+    def _queue_stage_town_hall_questions(self, simulation_id: str, stage_index: int) -> None:
+        key = (simulation_id, stage_index)
+        existing = self._town_hall_tasks.get(key)
+        if existing and not existing.done():
+            return
+        self._town_hall_tasks[key] = asyncio.create_task(self._prepare_stage_town_hall_questions(simulation_id, stage_index))
+
+    async def _prepare_stage_town_hall_questions(self, simulation_id: str, stage_index: int) -> None:
+        state = await self.get_simulation(simulation_id)
+        if stage_index >= len(state.stages):
+            return
+        stage = state.stages[stage_index]
+        if not stage.sample_citizens:
+            return
+
+        semaphore = asyncio.Semaphore(2)
+
+        async def enrich(citizen: CitizenSnapshot) -> None:
+            async with semaphore:
+                fallback_question = self._fallback_town_hall_question(state, citizen)
+                stored_question = " ".join(citizen.town_hall_question.split()).strip()
+                stored_key = self._normalized_text_key(stored_question)
+                fallback_key = self._normalized_text_key(fallback_question)
+                if stored_question and stored_key != fallback_key and citizen.town_hall_cue.strip():
+                    return
+                question, cue = await self._draft_town_hall_question(
+                    state=state,
+                    citizen=citizen,
+                    thread_turns=[],
+                    live_refresh=False,
+                )
+                citizen.town_hall_question = question
+                citizen.town_hall_cue = cue
+
+        try:
+            await asyncio.gather(*(enrich(citizen) for citizen in stage.sample_citizens[:5]))
+        except Exception:
+            return
+
+        latest = await self.get_simulation(simulation_id)
+        if stage_index >= len(latest.stages):
+            return
+        latest_stage = latest.stages[stage_index]
+        for source_citizen, target_citizen in zip(stage.sample_citizens[:5], latest_stage.sample_citizens[:5]):
+            target_citizen.town_hall_question = source_citizen.town_hall_question
+            target_citizen.town_hall_cue = source_citizen.town_hall_cue
+        latest.updated_at = utc_now()
+        await self.store.save(latest)
 
     def _recommend_citizens(self, stage: StagePackage, topic: str) -> list[dict]:
         topic_tokens = {token for token in topic.lower().split() if len(token) > 2}

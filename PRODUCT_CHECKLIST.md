@@ -1,6 +1,6 @@
 # Econ Sim Product Checklist
 
-Updated: 2026-03-20
+Updated: 2026-03-24
 
 Legend:
 - `[ ]` not met yet
@@ -11,13 +11,14 @@ This file is the working product contract for `econ-sim`. It turns the full conv
 
 ## Latest pass notes
 
+- 2026-03-24 current pass: explicit opening-era setup fields are gone from the public contract. The setup chamber now keeps future-setting guidance in natural-language fields like `premise` and `stakes`, while later-settlement openings are inferred internally from that prose instead of being exposed as a separate mode knob or echoed back in setup updates.
 - 2026-03-20 current pass: council `Speak/Stop` no longer tears down the live session. The main scene mic now hot-pauses voice instead of disconnecting, which should reduce reconnect lag and keep solo/council rooms feeling more like one continuous channel.
 - 2026-03-20 current pass: council continuation no longer stops just because the player-proxy urgency spikes. The loop now keeps going until explicit yield, interrupt, mute/room change, or a quiet runaway safety, and repeated identical turns now trigger a replan nudge instead of an immediate shutdown.
 - 2026-03-20 current pass: council speech persistence was taken out of the line-by-line playback path. Spoken advisor lines are now persisted after playback in a batch, which should reduce some of the council latency that came from waiting on backend sync during speech.
 - 2026-03-20 current pass: the public board got another composition pass. The main metric tiles are calmer, the stats wall sits less hard against the left edge, and `LIVE POLLS` now uses a cleaner answer-first card with a compact share badge instead of the old cramped right-side block.
 - 2026-03-20 current pass: centered caption and council-floor overlays were pushed down and slimmed so they compete less directly with the back-wall boards.
 - 2026-03-20 current pass: town hall questions are now persisted server-side into the shared debate thread before the frontend plays them, instead of living first as a stitched local turn. The frontend still injects the spoken audience question into the live debate channel so the active debate session hears it, but the thread is now owned by the backend.
-- 2026-03-20 current pass: radical openings were pushed further. `radical` start mode now jumps straight to the settlement-era end of the phase ladder, the phase description itself is more transformed, and both blueprint/stage prompts now explicitly demand changed social arrangements such as income flow, ownership, staffing, or credentialing rather than a louder 2020s economy.
+- 2026-03-20 current pass: later-settlement openings were pushed further. When the setup prose clearly starts well after the transition, the opening jumps straight to a more transformed settlement frame, and both blueprint/stage prompts explicitly demand changed social arrangements such as income flow, ownership, staffing, or credentialing rather than a louder 2020s economy.
 - 2026-03-20 current pass: documentary beat constraints were loosened slightly so the reel can breathe more like a script and less like compressed caption fragments.
 - 2026-03-20 current pass: targeted validation is clean after these changes. `python -m pytest -q tests/test_director.py tests/test_prompt_quality.py tests/test_gabriel_service.py` and `npm --prefix web run build` both passed again on the current patch set.
 

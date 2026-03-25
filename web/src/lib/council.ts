@@ -15,7 +15,7 @@ export interface CouncilTurnContext {
 
 export const COUNCIL_ADVISORS: CouncilAdvisorSpec[] = [
   { key: "capacity", name: "Rowan", role: "Economic", voice: "cedar" },
-  { key: "households", name: "Leila", role: "Households", voice: "marin" },
+  { key: "innovation", name: "Leila", role: "Innovation", voice: "marin" },
   { key: "politics", name: "Mateo", role: "Politics", voice: "ash" },
   { key: "state", name: "Amina", role: "Security", voice: "shimmer" },
 ];

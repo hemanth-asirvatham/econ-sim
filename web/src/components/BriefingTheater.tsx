@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toAbsoluteAssetUrl } from "../lib/api";
+import { stageRoomBrief } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
 import type { StagePackage } from "../types";
 
@@ -294,7 +295,7 @@ export function BriefingTheater({
               <div className="briefing__cinematic-titlecard">
                 <span className="briefing__eyebrow">Documentary montage</span>
                 <h2>{stage.title}</h2>
-                <p>{stage.montage_logline || stage.room_briefing}</p>
+                <p>{stage.montage_logline || stageRoomBrief(stage)}</p>
               </div>
             ) : null}
             {!showTitleCard ? (
@@ -305,7 +306,7 @@ export function BriefingTheater({
             {readyToEnter && onEnterWarRoom ? (
               <div className="briefing__cinematic-cta">
                 <button className="btn btn--primary" onClick={onEnterWarRoom}>
-                  Head to your advisor
+                  Enter the live room
                 </button>
               </div>
             ) : null}
@@ -322,7 +323,7 @@ export function BriefingTheater({
         <div className="briefing__overlay">
           <span className="briefing__eyebrow">{stage.phase_label}</span>
           <h2>{stage.title}</h2>
-          <p>{stage.room_briefing}</p>
+          <p>{stageRoomBrief(stage)}</p>
           <small className="briefing__voiceover-line">{beat.line}</small>
           <div className="briefing__overlay-actions">
             <button className="btn btn--secondary" onClick={() => void playBeat(activeBeat)} disabled={!audioUrl}>
@@ -338,7 +339,7 @@ export function BriefingTheater({
         </div>
         <div>
           <span className="briefing__label">Command brief</span>
-          <p>{stage.room_briefing}</p>
+          <p>{stageRoomBrief(stage)}</p>
         </div>
         <div>
           <span className="briefing__label">Public pulse</span>

@@ -2,10 +2,13 @@ import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState, 
 import { BriefingTheater } from "./components/BriefingTheater";
 import { CitizenGrid } from "./components/CitizenGrid";
 import { DebateRoom } from "./components/DebateRoom";
+import { FeaturetteShelf } from "./components/FeaturetteShelf";
 import { SetupRoomViewport } from "./components/SetupRoomViewport";
 import { VoiceDock, type VoiceDockHandle } from "./components/VoiceDock";
 import { useSetupRealtimeSession } from "./hooks/useSetupRealtimeSession";
 import type { CouncilTurnContext } from "./lib/council";
+import { featuretteQuestionLabel } from "./lib/featurettes";
+import { stagePolicyAxes, stageRoomBrief } from "./lib/stageText";
 import { countryThemeProfile } from "./lib/themeProfiles";
 import {
   buildCompatibilitySetupSession,
@@ -20,6 +23,7 @@ import {
 import {
   type AdvisorMode,
   type AuditoriumMode,
+  type ConversationTurn,
   makeDefaultSetupDraft,
   trackingList,
   type RoomName,
@@ -52,7 +56,7 @@ const ROOM_BUTTONS: Array<{ key: RoomName; label: string }> = [
   { key: "debate", label: "Auditorium" },
 ];
 
-type DrawerTab = "room" | "intel";
+type DrawerTab = "room" | "intel" | "reels";
 const EMPTY_PRESENCE: ScenePresence = {
   status: "idle",
   liveMode: "text",
@@ -83,6 +87,17 @@ function queueAfterPaint(callback: () => void) {
   window.requestAnimationFrame(() => {
     window.setTimeout(callback, 80);
   });
+}
+
+function focusableElements(container: HTMLElement | null) {
+  if (!container) {
+    return [] as HTMLElement[];
+  }
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hasAttribute("aria-hidden") && element.offsetParent !== null);
 }
 
 function sanitizeLoadingQuote(text: string, maxChars = 132) {
@@ -127,7 +142,36 @@ function formatLoadingAttribution(...parts: Array<string | undefined>) {
     .join(" · ");
 }
 
-const CHAMBER_ATTRIBUTION = "The chamber";
+function liveRoomHeading(room: RoomName, advisorMode: AdvisorMode, auditoriumMode: AuditoriumMode) {
+  if (room === "advisor") {
+    return advisorMode === "council" ? "Multi-advisor table" : "Chief advisor room";
+  }
+  if (room === "citizens") {
+    return "Street interviews";
+  }
+  if (room === "debate") {
+    return auditoriumMode === "town_hall" ? "Town hall floor" : "Debate stage";
+  }
+  return "Chapter briefing";
+}
+
+function parseRequestedRoom(value: string | null): RoomName | null {
+  return value === "briefing" || value === "advisor" || value === "citizens" || value === "debate" ? value : null;
+}
+
+function requestedRoomFromModeQuery(params: URLSearchParams): RoomName | null {
+  const explicitRoom = parseRequestedRoom(params.get("room"));
+  if (explicitRoom) {
+    return explicitRoom;
+  }
+  if (params.get("auditorium")) {
+    return "debate";
+  }
+  if (params.get("advisor")) {
+    return "advisor";
+  }
+  return null;
+}
 
 function summarizePollTakeaway(summary: StagePackage["poll_summaries"][number]) {
   const top = Object.entries(summary.shares ?? {}).sort((left, right) => right[1] - left[1])[0];
@@ -328,12 +372,20 @@ function simulationUrl(simulationId: string, advisorMode: AdvisorMode, auditoriu
   const params = new URLSearchParams();
   params.set("sim", simulationId);
   if (advisorMode === "council") {
-    params.set("advisor", "council");
+    params.set("advisor", "multi");
   }
   if (auditoriumMode === "town_hall") {
     params.set("auditorium", "town_hall");
   }
   return `?${params.toString()}`;
+}
+
+function parseStoredAdvisorMode(value: string | null): AdvisorMode {
+  return value === "council" || value === "multi" ? "council" : "solo";
+}
+
+function advisorModeSlug(mode: AdvisorMode) {
+  return mode === "council" ? "multi" : "solo";
 }
 
 function simulationUpdatedAtMs(simulation?: SimulationState | null) {
@@ -342,6 +394,20 @@ function simulationUpdatedAtMs(simulation?: SimulationState | null) {
   }
   const parsed = Date.parse(simulation.updated_at);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeThreadTurns(...groups: Array<readonly ConversationTurn[]>) {
+  const merged = new Map<string, ConversationTurn>();
+  for (const group of groups) {
+    for (const turn of group) {
+      if (!turn) {
+        continue;
+      }
+      const existing = merged.get(turn.id);
+      merged.set(turn.id, existing ? { ...existing, ...turn } : turn);
+    }
+  }
+  return [...merged.values()].sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
 }
 
 export default function App() {
@@ -363,10 +429,10 @@ export default function App() {
       return "solo";
     }
     const queryValue = new URLSearchParams(window.location.search).get("advisor");
-    if (queryValue === "council" || queryValue === "solo") {
-      return queryValue;
+    if (queryValue) {
+      return parseStoredAdvisorMode(queryValue);
     }
-    return window.localStorage.getItem("econ-sim-advisor-mode") === "council" ? "council" : "solo";
+    return parseStoredAdvisorMode(window.localStorage.getItem("econ-sim-advisor-mode"));
   });
   const [auditoriumMode, setAuditoriumMode] = useState<AuditoriumMode>(() => {
     if (typeof window === "undefined") {
@@ -387,6 +453,12 @@ export default function App() {
   const [setupDetailsOpen, setSetupDetailsOpen] = useState(false);
   const [panelsOpen, setPanelsOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>("room");
+  const [reelsOpen, setReelsOpen] = useState(false);
+  const [reelsRequestedFeaturetteId, setReelsRequestedFeaturetteId] = useState<string | null>(null);
+  const queryRequestedRoomRef = useRef<RoomName | null>(
+    typeof window === "undefined" ? null : requestedRoomFromModeQuery(new URLSearchParams(window.location.search)),
+  );
+  const honorQueryRequestedRoomRef = useRef(Boolean(queryRequestedRoomRef.current));
   const [showCinematicIntro, setShowCinematicIntro] = useState(false);
   const [sceneTextOpen, setSceneTextOpen] = useState(false);
   const [sceneTextDraft, setSceneTextDraft] = useState("");
@@ -412,6 +484,9 @@ export default function App() {
   const setupLaunchInFlightRef = useRef<string | null>(null);
   const initialBootRef = useRef(false);
   const setupComposerRef = useRef<HTMLInputElement | null>(null);
+  const reelsOverlayRef = useRef<HTMLDivElement | null>(null);
+  const reelsCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const reelsLastFocusRef = useRef<HTMLElement | null>(null);
 
   const stage = simulation?.stages[simulation.active_stage_index];
   const setupRealtime = useSetupRealtimeSession({
@@ -457,6 +532,21 @@ export default function App() {
     (setupRealtime.liveMode === "voice" &&
       (setupRealtime.presence.voicePhase === "waiting" || setupRealtime.presence.voicePhase === "responding"));
   const citizens = stage?.sample_citizens ?? [];
+  const currentStageRoomBrief = stageRoomBrief(stage);
+  const currentStageAxes = stagePolicyAxes(stage, 4);
+  const readyFeaturetteCount = stage?.featurettes.filter((featurette) => featurette.status === "ready").length ?? 0;
+  const featurettesPending = stage
+    ? Boolean(simulation && simulation.status === "stage_ready" && stage.featurettes_status !== "ready" && stage.featurettes_status !== "error")
+    : false;
+  const displayedFeaturettes = stage?.featurettes ?? [];
+  const playableFeaturettes = useMemo(
+    () =>
+      displayedFeaturettes.filter(
+        (featurette) => featurette.status === "ready" && Boolean(featurette.narrative_beats?.length),
+      ),
+    [displayedFeaturettes],
+  );
+  const hasPlayableFeaturettes = playableFeaturettes.length > 0;
   const activeCitizen = citizens.find((citizen) => citizen.citizen_id === activeCitizenId);
   const candidateCitizen = citizens.find((citizen) => citizen.citizen_id === streetCandidateCitizenId);
   const citizenFocusLocked = isCitizenFocusLocked(scenePresence.citizens);
@@ -482,29 +572,45 @@ export default function App() {
         : undefined,
     [advisorPolicyNotes, stage],
   );
-  const debateThreadKey = simulation ? `stage:${simulation.active_stage_index}:debate` : "";
-  const coreDebateTurns = useMemo(
-    () => simulation?.conversation_threads[debateThreadKey] ?? [],
-    [debateThreadKey, simulation?.conversation_threads],
+  const debateStageThreadKey = simulation ? `stage:${simulation.active_stage_index}:debate` : "";
+  const townHallThreadKey = simulation ? `stage:${simulation.active_stage_index}:debate:town_hall` : "";
+  const debateStageTurns = useMemo(
+    () => simulation?.conversation_threads[debateStageThreadKey] ?? [],
+    [debateStageThreadKey, simulation?.conversation_threads],
   );
-  const debateTurns = coreDebateTurns;
+  const townHallTurns = useMemo(
+    () => simulation?.conversation_threads[townHallThreadKey] ?? [],
+    [simulation?.conversation_threads, townHallThreadKey],
+  );
+  const combinedAuditoriumTurns = useMemo(
+    () => mergeThreadTurns(debateStageTurns, townHallTurns),
+    [debateStageTurns, townHallTurns],
+  );
+  const debateTurns = auditoriumMode === "town_hall" ? townHallTurns : debateStageTurns;
   const debatePlayerTurns = useMemo(
-    () => coreDebateTurns.filter((turn) => turn.speaker === "user").map((turn) => turn.text.trim()).filter(Boolean),
-    [coreDebateTurns],
+    () => combinedAuditoriumTurns.filter((turn) => turn.speaker === "user").map((turn) => turn.text.trim()).filter(Boolean),
+    [combinedAuditoriumTurns],
   );
   const debatePlayerCase = useMemo(() => debatePlayerTurns.join("\n\n"), [debatePlayerTurns]);
   const debatePolicyLines = useMemo(() => extractDebatePolicyLines(debatePlayerTurns), [debatePlayerTurns]);
-  const latestDebatePlayerTurn = debatePlayerTurns.at(-1) ?? "";
+  const latestDebatePlayerTurn = useMemo(
+    () =>
+      [...debateTurns]
+        .reverse()
+        .find((turn) => turn.speaker === "user" && turn.text.trim())
+        ?.text.trim() ?? debatePlayerTurns.at(-1) ?? "",
+    [debatePlayerTurns, debateTurns],
+  );
   const debatePlatform = useMemo(
     () =>
       debatePolicyLines.length > 0
         ? debatePolicyLines.join("\n")
         : debatePlayerCase.trim()
-          ? debatePlayerCase
+        ? debatePlayerCase
         : advisorPolicyNotes.length > 0
           ? advisorPolicyNotes.join("\n")
-          : (stage?.suggested_policy_axes ?? []).slice(0, 4).join("\n"),
-    [advisorPolicyNotes, debatePlayerCase, debatePolicyLines, stage?.suggested_policy_axes],
+          : currentStageAxes.join("\n"),
+    [advisorPolicyNotes, currentStageAxes, debatePlayerCase, debatePolicyLines],
   );
   const debateBoardNotes = useMemo(
     () =>
@@ -652,79 +758,16 @@ export default function App() {
     const sourceStage = previousResolvedStage ?? stage;
     const quoteEntries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> = [];
     const noteEntries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> = [];
-    const tutorialQuoteEntries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> =
-      previousResolvedStage
-        ? []
-        : [
-            {
-              kind: "quote",
-              label: "Opening frame",
-              text: "Start with the frontier: what can AI now do across ordinary computer work, what still needs people, and what part of life just got easier?",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Room loop",
-              text: "The loop is simple: hear the reel, shape a short agenda, pressure-test it on the street, then defend it in the debate.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Street read",
-              text: "Use the street for lived reality. Ask what changed in someone’s week before you ask what policy they want.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Board discipline",
-              text: "Keep only a few debate-worthy ideas. If a plank cannot be said plainly out loud, cut it.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Vote test",
-              text: "The debate is the vote test. People judge what you defend, what you protect, and whether you admit a real limit.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Keep the gains",
-              text: "Do not only ask what to slow down. Ask what benefit people already use and would hate to lose.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-            {
-              kind: "quote",
-              label: "Macro first",
-              text: "Do not get trapped in office friction. Look for what got cheaper, broader, smarter, or newly possible across the economy and daily life.",
-              attribution: CHAMBER_ATTRIBUTION,
-            },
-          ];
-    const tutorialNoteEntries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> =
-      previousResolvedStage
-        ? []
-        : [
-            {
-              kind: "note",
-              label: "How play works",
-              text: "Hear the reel, workshop a short agenda with advisors, test it against citizens, debate, then face the vote.",
-            },
-            {
-              kind: "note",
-              label: "Capability first",
-              text: "Get clear on what AI can now do on a computer, what still needs people, and what still gets stuck in the physical world.",
-            },
-            {
-              kind: "note",
-              label: "What usually wins",
-              text: "Voters mostly judge what you defend in the debate, whether it matches lived conditions, and whether you keep the useful gains while handling the strain.",
-            },
-            {
-              kind: "note",
-              label: "Good first question",
-              text: "A strong opening question is simple: what can AI really do now, what still needs people, and who already wants more of it?",
-            },
-          ];
+    const seenQuotes = new Set<string>();
     const seenNotes = new Set<string>();
+    const pushQuote = (label: string, rawText?: string, attribution?: string) => {
+      const trimmed = sanitizeLoadingQuote(rawText ?? "", 132);
+      if (!trimmed || seenQuotes.has(`${label}:${trimmed}:${attribution ?? ""}`)) {
+        return;
+      }
+      seenQuotes.add(`${label}:${trimmed}:${attribution ?? ""}`);
+      quoteEntries.push({ kind: "quote", label, text: trimmed, attribution });
+    };
     const pushNote = (label: string, rawText?: string) => {
       const trimmed = sanitizeLoadingQuote(rawText ?? "", 132);
       if (!trimmed || seenNotes.has(`${label}:${trimmed}`)) {
@@ -733,6 +776,9 @@ export default function App() {
       seenNotes.add(`${label}:${trimmed}`);
       noteEntries.push({ kind: "note", label, text: trimmed });
     };
+    pushNote("Documentary reel", sourceStage?.montage_logline);
+    pushNote("War room brief", stageRoomBrief(sourceStage));
+    pushNote("State of world", sourceStage?.state_of_world);
     pushNote("Capability now", sourceStage?.capability_frontier_now);
     for (const indicator of sourceStage?.economic_indicators.slice(0, 2) ?? []) {
       pushNote("Economic read", indicator);
@@ -741,118 +787,32 @@ export default function App() {
     pushNote("Still hard", sourceStage?.still_hard_now);
     pushNote("Physical bottleneck", sourceStage?.physical_world_status);
     pushNote("Main split", sourceStage?.main_split);
+    for (const beat of sourceStage?.narrative_beats.slice(0, 3) ?? []) {
+      pushNote("Documentary line", beat.line);
+    }
     for (const quote of loadingVoiceStrips) {
       if (quote.text) {
-        quoteEntries.push({
-          kind: "quote",
-          label: "Voice from the country",
-          text: quote.text,
-          attribution: quote.attribution,
-        });
+        pushQuote("Voice from the country", quote.text, quote.attribution);
       }
     }
-    const allQuoteEntries = quoteEntries.length > 0 ? [...quoteEntries, ...tutorialQuoteEntries] : [...tutorialQuoteEntries, ...quoteEntries];
-    const allNoteEntries = [...tutorialNoteEntries, ...noteEntries];
-    if (allQuoteEntries.length === 0 && allNoteEntries.length === 0) {
-      quoteEntries.push(
-        {
-          kind: "quote",
-          label: "Game guide",
-          text: "Start broad: what can AI reliably do now, what still needs people, and which gains people would fight to keep.",
-        },
-        {
-          kind: "quote",
-          label: "Game guide",
-          text: "Use the advisor room to shape only a few defendable ideas, then use the street to test them against lived reality.",
-        },
-        {
-          kind: "quote",
-          label: "Game guide",
-          text: "The debate decides the election, so keep one gain, one strain, and one honest limit in view.",
-        },
-        {
-          kind: "note",
-          label: "Macro first",
-          text: "Keep one eye on the whole country: what AI can now do, what stayed expensive or scarce, and why adoption is still spreading anyway.",
-        },
-        {
-          kind: "quote",
-          label: "Game guide",
-          text: "Do not assume every pressure needs a brake. Sometimes the right move is to widen a gain, watch one signal, and wait.",
-        },
+    if (quoteEntries.length === 0 && noteEntries.length === 0 && simulation) {
+      pushNote("Country", simulation.config.country);
+      pushNote(
+        "Lens",
+        [simulation.config.region_focus, simulation.config.topic_lens].filter((value) => value && value.trim()).join(" · "),
       );
-      noteEntries.push(
-        {
-          kind: "note",
-          label: "How play works",
-          text: "Hear the reel, workshop a short agenda with advisors, test it against citizens, return if needed, debate, then face the vote.",
-        },
-        {
-          kind: "note",
-          label: "What to ask",
-          text: "Good first questions are simple: what can AI really do now, what still needs people, and who already wants more of it?",
-        },
-        {
-          kind: "note",
-          label: "Listen wide",
-          text: "Some citizens will mainly notice relief, convenience, or not much yet. Others will feel strain first. The country is not one voice.",
-        },
-        {
-          kind: "note",
-          label: "Capability check",
-          text: "Ask what the systems can now do reliably on a computer, what still needs judgment or trust, and what still gets stuck in the physical world.",
-        },
-        {
-          kind: "note",
-          label: "Use the board",
-          text: "Use the board to keep a short agenda. If you cannot explain an idea plainly in the debate, it probably does not belong there.",
-        },
-        {
-          kind: "note",
-          label: "Hidden upside",
-          text: "Ask what people are quietly glad about, not only what they fear. A strong policy often starts by protecting a benefit people do not want to lose.",
-        },
-        {
-          kind: "note",
-          label: "Debate test",
-          text: "A good platform names one gain to protect, one strain to handle, and one thing you still would not overclaim.",
-        },
-        {
-          kind: "note",
-          label: "Poll for surprises",
-          text: "Polls are for surprises, not decoration. Ask what people can newly do, what still feels unfair, and what they want kept open.",
-        },
-        {
-          kind: "note",
-          label: "Street strategy",
-          text: "When you head to the street, ask people what AI is actually doing in their work, bills, school, care, or routines before asking what policy they want.",
-        },
-        {
-          kind: "note",
-          label: "How to win",
-          text: "Voters mostly judge what you defend in the debate, whether it matches lived conditions, and whether your lane keeps the useful gains while handling the strain.",
-        },
-        {
-          kind: "note",
-          label: "Best street question",
-          text: "Ask people what AI actually changed in their life this week. The strongest interviews start from one routine, bill, shortcut, or frustration.",
-        },
-        {
-          kind: "note",
-          label: "Good skepticism",
-          text: "Do not treat every impressive demo as economy-wide change. Ask what is real, what scales, and what still depends on scarce people or infrastructure.",
-        },
-        {
-          kind: "note",
-          label: "Capability lens",
-          text: "Before you argue about policy, get clear on the frontier: what the tools can actually do, what they still fail at, and who now depends on them.",
-        },
-      );
+      pushNote("Premise", simulation.config.premise);
+      pushNote("Stakes", simulation.config.stakes);
+      pushNote("Transition", simulation.progress.label);
+    }
+    if (quoteEntries.length === 0 && noteEntries.length === 0) {
+      pushNote("Transition", "The next chapter is being assembled from the current run.");
+      pushNote("Status", simulation?.progress.label ?? "Writing the world.");
     }
     const entries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> = [];
     const maxLength = 12;
-    const effectiveQuotes = allQuoteEntries.length > 0 ? allQuoteEntries : quoteEntries;
-    const effectiveNotes = allNoteEntries.length > 0 ? allNoteEntries : noteEntries;
+    const effectiveQuotes = quoteEntries;
+    const effectiveNotes = noteEntries;
     if (effectiveQuotes.length > 0) {
       entries.push(...effectiveQuotes.slice(0, maxLength));
     } else {
@@ -863,7 +823,7 @@ export default function App() {
       entries.push(...remainingNotes.slice(0, maxLength - entries.length));
     }
     return entries.slice(0, maxLength);
-  }, [loadingVoiceStrips, previousResolvedStage, stage]);
+  }, [loadingVoiceStrips, previousResolvedStage, simulation, stage]);
   const stageKey = simulation && stage ? `${simulation.simulation_id}:${stage.index}:${stage.generated_at}` : null;
   const showLoadingStage = Boolean(simulation) && (resolvingStage || !stage || simulation.status !== "stage_ready" || stageGate === "ready");
   const readyForNextEra = Boolean(simulation && stage && simulation.status === "stage_ready" && stageGate === "ready");
@@ -883,7 +843,9 @@ export default function App() {
                 : simulation?.progress.phase === "polling"
                   ? "Reading the country"
                   : (simulation?.progress.label ?? "Transition");
-  const showLiveTopbar = Boolean(simulation && !showCinematicIntro && !showLoadingStage && room === "briefing");
+  const showLiveTopbar = Boolean(simulation && !showCinematicIntro && !showLoadingStage && !reelsOpen);
+  const liveTopbarHeading = stage ? liveRoomHeading(room, advisorMode, auditoriumMode) : "Chapter briefing";
+  const liveTopbarSubhead = stage ? `${stage.title} · ${stage.phase_label}` : simulation?.config.title ?? "AGI Transition Command";
   const visibleLoadingHighlights = useMemo(
     () => loadingHighlights.slice(0, 2),
     [loadingHighlights],
@@ -925,7 +887,11 @@ export default function App() {
         if (simulationId) {
           const loaded = await getSimulation(simulationId);
           setSimulation(loaded);
-          setRoom(loaded.current_room);
+          const requestedRoom =
+            honorQueryRequestedRoomRef.current
+              ? requestedRoomFromModeQuery(params) ?? queryRequestedRoomRef.current
+              : null;
+          setRoom(requestedRoom ?? loaded.current_room);
           if (loaded.focused_citizen_id) {
             setActiveCitizenId(loaded.focused_citizen_id);
           }
@@ -946,13 +912,21 @@ export default function App() {
       return;
     }
     introducedStageRef.current = stageKey;
+    const params = new URLSearchParams(window.location.search);
+    const directLive = params.get("view") === "live";
+    const requestedRoom = honorQueryRequestedRoomRef.current
+      ? requestedRoomFromModeQuery(params) ?? queryRequestedRoomRef.current
+      : null;
+    const defaultLiveRoom = directLive
+      ? (simulation.current_room === "briefing" ? "advisor" : simulation.current_room)
+      : simulation.current_room;
     setShowCinematicIntro(false);
-    setStageGate("ready");
+    setStageGate(directLive ? "live" : "ready");
     setPanelsOpen(false);
     setDrawerTab("room");
     setSceneTextOpen(false);
     setSceneTextDraft("");
-    setRoom(simulation.current_room);
+    setRoom(requestedRoom ?? defaultLiveRoom);
   }, [simulation, stage, stageKey]);
 
   useEffect(() => {
@@ -961,11 +935,11 @@ export default function App() {
   }, [themeMode]);
 
   useEffect(() => {
-    window.localStorage.setItem("econ-sim-advisor-mode", advisorMode);
+    window.localStorage.setItem("econ-sim-advisor-mode", advisorModeSlug(advisorMode));
     window.localStorage.setItem("econ-sim-auditorium-mode", auditoriumMode);
     const url = new URL(window.location.href);
     if (advisorMode === "council") {
-      url.searchParams.set("advisor", "council");
+      url.searchParams.set("advisor", advisorModeSlug(advisorMode));
     } else {
       url.searchParams.delete("advisor");
     }
@@ -1004,9 +978,12 @@ export default function App() {
     const timer = window.setInterval(async () => {
       try {
         const latest = await getSimulation(simulation.simulation_id);
+        const requestedRoom = honorQueryRequestedRoomRef.current
+          ? requestedRoomFromModeQuery(new URLSearchParams(window.location.search)) ?? queryRequestedRoomRef.current
+          : null;
         startTransition(() => {
           setSimulation(latest);
-          setRoom(latest.current_room);
+          setRoom(requestedRoom ?? latest.current_room);
           if (latest.focused_citizen_id) {
             setActiveCitizenId(latest.focused_citizen_id);
           }
@@ -1017,6 +994,84 @@ export default function App() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [simulation]);
+
+  useEffect(() => {
+    if (!simulation || !stage || simulation.status !== "stage_ready" || !featurettesPending) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      refreshSimulationSnapshot(0);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [featurettesPending, simulation, stage]);
+
+  useEffect(() => {
+    if (!stage || showLoadingStage || showCinematicIntro) {
+      setReelsOpen(false);
+      setReelsRequestedFeaturetteId(null);
+    }
+  }, [showCinematicIntro, showLoadingStage, stage]);
+
+  useEffect(() => {
+    if (!reelsOpen) {
+      return;
+    }
+    const previousOverflow = document.body.style.overflow;
+    reelsLastFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setReelsOpen(false);
+        setReelsRequestedFeaturetteId(null);
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusables = focusableElements(reelsOverlayRef.current);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        reelsOverlayRef.current?.focus();
+        return;
+      }
+      const activeElement = document.activeElement as HTMLElement | null;
+      const currentIndex = activeElement ? focusables.indexOf(activeElement) : -1;
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0
+          ? focusables.length - 1
+          : currentIndex - 1
+        : currentIndex === -1 || currentIndex >= focusables.length - 1
+          ? 0
+          : currentIndex + 1;
+      event.preventDefault();
+      focusables[nextIndex]?.focus();
+    };
+    const focusTimer = window.setTimeout(() => {
+      (reelsCloseButtonRef.current ?? focusableElements(reelsOverlayRef.current)[0] ?? reelsOverlayRef.current)?.focus();
+    }, 0);
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+      reelsLastFocusRef.current?.focus();
+      reelsLastFocusRef.current = null;
+    };
+  }, [reelsOpen]);
+
+  useEffect(() => {
+    if (!reelsOpen) {
+      return;
+    }
+    const focusables = focusableElements(reelsOverlayRef.current);
+    if (focusables.length === 0) {
+      reelsOverlayRef.current?.focus();
+      return;
+    }
+    if (!focusables.includes(document.activeElement as HTMLElement)) {
+      (reelsCloseButtonRef.current ?? focusables[0])?.focus();
+    }
+  }, [reelsOpen, reelsRequestedFeaturetteId, stage?.featurettes, stage?.index]);
 
   useEffect(() => {
     if (!showLoadingStage || loadingDeck.length <= 1) {
@@ -1215,6 +1270,10 @@ export default function App() {
 
   function handleSimulationSync(updated: SimulationState) {
     const currentSimulation = simulationRef.current;
+    const requestedRoom = honorQueryRequestedRoomRef.current
+      ? requestedRoomFromModeQuery(new URLSearchParams(window.location.search)) ?? queryRequestedRoomRef.current
+      : null;
+    const nextRoom = requestedRoom ?? updated.current_room;
     if (
       currentSimulation &&
       currentSimulation.simulation_id === updated.simulation_id &&
@@ -1222,33 +1281,33 @@ export default function App() {
     ) {
       return;
     }
-    if (updated.current_room !== (currentSimulation?.current_room ?? room)) {
+    if (nextRoom !== (currentSimulation?.current_room ?? room)) {
       disconnectLiveChannels();
     }
     startTransition(() => {
       setSimulation(updated);
-      setRoom(updated.current_room);
+      setRoom(nextRoom);
       setShowCinematicIntro(false);
       setStageGate((current) => {
         if (updated.status !== "stage_ready") {
           return "loading";
         }
-        if (current === "intro" && updated.current_room === "briefing") {
+        if (current === "intro" && nextRoom === "briefing") {
           return "intro";
         }
-        if (updated.current_room === "briefing" && current !== "live") {
+        if (nextRoom === "briefing" && current !== "live") {
           return "ready";
         }
         return "live";
       });
-      if (updated.current_room !== "briefing") {
+      if (nextRoom !== "briefing") {
         setSceneTextOpen(false);
       }
       if (updated.focused_citizen_id) {
         setActiveCitizenId(updated.focused_citizen_id);
-        setStreetCandidateCitizenId(updated.current_room === "citizens" ? updated.focused_citizen_id : undefined);
+        setStreetCandidateCitizenId(nextRoom === "citizens" ? updated.focused_citizen_id : undefined);
       }
-      if (updated.current_room !== "citizens") {
+      if (nextRoom !== "citizens") {
         setStreetCandidateCitizenId(undefined);
       }
     });
@@ -1288,10 +1347,42 @@ export default function App() {
     }, delayMs);
   }
 
-  async function handleRoomFocus(nextRoom: RoomName, citizenId?: string) {
+  function queuePostTurnRefreshes() {
+    refreshSimulationSnapshot(1200);
+    refreshSimulationSnapshot(3600);
+    if (featurettesPending) {
+      refreshSimulationSnapshot(7800);
+    }
+  }
+
+  function openReelsSurface(requestedFeaturetteId: string | null = null) {
+    if (!stage) {
+      return;
+    }
+    if (hasPlayableFeaturettes) {
+      setReelsRequestedFeaturetteId(requestedFeaturetteId);
+      setReelsOpen(true);
+      setPanelsOpen(false);
+      return;
+    }
+    setReelsRequestedFeaturetteId(null);
+    setReelsOpen(false);
+    setDrawerTab("reels");
+    setPanelsOpen(true);
+  }
+
+  async function handleRoomFocus(
+    nextRoom: RoomName,
+    citizenId?: string,
+    options?: {
+      nextAuditoriumMode?: AuditoriumMode;
+    },
+  ) {
     if (!simulation) {
       return;
     }
+    honorQueryRequestedRoomRef.current = false;
+    const effectiveAuditoriumMode = options?.nextAuditoriumMode ?? auditoriumMode;
     const focusedCitizenId =
       nextRoom === "citizens"
         ? citizenId ?? candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id ?? simulation.focused_citizen_id ?? citizens[0]?.citizen_id
@@ -1301,7 +1392,10 @@ export default function App() {
     setStageGate("live");
     setSceneTextOpen(false);
     setSceneTextDraft("");
-    if (panelsOpen) {
+    if (nextRoom === "debate" && effectiveAuditoriumMode === "town_hall") {
+      setPanelsOpen(true);
+      setDrawerTab("room");
+    } else if (panelsOpen) {
       setDrawerTab("room");
     }
     if (nextRoom !== "citizens") {
@@ -1352,15 +1446,112 @@ export default function App() {
   }
 
   function toggleAdvisorMode() {
+    setAdvisorRoomMode(advisorMode === "solo" ? "council" : "solo");
+  }
+
+  function setAdvisorRoomMode(nextMode: AdvisorMode) {
+    if (nextMode === advisorMode) {
+      return;
+    }
+    honorQueryRequestedRoomRef.current = false;
     advisorDockRef.current?.disconnect();
     handlePresenceChange("advisor", EMPTY_PRESENCE);
-    setAdvisorMode((current) => (current === "solo" ? "council" : "solo"));
+    setAdvisorMode(nextMode);
   }
 
   function toggleAuditoriumMode() {
+    setAuditoriumRoomMode(auditoriumMode === "debate" ? "town_hall" : "debate");
+  }
+
+  function setAuditoriumRoomMode(nextMode: AuditoriumMode) {
+    if (nextMode === auditoriumMode) {
+      return;
+    }
+    honorQueryRequestedRoomRef.current = false;
     debateDockRef.current?.disconnect();
     handlePresenceChange("debate", EMPTY_PRESENCE);
-    setAuditoriumMode((current) => (current === "debate" ? "town_hall" : "debate"));
+    if (nextMode === "town_hall") {
+      setPanelsOpen(true);
+      setDrawerTab("room");
+    }
+    setAuditoriumMode(nextMode);
+  }
+
+  async function handleModeCommand(command: {
+    room?: RoomName;
+    advisorMode?: AdvisorMode;
+    auditoriumMode?: AuditoriumMode;
+    citizenName?: string;
+  }) {
+    if (!simulation) {
+      return false;
+    }
+    if (command.advisorMode) {
+      setAdvisorRoomMode(command.advisorMode);
+    }
+    if (command.auditoriumMode) {
+      setAuditoriumRoomMode(command.auditoriumMode);
+    }
+    if (command.citizenName) {
+      try {
+        disconnectLiveChannels();
+        const result = await callRealtimeTool(simulation.simulation_id, "advisor", "focus_citizen_by_name", {
+          citizen_name: command.citizenName,
+        });
+        const maybeSimulation = result.data?.simulation as SimulationState | undefined;
+        if (maybeSimulation?.simulation_id) {
+          handleSimulationSync(maybeSimulation);
+        }
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "failed to focus citizen");
+        return false;
+      }
+    }
+    const targetRoom = command.room ?? (command.advisorMode ? "advisor" : command.auditoriumMode ? "debate" : undefined);
+    if (targetRoom) {
+      await handleRoomFocus(targetRoom, undefined, { nextAuditoriumMode: command.auditoriumMode });
+      return true;
+    }
+    return Boolean(command.advisorMode || command.auditoriumMode);
+  }
+
+  async function handleSceneQuickCommand(commandText: string) {
+    const normalized = commandText.trim().toLowerCase();
+    if (!normalized) {
+      return;
+    }
+    if (normalized === "talk to someone nearby") {
+      if (room === "citizens") {
+        await handleScenePrimaryInteract(candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id);
+        return;
+      }
+      await handleModeCommand({ room: "citizens" });
+      return;
+    }
+    if (normalized === "street") {
+      await handleModeCommand({ room: "citizens" });
+      return;
+    }
+    if (normalized === "debate") {
+      await handleModeCommand({ room: "debate", auditoriumMode: "debate" });
+      return;
+    }
+    if (normalized === "town hall") {
+      await handleModeCommand({ room: "debate", auditoriumMode: "town_hall" });
+      return;
+    }
+    if (normalized === "single advisor") {
+      await handleModeCommand({ room: "advisor", advisorMode: "solo" });
+      return;
+    }
+    if (normalized === "multi-advisor") {
+      await handleModeCommand({ room: "advisor", advisorMode: "council" });
+      return;
+    }
+    if (normalized === "briefing") {
+      await handleModeCommand({ room: "briefing" });
+    }
   }
 
   function handleStreetFocusChange(citizenId?: string) {
@@ -1454,10 +1645,10 @@ export default function App() {
         action(dock);
         return;
       }
-      if (attempt < 3) {
+      if (attempt < 6) {
         window.setTimeout(() => {
           withMountedDock(action, attempt + 1, generation);
-        }, 120);
+        }, 140);
       }
     });
   }
@@ -1478,9 +1669,13 @@ export default function App() {
     });
   }
 
-  function focusCurrentChannel() {
+  function revealRoomChannel() {
     setPanelsOpen(true);
     setDrawerTab("room");
+  }
+
+  function focusCurrentChannel() {
+    revealRoomChannel();
     queueAfterPaint(() => {
       currentDockRef()?.focusComposer();
     });
@@ -1494,15 +1689,19 @@ export default function App() {
     void dock.toggleVoiceCapture();
   }
 
-  async function handleEnterWarRoom(options?: { startVoice?: boolean }) {
+  async function handleEnterWarRoom(options?: { startVoice?: boolean; openChannel?: boolean }) {
     if (!simulation) {
       return;
     }
     setShowCinematicIntro(false);
     setStageGate("live");
     setSceneTextOpen(false);
-    if (room !== "advisor" || simulation.current_room === "briefing") {
-      await handleRoomFocus("advisor");
+    const targetRoom = room !== "briefing" ? room : simulation.current_room !== "briefing" ? simulation.current_room : "advisor";
+    if (room !== targetRoom || simulation.current_room === "briefing") {
+      await handleRoomFocus(targetRoom);
+    }
+    if (options?.openChannel) {
+      revealRoomChannel();
     }
     if (options?.startVoice) {
       withMountedDock((dock) => {
@@ -1531,30 +1730,26 @@ export default function App() {
     setSceneTextDraft("");
     setSceneTextOpen(false);
     if (showCinematicIntro || room === "briefing") {
-      await handleEnterWarRoom();
+      await handleEnterWarRoom({ openChannel: true });
       withMountedDock((dock) => {
         void dock.sendText(next);
       });
-      refreshSimulationSnapshot(1400);
-      refreshSimulationSnapshot(4200);
-      refreshSimulationSnapshot(9500);
+      queuePostTurnRefreshes();
       return;
     }
     if (room === "citizens" && candidateCitizen?.citizen_id && candidateCitizen.citizen_id !== activeCitizen?.citizen_id) {
+      revealRoomChannel();
       await handOffCitizenAction(candidateCitizen.citizen_id, (dock) => {
         void dock.sendText(next);
       });
-      refreshSimulationSnapshot(1400);
-      refreshSimulationSnapshot(4200);
-      refreshSimulationSnapshot(9500);
+      queuePostTurnRefreshes();
       return;
     }
+    revealRoomChannel();
     withMountedDock((dock) => {
       void dock.sendText(next);
     });
-    refreshSimulationSnapshot(1400);
-    refreshSimulationSnapshot(4200);
-    refreshSimulationSnapshot(9500);
+    queuePostTurnRefreshes();
   }
 
   async function handleSceneVoiceStart(citizenId?: string) {
@@ -1564,7 +1759,7 @@ export default function App() {
     setSceneTextOpen(false);
     if (showCinematicIntro || room === "briefing") {
       disconnectLiveChannels();
-      await handleEnterWarRoom({ startVoice: true });
+      await handleEnterWarRoom({ openChannel: true, startVoice: true });
       return;
     }
     if (room === "citizens") {
@@ -1572,6 +1767,7 @@ export default function App() {
       if (!nextCitizenId) {
         return;
       }
+      revealRoomChannel();
       const reusingCurrentCitizen = nextCitizenId === activeCitizen?.citizen_id;
       await handOffCitizenAction(nextCitizenId, (dock) => {
         if (reusingCurrentCitizen && scenePresence.citizens.status === "connected" && scenePresence.citizens.liveMode === "voice") {
@@ -1582,6 +1778,7 @@ export default function App() {
       });
       return;
     }
+    revealRoomChannel();
     withMountedDock(() => {
       toggleCurrentRoomVoice();
     });
@@ -1590,7 +1787,7 @@ export default function App() {
   async function handleScenePrimaryInteract(citizenId?: string) {
     setSceneTextOpen(false);
     if (showCinematicIntro || room === "briefing") {
-      await handleEnterWarRoom();
+      await handleEnterWarRoom({ openChannel: true });
       return;
     }
     if (room === "citizens") {
@@ -1598,11 +1795,13 @@ export default function App() {
       if (!nextCitizenId) {
         return;
       }
+      revealRoomChannel();
       await handOffCitizenAction(nextCitizenId, (dock) => {
         dock.focusComposer();
       });
       return;
     }
+    revealRoomChannel();
     withMountedDock(() => {
       toggleCurrentRoomVoice();
     });
@@ -1655,8 +1854,6 @@ export default function App() {
 
   const activePresence =
     room === "advisor" ? scenePresence.advisor : room === "citizens" ? scenePresence.citizens : room === "debate" ? scenePresence.debate : EMPTY_PRESENCE;
-  const advisorModeToggleLabel = advisorMode === "solo" ? "Council room" : "Solo room";
-  const auditoriumModeToggleLabel = auditoriumMode === "town_hall" ? "Main debate" : "Town hall";
 
   const setupVoiceButtonLabel =
     setupVoiceConnecting
@@ -1736,8 +1933,8 @@ export default function App() {
         },
         {
           id: "advisor-mode",
-          label: advisorMode === "council" ? "Solo advisor" : "Council table",
-          hint: advisorMode === "council" ? "Return to one-on-one live counsel" : "Open the wider advisory room",
+          label: advisorMode === "council" ? "Single advisor" : "Multi-advisor table",
+          hint: advisorMode === "council" ? "Return to the one-on-one room" : "Open the wider advisory table",
           position: [0, 1.88, 2.12],
           tone: "sage",
           action: "advisor_mode",
@@ -1789,8 +1986,8 @@ export default function App() {
       },
       {
         id: "debate-townhall",
-        label: auditoriumMode === "town_hall" ? "Main debate" : "Town hall questions",
-        hint: auditoriumMode === "town_hall" ? "Return to candidate exchange" : "Open the audience floor",
+        label: auditoriumMode === "town_hall" ? "Debate stage" : "Town hall floor",
+        hint: auditoriumMode === "town_hall" ? "Return to the candidate exchange" : "Open the live audience floor",
         position: [0, 1.96, 2.26],
         tone: "sage",
         action: "townhall",
@@ -1821,28 +2018,52 @@ export default function App() {
             advisorMode={advisorMode}
             councilContext={advisorMode === "council" ? councilContext : undefined}
             onCouncilFloorChange={advisorMode === "council" ? setCouncilFloor : undefined}
-            title={advisorMode === "council" ? "Advisory council chair" : "Chief economic advisor"}
+            title={advisorMode === "council" ? `Multi-advisor table · ${stage.phase_label}` : `Advisor desk · ${stage.phase_label}`}
             blurb={
               advisorMode === "council"
-                ? "A broader strategy table. The live chair now speaks from a four-advisor council visual, synthesizing capability, households, coalition, and state capacity into one conversation."
-                : "Interrogate the transition, queue polling, ask who to interview, and use voice or text to move through the stage."
+                ? (stage.main_split || currentStageRoomBrief)
+                : (currentStageRoomBrief || stage.state_of_world)
+            }
+            draftPlaceholder={
+              advisorMode === "council"
+                ? `Ask the table where they split on ${stage.main_split || "the live question"}, who should lead, or what belongs on the board.`
+                : `Ask what ${stage.capability_frontier_now || "the frontier"} changes, what voters want kept, or which tradeoff binds this stage.`
+            }
+            emptyStateText={
+              advisorMode === "council"
+                ? "The table is waiting for the next strategic question."
+                : "The advisor room is quiet until you open the next strategic thread."
             }
             turns={advisorTurns}
-            metaChips={[stage.phase_label, `${simulation?.approval_rating.toFixed(0)} approval`, advisorMode === "council" ? "council voice" : "advisor voice"]}
+            metaChips={[stage.phase_label, `${simulation?.approval_rating.toFixed(0)} approval`, advisorMode === "council" ? "multi-advisor voice" : "single-advisor voice"]}
             onSimulationSync={handleSimulationSync}
             onPresenceChange={(presence) => handlePresenceChange("advisor", presence)}
+            onModeCommand={handleModeCommand}
           />
           <section className="side-panel side-panel--desk">
-            <div className="side-panel__block">
-              <span>Advisor mode</span>
-              <p>
+            <div className="side-panel__block side-panel__block--mode">
+              <span>Room voice</span>
+              <p className="side-panel__support">
                 {advisorMode === "council"
-                  ? "Council room uses the multi-advisor panel. Switch back for the single live advisor."
-                  : "Solo room keeps the single live advisor. Switch over for the internal council table."}
+                  ? "Multi-advisor mode keeps the full strategy table live. Switch back if you want one voice across the desk."
+                  : "Single-advisor mode keeps the room simple. Switch over if you want the full internal argument."}
               </p>
-              <div className="side-panel__actions">
-                <button className="btn btn--ghost" onClick={toggleAdvisorMode}>
-                  {advisorMode === "council" ? "Go to solo advisor" : "Go to council room"}
+              <div className="topbar__mode-switch" role="tablist" aria-label="Advisor room mode">
+                <button
+                  className={`topbar__mode-option ${advisorMode === "solo" ? "topbar__mode-option--active" : ""}`}
+                  onClick={() => setAdvisorRoomMode("solo")}
+                  role="tab"
+                  aria-selected={advisorMode === "solo"}
+                >
+                  Single advisor
+                </button>
+                <button
+                  className={`topbar__mode-option ${advisorMode === "council" ? "topbar__mode-option--active" : ""}`}
+                  onClick={() => setAdvisorRoomMode("council")}
+                  role="tab"
+                  aria-selected={advisorMode === "council"}
+                >
+                  Multi-advisor
                 </button>
               </div>
             </div>
@@ -1851,7 +2072,7 @@ export default function App() {
               {advisorPolicyNotes.length > 0 ? (
                 advisorPolicyNotes.map((note, index) => <p key={note}>{index + 1}. {note}</p>)
               ) : (
-                <p>Talk through options with your advisor and the working slate will settle here.</p>
+                <p>{currentStageRoomBrief || "The room will hold the few planks that survive the argument."}</p>
               )}
             </div>
             <div className="side-panel__block">
@@ -1866,7 +2087,11 @@ export default function App() {
                 rows={3}
                 value={manualPollQuestion}
                 onChange={(event) => setManualPollQuestion(event.target.value)}
-                placeholder="What benefits do people most want kept? Which frictions feel most unfair? What would they never forgive you for throttling?"
+                placeholder={
+                  stage.main_split
+                    ? `Ask the country where it lands on this split: ${stage.main_split}`
+                    : "Ask what benefit people most want kept, what feels unfair, or what they would not forgive you for slowing."
+                }
               />
               <div className="side-panel__actions">
                 <button className="btn btn--secondary" onClick={handleQueuePoll}>
@@ -1898,10 +2123,17 @@ export default function App() {
               citizenId={activeCitizen.citizen_id}
               title={activeCitizen.display_name}
               blurb={activeCitizen.summary}
+              draftPlaceholder={
+                activeCitizen.current_update || activeCitizen.current_worries || activeCitizen.recent_ai_moment
+                  ? `Ask about ${activeCitizen.current_update || activeCitizen.current_worries || activeCitizen.recent_ai_moment}.`
+                  : "Ask about one recent routine, frustration, relief, or hope."
+              }
+              emptyStateText="Pick up one thread from this person's week and let them answer in their own words."
               turns={citizenTurns}
               metaChips={[activeCitizen.role, activeCitizen.region, activeCitizen.support_label, activeCitizen.voice]}
               onSimulationSync={handleSimulationSync}
               onPresenceChange={(presence) => handlePresenceChange("citizens", presence)}
+              onModeCommand={handleModeCommand}
             />
           ) : null}
         </section>
@@ -1913,6 +2145,7 @@ export default function App() {
           simulationId={simulation?.simulation_id}
           stage={stage}
           debateTurns={debateTurns}
+          auditoriumTurns={combinedAuditoriumTurns}
           auditoriumMode={auditoriumMode}
           resolvedPlatform={debatePlatform}
           pending={resolvingStage}
@@ -1920,6 +2153,7 @@ export default function App() {
           onToggleTownHall={toggleAuditoriumMode}
           onSimulationSync={handleSimulationSync}
           onPresenceChange={(presence) => handlePresenceChange("debate", presence)}
+          onModeCommand={handleModeCommand}
         />
       ) : null}
     </section>
@@ -1975,6 +2209,73 @@ export default function App() {
     </>
   );
 
+  const reelsDrawer = !stage ? null : (
+    <section className="immersive-drawer__reels">
+      <header className="immersive-drawer__reels-header">
+        <div>
+          <span>Future reels</span>
+          <strong>Choose what you want to learn about this future.</strong>
+          <p>
+            {featurettesPending
+              ? "The main chapter is live while the side reels keep rendering in the background."
+              : readyFeaturetteCount > 0
+                ? "Each reel explains one part of the same future in clearer, more concrete detail."
+                : "The shelf is still rendering, but the main chapter is already playable."}
+          </p>
+        </div>
+        <div className="immersive-drawer__reels-meta">
+          <span>{readyFeaturetteCount} ready</span>
+          <span>{featurettesPending ? "rendering more" : "shelf live"}</span>
+        </div>
+      </header>
+      <div className="immersive-drawer__reels-list">
+        {displayedFeaturettes.map((featurette) => {
+          const ready = featurette.status === "ready" && Boolean(featurette.narrative_beats?.length);
+          const questionLabel = featurette.question.trim() || featuretteQuestionLabel(featurette);
+          return (
+            <button
+              key={featurette.id}
+              className={`immersive-drawer__reel-card ${
+                ready ? "immersive-drawer__reel-card--ready" : "immersive-drawer__reel-card--pending"
+              }`}
+              onClick={() => {
+                if (!ready) {
+                  return;
+                }
+                setReelsRequestedFeaturetteId(featurette.id);
+                setReelsOpen(true);
+                setPanelsOpen(false);
+              }}
+              disabled={!ready}
+            >
+              <span>{featurette.subject}</span>
+              <strong>{featurette.title}</strong>
+              <p>{questionLabel}</p>
+              <small>{ready ? "Open this reel" : "Still rendering"}</small>
+            </button>
+          );
+        })}
+        {featurettesPending ? (
+          <article className="immersive-drawer__reel-card immersive-drawer__reel-card--pending">
+            <span>More on the way</span>
+            <strong>Still cutting another reel</strong>
+            <p>The main chapter is already live while another side documentary finishes in the background.</p>
+            <small>Background render still running</small>
+          </article>
+        ) : null}
+      </div>
+      <button
+        className="btn btn--secondary"
+        onClick={() => {
+          openReelsSurface(null);
+        }}
+      >
+        {hasPlayableFeaturettes ? "Open future reels" : "View reel status"}
+      </button>
+    </section>
+  );
+  const reelsDrawerOpen = panelsOpen && drawerTab === "reels";
+
   return (
     <div className={`app-shell ${simulation ? "app-shell--live" : "app-shell--setup"} app-shell--theme-${themeMode}`}>
       <div className="app-shell__glow app-shell__glow--left" />
@@ -1983,22 +2284,33 @@ export default function App() {
       {showLiveTopbar ? (
         <header className="topbar topbar--live">
           <div className="topbar__actions">
-            {room === "advisor" && !showLoadingStage && !showCinematicIntro ? (
-              <button className="btn btn--ghost" onClick={toggleAdvisorMode}>
-                {advisorModeToggleLabel}
+            <div className="topbar__live-context">
+              <span>{liveTopbarSubhead}</span>
+              <strong>{liveTopbarHeading}</strong>
+            </div>
+            <div className="topbar__live-utility">
+              {stage ? (
+                <button
+                  className="btn btn--ghost"
+                  data-testid="topbar-reels-button"
+                  onClick={() => openReelsSurface(null)}
+                >
+                  {featurettesPending
+                    ? hasPlayableFeaturettes
+                      ? `Future reels (${readyFeaturetteCount} ready)`
+                      : "Future reels rendering"
+                    : readyFeaturetteCount > 0
+                      ? `Future reels (${readyFeaturetteCount} ready)`
+                      : "Future reels"}
+                </button>
+              ) : null}
+              <button className="btn btn--ghost" onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}>
+                {themeMode === "light" ? "Dark" : "Light"}
               </button>
-            ) : null}
-            {room === "debate" && !showLoadingStage && !showCinematicIntro ? (
-              <button className="btn btn--ghost" onClick={toggleAuditoriumMode}>
-                {auditoriumModeToggleLabel}
+              <button className="btn btn--secondary" onClick={() => void handleRestart()} disabled={setupBooting || launchingSetup}>
+                New setup
               </button>
-            ) : null}
-            <button className="btn btn--ghost" onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}>
-              {themeMode === "light" ? "Dark mode" : "Light mode"}
-            </button>
-            <button className="btn btn--primary" onClick={() => void handleRestart()} disabled={setupBooting || launchingSetup}>
-              New setup
-            </button>
+            </div>
           </div>
         </header>
       ) : null}
@@ -2272,6 +2584,7 @@ export default function App() {
                     key={`${simulation.simulation_id}:${stage.index}`}
                     room={room}
                     advisorMode={advisorMode}
+                    auditoriumMode={auditoriumMode}
                     stage={stage}
                     themeProfile={themeProfile}
                     playerInPower={simulation.player_in_power}
@@ -2283,10 +2596,11 @@ export default function App() {
                     presence={activePresence}
                     councilFloorLead={advisorMode === "council" ? councilFloor?.lead : undefined}
                     councilUrgencies={advisorMode === "council" ? councilFloor?.urgencies : undefined}
+                    councilFloorContrast={advisorMode === "council" ? councilFloor?.contrast : undefined}
                     resolvingStage={resolvingStage}
                     hotspots={sceneHotspots}
                     panelsOpen={panelsOpen}
-                    overlayActive={showCinematicIntro}
+                    overlayActive={showCinematicIntro || reelsOpen}
                     themeMode={themeMode}
                     captionSpeaker={currentSceneCaption?.speaker}
                     captionText={currentSceneCaption?.text}
@@ -2304,6 +2618,7 @@ export default function App() {
                     onTextComposerToggle={() => setSceneTextOpen((current) => !current)}
                     onTextComposerChange={setSceneTextDraft}
                     onTextComposerSend={() => void handleSceneTextSend()}
+                    onQuickCommand={(command) => void handleSceneQuickCommand(command)}
                     onStreetFocusChange={handleStreetFocusChange}
                     onTogglePanels={undefined}
                   />
@@ -2328,10 +2643,48 @@ export default function App() {
                     </div>
                   </section>
                 ) : null}
+                {reelsOpen && stage ? (
+                  <section className="featurette-overlay" role="dialog" aria-modal="true" aria-label="Future reels">
+                    <button
+                      className="featurette-overlay__backdrop"
+                      aria-label="Dismiss future reels"
+                      onClick={() => {
+                        setReelsOpen(false);
+                        setReelsRequestedFeaturetteId(null);
+                      }}
+                    />
+                    <div className="featurette-overlay__panel" ref={reelsOverlayRef} tabIndex={-1}>
+                      <button
+                        className="btn btn--ghost featurette-overlay__close"
+                        data-testid="featurette-overlay-close"
+                        ref={reelsCloseButtonRef}
+                        onClick={() => {
+                          setReelsOpen(false);
+                          setReelsRequestedFeaturetteId(null);
+                        }}
+                      >
+                        Close
+                      </button>
+                      <FeaturetteShelf
+                        stage={stage}
+                        variant="overlay"
+                        requestedFeaturetteId={reelsRequestedFeaturetteId}
+                        onClose={() => {
+                          setReelsOpen(false);
+                          setReelsRequestedFeaturetteId(null);
+                        }}
+                      />
+                    </div>
+                  </section>
+                ) : null}
                 </section>
 
               {!showCinematicIntro ? (
-                <section className={`immersive-drawer ${panelsOpen ? "immersive-drawer--open" : ""}`}>
+                <section
+                  className={`immersive-drawer ${panelsOpen ? "immersive-drawer--open" : ""} ${
+                    reelsDrawerOpen ? "immersive-drawer--reels" : ""
+                  }`}
+                >
                   <div className="immersive-drawer__rail">
                     {panelsOpen ? (
                       <>
@@ -2361,6 +2714,12 @@ export default function App() {
                           >
                             Intel
                           </button>
+                          <button
+                            className={`immersive-drawer__tab ${drawerTab === "reels" ? "immersive-drawer__tab--active" : ""}`}
+                            onClick={() => setDrawerTab("reels")}
+                          >
+                            Reels
+                          </button>
                         </div>
                         <button className="btn btn--ghost immersive-drawer__toggle" onClick={() => setPanelsOpen(false)}>
                           Close
@@ -2381,10 +2740,13 @@ export default function App() {
 
                   <div className={`immersive-drawer__body ${panelsOpen ? "immersive-drawer__body--open" : ""}`}>
                     <div className={`immersive-drawer__pane ${drawerTab === "room" ? "immersive-drawer__pane--active" : ""}`}>
-                      {roomDrawer}
+                      {panelsOpen && drawerTab === "room" ? roomDrawer : null}
                     </div>
                     <div className={`immersive-drawer__pane ${drawerTab === "intel" ? "immersive-drawer__pane--active" : ""}`}>
-                      {intelDrawer}
+                      {panelsOpen && drawerTab === "intel" ? intelDrawer : null}
+                    </div>
+                    <div className={`immersive-drawer__pane ${drawerTab === "reels" ? "immersive-drawer__pane--active" : ""}`}>
+                      {!reelsOpen && reelsDrawerOpen ? reelsDrawer : null}
                     </div>
                     {error ? <p className="stage-error">{error}</p> : null}
                   </div>

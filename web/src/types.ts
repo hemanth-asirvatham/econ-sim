@@ -7,7 +7,7 @@ export type AuditoriumMode = "debate" | "town_hall";
 export type SessionStatus = "idle" | "connecting" | "connected" | "error";
 export type PresenceActivity = "idle" | "listening" | "speaking";
 export type SetupSessionStatus = "drafting" | "ready" | "started";
-export type StartingWorldMode = "default" | "advanced" | "radical";
+export type FeaturetteStatus = "idle" | "queued" | "generating" | "ready" | "error";
 
 export interface ScenePresence {
   status: SessionStatus;
@@ -67,6 +67,8 @@ export interface CitizenSnapshot {
   current_hopes: string;
   speech_habits: string;
   voice_notes: string;
+  town_hall_question: string;
+  town_hall_cue: string;
   summary: string;
   current_update: string;
   approval_band: "approve" | "mixed" | "disapprove";
@@ -142,6 +144,18 @@ export interface StageProgress {
   percent: number;
 }
 
+export interface DocumentaryFeaturette {
+  id: string;
+  subject: string;
+  question: string;
+  title: string;
+  logline: string;
+  status: FeaturetteStatus;
+  narrative_beats: NarrativeBeat[];
+  error?: string | null;
+  generated_at: string;
+}
+
 export interface StagePackage {
   index: number;
   phase_label: string;
@@ -154,18 +168,28 @@ export interface StagePackage {
   dominant_mechanism: string;
   dominant_upside: string;
   main_split: string;
+  household_income_system: string;
+  capability_access_norm: string;
+  firm_structure_norm: string;
+  ownership_regime: string;
+  public_service_norm: string;
   state_of_world: string;
   detailed_summary: string;
   room_briefing: string;
+  authored_room_briefing: string;
   economic_indicators: string[];
   tension_points: string[];
   suggested_policy_axes: string[];
+  authored_policy_axes: string[];
   narrative_beats: NarrativeBeat[];
   sample_citizens: CitizenSnapshot[];
   tracking: StageTracking;
   poll_summaries: PollSummary[];
   queued_poll_questions: string[];
   policy_notes: string[];
+  featurettes: DocumentaryFeaturette[];
+  featurettes_status: FeaturetteStatus;
+  featurettes_error?: string | null;
   debate_reply?: DebateReply | null;
   resolution?: StageResolution | null;
   generated_at: string;
@@ -184,7 +208,6 @@ export interface SimulationConfig {
   topic_lens: string;
   premise: string;
   stakes: string;
-  starting_world_mode: StartingWorldMode;
   persona_count: number;
   stage_count: number;
   visual_style: string;
@@ -245,7 +268,6 @@ export interface SetupDraft {
   opponent_voice?: string | null;
   premise?: string | null;
   stakes?: string | null;
-  starting_world_mode?: StartingWorldMode | null;
   persona_count: number;
   stage_count: number;
   visual_style?: string | null;
@@ -296,7 +318,6 @@ export interface SimulationCreateRequest {
   population_description?: string;
   premise?: string | null;
   stakes?: string | null;
-  starting_world_mode?: StartingWorldMode | null;
   visual_style?: string;
   orchestrator_reasoning_effort: ReasoningEffort;
   realtime_model: string;
@@ -360,11 +381,10 @@ export function makeDefaultSetupDraft(): SetupDraft {
     opponent_voice: "ash",
     premise: "",
     stakes: "",
-    starting_world_mode: "default",
     persona_count: 48,
     stage_count: 5,
     visual_style:
-      "Naturalistic civic documentary with grounded people, varied institutions and neighborhoods, tactile materials, observed light, painterly realism, and no glossy CGI or cartoon exaggeration.",
+      "Painterly civic documentary in a Cezanne, Monet, and Matisse register: bold color planes, softened edges, lived-in institutions and neighborhoods, atmospheric light, selective abstraction, and never glossy CGI, stock-photo realism, or cartoon exaggeration.",
     orchestrator_reasoning_effort: "low",
     realtime_model: "gpt-realtime-1.5",
   };
@@ -386,7 +406,6 @@ export function setupDraftToCreateRequest(draft: SetupDraft): SimulationCreateRe
     population_description: draft.population_description?.trim() || undefined,
     premise: draft.premise?.trim() || undefined,
     stakes: draft.stakes?.trim() || undefined,
-    starting_world_mode: draft.starting_world_mode || "default",
     visual_style: draft.visual_style?.trim() || undefined,
     orchestrator_reasoning_effort: draft.orchestrator_reasoning_effort,
     realtime_model: draft.realtime_model.trim() || "gpt-realtime-1.5",

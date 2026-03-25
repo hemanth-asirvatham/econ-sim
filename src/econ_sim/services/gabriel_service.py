@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -55,6 +57,7 @@ class GabrielService:
         self.settings = settings
         self.gateway = gateway
         self.compact_persona_template = Path(__file__).resolve().parent.parent / "prompts" / "persona_compact.jinja2"
+        self._quiet_sink = open(os.devnull, "w", encoding="utf-8")
 
     async def prepare_poll_question(self, question: str) -> str:
         text = " ".join(str(question or "").split()).strip()
@@ -156,7 +159,7 @@ class GabrielService:
             prompt = (
                 "You are updating one synthetic citizen during an AGI transition simulation.\n"
                 "Return valid JSON with keys: display_name, role, region, mood, ai_exposure, "
-                "household, daily_routine, recent_ai_moment, current_worries, current_hopes, speech_habits, voice_notes, "
+                "household, daily_routine, recent_ai_moment, current_worries, current_hopes, speech_habits, voice_notes, town_hall_question, town_hall_cue, "
                 "support_score, summary, current_update.\n\n"
                 f"Stage phase: {stage.phase_label}\n"
                 f"Stage title: {stage.title}\n"
@@ -211,6 +214,12 @@ class GabrielService:
                 "- let some people first talk about feeling more capable, less dependent on scarce experts, or newly able to handle a task they used to avoid\n"
                 "- if the honest update is about tutoring help, shopping confidence, translation, planning, care coordination, design help, entertainment, or one strange new convenience, let that be the center of the answer\n"
                 "- do not let the population collapse into one repeating office-work story; rotate through care, errands, schooling, logistics, entertainment, small business, status, prices, household planning, neighborhood life, and people who mostly notice better services\n"
+                "- if the stage already lives inside a changed settlement, let some people name that new baseline directly: what now pays the bills, what account or institution they rely on, how their week changed, or which company or agency they feel dependent on\n"
+                "- in later or stranger chapters, do not make everyone sound like they are reacting to a slightly better app; some people should talk about a monthly machine check, the public system that pays for basic AI help, altered schedules, public systems, or platform dependence when that is what they honestly notice first\n"
+                "- town_hall_question must be the one direct question this person would ask a candidate if handed a microphone today; usually 1 sentence, sometimes 2 very short ones\n"
+                "- town_hall_question should be plain, lived-in, and easy to understand on first hearing; no moderator framing, no speech, and no policy-jargon pileups\n"
+                "- town_hall_question should usually grow out of current_update, current_worries, or current_hopes rather than abstract ideology\n"
+                "- town_hall_cue should be one short backstage note of about 4-10 words capturing the pressure behind the question\n"
                 "- household, daily_routine, current_worries, and current_hopes should stay compact and concrete; preserve the same person rather than inventing a different life\n"
                 "- speech_habits should be one sentence on cadence, bluntness, filler words, or how this person talks when cornered\n"
                 "- voice_notes should be a short phrase of about 5-12 words naming pace, bluntness, filler words, or local phrasing\n"
@@ -276,6 +285,8 @@ class GabrielService:
         out["current_hopes"] = combine_text_field("current_hopes", "Current hopes").map(lambda value: self._bounded_text(value, 160))
         out["speech_habits"] = combine_text_field("speech_habits", "Speech habits").map(lambda value: self._bounded_text(value, 120))
         out["voice_notes"] = combine_text_field("voice_notes", "Voice notes").map(lambda value: self._bounded_text(value, 80))
+        out["town_hall_question"] = combine_text_field("town_hall_question", "Town hall question").map(lambda value: self._bounded_text(value, 220))
+        out["town_hall_cue"] = combine_text_field("town_hall_cue", "Town hall cue").map(lambda value: self._bounded_text(value, 120))
         out["support_label"] = support_scores.map(self._support_label_from_score)
         out["summary"] = update_df.get("summary", "").fillna("").map(lambda value: self._bounded_text(value, 220))
         return out
@@ -293,11 +304,20 @@ class GabrielService:
         )
         unresolved_line = stage.main_split.strip() or (stage.tension_points[0] if stage.tension_points else "")
         constituency_line = stage.pro_adoption_constituency.strip()
+        settlement_lines = [
+            ("Household security", stage.household_income_system.strip()),
+            ("Everyday access", stage.capability_access_norm.strip()),
+            ("Firm staffing", stage.firm_structure_norm.strip()),
+            ("Ownership and chokepoints", stage.ownership_regime.strip()),
+            ("Public services", stage.public_service_norm.strip()),
+        ]
         lines = [
             "Big capability change:",
             *([f"- {capability_line}"] if capability_line else []),
             "Macro read:",
             *[f"- {line}" for line in macro_lines],
+            "Settlement in force:",
+            *[f"- {label}: {value}" for label, value in settlement_lines if value],
             "What people value:",
             f"- {upside_line or 'Some useful service or tool got faster, cheaper, or easier to use.'}",
             "Who is actively defending the gains:",
@@ -489,6 +509,8 @@ class GabrielService:
                     voice_notes=self._row_value(row, "voice_notes", "Voice notes"),
                     baseline_ai_instinct=str(row.get("baseline_ai_instinct") or ""),
                     baseline_priority=str(row.get("baseline_priority") or ""),
+                    town_hall_question=self._row_value(row, "town_hall_question", "Town hall question"),
+                    town_hall_cue=self._row_value(row, "town_hall_cue", "Town hall cue"),
                     summary=str(row.get("summary") or row.get("persona") or ""),
                     current_update=str(row.get("current_update") or ""),
                     approval_band=approval_band,
@@ -870,6 +892,28 @@ class GabrielService:
             ][idx % 6]
             for idx in range(len(out))
         ]
+        out["town_hall_question"] = [
+            [
+                "If these tools are making shops leaner, what keeps people like me from getting priced out of the next round?",
+                "You say care is getting better, but what keeps hospitals from treating staffing like an optional extra now?",
+                "If routes and paperwork are getting automated, where exactly does that leave the people still hauling the real load?",
+                "If AI can do more of the desk work, what is your plan for the kids coming up behind me?",
+                "If public life is getting filtered through machine systems, how do regular people appeal a bad call?",
+                "If bigger firms get the best tools first, what is your plan for the towns built around smaller shops?",
+            ][idx % 6]
+            for idx in range(len(out))
+        ]
+        out["town_hall_cue"] = [
+            [
+                "priced out of the next round",
+                "care without hollow staffing",
+                "what happens to the human load",
+                "where the ladder goes next",
+                "recourse when the system is wrong",
+                "small-town leverage and survival",
+            ][idx % 6]
+            for idx in range(len(out))
+        ]
         out["support_label"] = labels
         out["approval_band"] = approvals
         out["support_score"] = scores
@@ -1158,6 +1202,48 @@ class GabrielService:
 
     def _stage_questions(self, stage: StagePackage) -> list[str]:
         label = stage.phase_label.lower()
+        settlement_parts = [
+            part
+            for part in (
+                stage.household_income_system,
+                stage.capability_access_norm,
+                stage.ownership_regime,
+                stage.public_service_norm,
+                stage.firm_structure_norm,
+            )
+            if part
+        ]
+        settlement_text = " ".join(settlement_parts).lower()
+        settlement_dense = sum(1 for part in settlement_parts if len(str(part).split()) >= 6) >= 2
+        settlement_markers = any(
+            token in settlement_text
+            for token in (
+                "dividend",
+                "credit",
+                "utility",
+                "account",
+                "toll",
+                "ownership",
+                "public",
+                "monthly",
+                "machine",
+                "help line",
+                "help credit",
+                "compute",
+                "platform",
+                "allowance",
+                "ration",
+                "guarantee",
+                "income floor",
+                "basic services",
+            )
+        )
+        if "practical ai" not in label and (settlement_dense or settlement_markers):
+            return [
+                "Choose one: in daily life the biggest change now feels most like a new income floor, a new public-service utility, more power for platform owners, more leverage for ordinary households and small groups, or still too uneven to judge.",
+                "In one sentence, what actually keeps life steady in this future when a normal full-time job is no longer the whole story?",
+                "In one sentence, where does this new arrangement still leave you dependent on a company, agency, or chokepoint you do not really control?",
+            ]
         if "practical ai" in label:
             return [
                 "Choose one: the clearest effect of AI right now is more capable software help across daily life, stronger work or study tools, better consumer services, more power for big firms, or still too uneven to judge.",
@@ -1195,8 +1281,8 @@ class GabrielService:
                     stage.phase_label,
                     " ".join(stage.tension_points),
                     " ".join(stage.economic_indicators),
-                    " ".join(stage.suggested_policy_axes),
-                    stage.room_briefing,
+                    " ".join(stage.authored_policy_axes or stage.suggested_policy_axes),
+                    stage.authored_room_briefing or stage.room_briefing,
                 ]
             )
         )
@@ -1458,15 +1544,27 @@ class GabrielService:
         method = getattr(_gabriel(), method_name)
         include_service_tier = _SERVICE_TIER_SUPPORT.get(method_name, True)
         call_kwargs = dict(kwargs)
+        call_kwargs.setdefault("verbose", False)
+        call_kwargs.setdefault("quiet", True)
+        call_kwargs.setdefault("print_example_prompt", False)
+        call_kwargs.setdefault("status_report_interval", None)
         if include_service_tier and self.settings.service_tier:
             call_kwargs["service_tier"] = self.settings.service_tier
+
+        async def invoke() -> object:
+            # GABRIEL emits direct prints and tqdm progress bars. In detached app/server
+            # contexts those writes can outlive a single call frame; keep one sink open
+            # for the service lifetime instead of opening and closing a temporary pipe.
+            with contextlib.redirect_stdout(self._quiet_sink), contextlib.redirect_stderr(self._quiet_sink):
+                return await method(**call_kwargs)
+
         try:
-            return await method(**call_kwargs)
+            return await invoke()
         except Exception as exc:
             if include_service_tier and self._service_tier_unsupported(exc, method_name):
                 _SERVICE_TIER_SUPPORT[method_name] = False
                 call_kwargs.pop("service_tier", None)
-                return await method(**call_kwargs)
+                return await invoke()
             raise
 
     def _service_tier_unsupported(self, exc: Exception, method_name: str) -> bool:
