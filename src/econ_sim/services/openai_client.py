@@ -6,7 +6,7 @@ import io
 import json
 import re
 from pathlib import Path
-from typing import TypeVar
+from typing import Iterator, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from ..config import AppSettings
 
 ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
+REALTIME_TRANSCRIPTION_PROMPT_MAX_CHARS = 1000
 
 
 class OpenAIGateway:
@@ -44,7 +45,9 @@ class OpenAIGateway:
         service_tier = self._normalize_service_tier(self.settings.service_tier)
         for attempt in range(max_attempts):
             def _call() -> tuple[ParsedModel, str | None]:
-                response = self.client.responses.parse(
+                response = self.client.with_options(
+                    timeout=self.settings.openai_response_timeout_seconds,
+                ).responses.parse(
                     model=model,
                     instructions=instructions,
                     input=input_text,
@@ -76,6 +79,9 @@ class OpenAIGateway:
                 )
 
             try:
+                # Let the OpenAI client timeout own the request lifecycle. Wrapping a
+                # blocking SDK call in wait_for cancels only the asyncio waiter, not
+                # the worker thread, which can leave duplicate HTTPS reads alive.
                 return await asyncio.to_thread(_call)
             except Exception as exc:
                 last_error = exc
@@ -117,12 +123,20 @@ class OpenAIGateway:
             return
 
         def _call() -> None:
+            output_format = (self.settings.image_output_format or "png").lower()
+            if output_format == "jpg":
+                output_format = "jpeg"
+            generate_kwargs = {
+                "model": self.settings.image_model,
+                "prompt": prompt,
+                "size": self.settings.image_size,
+                "quality": self.settings.image_quality,
+                "output_format": output_format,
+            }
+            if output_format in {"jpeg", "webp"}:
+                generate_kwargs["output_compression"] = self.settings.image_output_compression
             response = self.client.images.generate(
-                model=self.settings.image_model,
-                prompt=prompt,
-                size=self.settings.image_size,
-                quality=self.settings.image_quality,
-                output_format="png",
+                **generate_kwargs,
             )
             first = response.data[0].model_dump()
             image_payload = first.get("b64_json")
@@ -146,12 +160,22 @@ class OpenAIGateway:
             return
 
         def _call() -> bytes:
-            audio = self.client.audio.speech.create(
-                model=self.settings.speech_model,
-                voice=self.settings.narration_voice,
-                input=text,
-                response_format="mp3",
-            )
+            service_tier = self._normalize_service_tier(self.settings.service_tier)
+            kwargs = {
+                "model": self.settings.speech_model,
+                "voice": self.settings.narration_voice,
+                "input": text,
+                "response_format": "mp3",
+            }
+            if service_tier:
+                kwargs["service_tier"] = service_tier
+            try:
+                audio = self.client.audio.speech.create(**kwargs)
+            except TypeError as exc:
+                if "service_tier" not in str(exc):
+                    raise
+                kwargs.pop("service_tier", None)
+                audio = self.client.audio.speech.create(**kwargs)
             return audio.read()
 
         output_path.write_bytes(await self._run_with_retries(_call))
@@ -161,13 +185,113 @@ class OpenAIGateway:
             return b""
 
         def _call() -> bytes:
-            audio = self.client.audio.speech.create(
-                model=self.settings.speech_model,
-                voice=voice or self.settings.narration_voice,
-                input=text,
-                response_format="mp3",
-            )
+            service_tier = self._normalize_service_tier(self.settings.service_tier)
+            kwargs = {
+                "model": self.settings.speech_model,
+                "voice": voice or self.settings.narration_voice,
+                "input": text,
+                "response_format": "mp3",
+            }
+            if service_tier:
+                kwargs["service_tier"] = service_tier
+            try:
+                audio = self.client.audio.speech.create(**kwargs)
+            except TypeError as exc:
+                if "service_tier" not in str(exc):
+                    raise
+                kwargs.pop("service_tier", None)
+                audio = self.client.audio.speech.create(**kwargs)
             return audio.read()
+
+        return await self._run_with_retries(_call)
+
+    def synthesize_stream(
+        self,
+        *,
+        text: str,
+        voice: str | None = None,
+        response_format: str = "mp3",
+        chunk_size: int = 4096,
+    ) -> Iterator[bytes]:
+        if not self.live:
+            yield b""
+            return
+
+        def _iter_chunks() -> Iterator[bytes]:
+            service_tier = self._normalize_service_tier(self.settings.service_tier)
+            kwargs = {
+                "model": self.settings.speech_model,
+                "voice": voice or self.settings.narration_voice,
+                "input": text,
+                "response_format": response_format,
+                "stream_format": "audio",
+            }
+            if service_tier:
+                kwargs["service_tier"] = service_tier
+            def yield_chunks(request_kwargs: dict) -> Iterator[bytes]:
+                response_cm = self.client.with_options(timeout=20.0).audio.speech.with_streaming_response.create(**request_kwargs)
+                with response_cm as response:
+                    for chunk in response.iter_bytes(chunk_size):
+                        if chunk:
+                            yield chunk
+
+            try:
+                yield from yield_chunks(kwargs)
+            except TypeError as exc:
+                if "service_tier" not in str(exc):
+                    raise
+                kwargs.pop("service_tier", None)
+                yield from yield_chunks(kwargs)
+
+        yield from _iter_chunks()
+
+    async def generate_chat_audio_reply(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        voice: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        prompt_cache_key: str | None = None,
+        max_completion_tokens: int = 140,
+        include_audio: bool = True,
+    ) -> tuple[str, bytes | None, str | None]:
+        if not self.live:
+            return input_text.strip(), None, None
+
+        effort = self._normalize_reasoning_effort(reasoning_effort)
+        service_tier = self._normalize_service_tier(self.settings.service_tier)
+
+        def _call() -> tuple[str, bytes | None, str | None]:
+            kwargs = {
+                "model": model or self.settings.council_audio_model,
+                "messages": [
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": input_text},
+                ],
+                "modalities": ["text", "audio"] if include_audio else ["text"],
+                "audio": {"voice": voice, "format": "mp3"} if include_audio else None,
+                "prompt_cache_key": prompt_cache_key,
+                "service_tier": service_tier,
+                "max_completion_tokens": max_completion_tokens,
+                "store": False,
+            }
+            if effort and not str(kwargs["model"]).startswith("gpt-audio"):
+                kwargs["reasoning_effort"] = effort
+            completion = self.client.chat.completions.create(**kwargs)
+            message = completion.choices[0].message
+            transcript = ""
+            audio_bytes: bytes | None = None
+            audio_format: str | None = None
+            if getattr(message, "audio", None) is not None:
+                transcript = str(message.audio.transcript or "").strip()
+                if message.audio.data:
+                    audio_bytes = base64.b64decode(message.audio.data)
+                    audio_format = "mp3"
+            if not transcript:
+                transcript = str(message.content or "").strip()
+            return transcript, audio_bytes, audio_format
 
         return await self._run_with_retries(_call)
 
@@ -233,6 +357,8 @@ class OpenAIGateway:
         voice: str | None = None,
         max_output_tokens: int | None = None,
         create_response: bool = True,
+        capture_only: bool = False,
+        capture_prompt: str | None = None,
     ) -> tuple[str, str]:
         if not self.live:
             return "dummy-client-secret", model or self.settings.realtime_model
@@ -240,6 +366,23 @@ class OpenAIGateway:
         def _build_payload() -> tuple[dict, str]:
             selected_model = model or self.settings.realtime_model
             selected_voice = voice or self.settings.realtime_voice
+            if capture_only:
+                transcription_prompt = self._realtime_transcription_prompt(capture_prompt)
+                session_payload = {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "noise_reduction": {"type": "near_field"},
+                            "transcription": {
+                                "model": self.settings.realtime_input_transcription_model,
+                                "prompt": transcription_prompt,
+                            },
+                            "turn_detection": self._capture_turn_detection(),
+                        },
+                    },
+                }
+                return session_payload, selected_model
             session_payload = {
                 "type": "realtime",
                 "model": selected_model,
@@ -249,12 +392,7 @@ class OpenAIGateway:
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "noise_reduction": {"type": "near_field"},
                         "transcription": {"model": self.settings.realtime_input_transcription_model},
-                        "turn_detection": {
-                            "type": "semantic_vad",
-                            "eagerness": "medium",
-                            "create_response": create_response,
-                            "interrupt_response": True,
-                        },
+                        "turn_detection": self._conversation_turn_detection(create_response),
                     },
                     "output": {
                         "format": {"type": "audio/pcm", "rate": 24000},
@@ -290,6 +428,21 @@ class OpenAIGateway:
             "Realtime session setup failed after retries. Try the mic again in a moment."
         ) from last_error
 
+    def _realtime_transcription_prompt(self, prompt: str | None) -> str:
+        text = (
+            prompt
+            or (
+                "Transcribe only the live player's speech in this strategy room. "
+                "Ignore synthetic playback, narration, and other room voices. "
+                "Return only the player's words."
+            )
+        )
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= REALTIME_TRANSCRIPTION_PROMPT_MAX_CHARS:
+            return text
+        clipped = text[:REALTIME_TRANSCRIPTION_PROMPT_MAX_CHARS].rsplit(" ", 1)[0].strip()
+        return clipped.rstrip(" ,;:") + "."
+
     def _normalize_reasoning_effort(self, effort: str | None) -> str | None:
         if effort is None:
             return None
@@ -301,6 +454,24 @@ class OpenAIGateway:
             return None
         normalized = tier.strip().lower()
         return None if normalized in {"", "none"} else normalized
+
+    def _conversation_turn_detection(self, create_response: bool) -> dict[str, str | bool]:
+        return {
+            "type": "semantic_vad",
+            "eagerness": self.settings.realtime_semantic_vad_eagerness,
+            "create_response": create_response,
+            "interrupt_response": True,
+        }
+
+    def _capture_turn_detection(self) -> dict[str, str | float | int]:
+        return {
+            "type": "server_vad",
+            "create_response": False,
+            "interrupt_response": False,
+            "threshold": self.settings.realtime_capture_vad_threshold,
+            "prefix_padding_ms": self.settings.realtime_capture_vad_prefix_padding_ms,
+            "silence_duration_ms": self.settings.realtime_capture_vad_silence_duration_ms,
+        }
 
     def _fallback_parse(
         self,
@@ -316,7 +487,9 @@ class OpenAIGateway:
         service_tier: str | None,
     ) -> tuple[ParsedModel, str | None]:
         schema = json.dumps(text_format.model_json_schema(), ensure_ascii=True)
-        response = self.client.responses.create(
+        response = self.client.with_options(
+            timeout=self.settings.openai_response_timeout_seconds,
+        ).responses.create(
             model=model,
             instructions=(
                 f"{instructions}\n\n"
@@ -335,7 +508,9 @@ class OpenAIGateway:
             parsed = self._coerce_text_to_model(response.output_text, text_format)
             return parsed, response.id
         except Exception:
-            repair_response = self.client.responses.create(
+            repair_response = self.client.with_options(
+                timeout=self.settings.openai_response_timeout_seconds,
+            ).responses.create(
                 model=model,
                 instructions=(
                     "Repair the invalid JSON draft into one complete valid JSON object matching the schema exactly. "

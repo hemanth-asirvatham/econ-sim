@@ -72,6 +72,16 @@ class SimulationStore:
     async def exists(self, simulation_id: str) -> bool:
         return self.state_path(simulation_id).exists()
 
+    async def list_simulation_ids(self) -> list[str]:
+        async with self._lock:
+            return sorted(
+                path.name
+                for path in self.root.iterdir()
+                if path.is_dir()
+                and path.name != "_setup_sessions"
+                and (path / "simulation.json").exists()
+            )
+
     async def save_setup_session(self, state: SetupSessionState) -> None:
         async with self._lock:
             self.setup_session_path(state.setup_session_id).write_text(

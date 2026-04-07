@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import contextlib
 import hashlib
 import importlib
@@ -31,7 +30,7 @@ VOICE_PROFILES: dict[str, str] = {
     "ash": "30s gravelly man",
     "ballad": "dramatic British gay man",
     "cedar": "serious white-collar male",
-    "coral": "uppity flowery woman",
+    "coral": "bright expressive woman",
     "echo": "mid-pitch monotone male",
     "marin": "friendly woman",
     "sage": "50s gentle mid-pitch woman",
@@ -158,9 +157,7 @@ class GabrielService:
         for idx, row in personas.iterrows():
             prompt = (
                 "You are updating one synthetic citizen during an AGI transition simulation.\n"
-                "Return valid JSON with keys: display_name, role, region, mood, ai_exposure, "
-                "household, daily_routine, recent_ai_moment, current_worries, current_hopes, speech_habits, voice_notes, town_hall_question, town_hall_cue, "
-                "support_score, summary, current_update.\n\n"
+                "Return valid JSON with keys: display_name, role, region, mood, ai_exposure, household, daily_routine, recent_ai_moment, current_worries, current_hopes, speech_habits, voice_notes, town_hall_question, town_hall_cue, support_score, summary, current_update.\n\n"
                 f"Stage phase: {stage.phase_label}\n"
                 f"Stage title: {stage.title}\n"
                 f"Stage capsule:\n{stage_capsule}\n"
@@ -178,44 +175,41 @@ class GabrielService:
                 f"Previous stage update: {row.get('current_update', '') or 'none yet'}\n"
                 f"Political backdrop only if locally salient: incumbent {incumbent_name}; player candidate {player_name}; opponent candidate {opponent_name}\n"
                 "Write the one or two changes this person would bring up first about how life feels now.\n"
+                "Keep the writing lived-in and uneven, as if someone were answering quickly in their own words.\n"
                 "Constraints:\n"
                 "- summary must be exactly one sentence, about 22-38 words, written in close third person as a natural human blurb\n"
-                "- current_update must usually be 1 sentence or 2 clipped first-person sentences; target about 18-45 words total\n"
-                "- current_update should start from one domain first: bills, work, school, care, errands, status, neighborhood texture, or barely touched yet\n"
-                "- pick at most 2 of these: work, bills, service access, family stress, neighborhood texture, status change, or barely touched yet\n"
-                "- structure current_update as what I would say first to a neighbor, parent, coworker, or campaign volunteer if stopped today\n"
-                "- sentence 1 must name the most material new change since the last stage, but it does not need to say AI out loud if this person would not talk that way\n"
+                "- current_update must usually be 1 sentence or 2 clipped first-person sentences; target about 24-60 words total\n"
+                "- pick one lead arena first: home or family, school or care, local service, work or business, neighborhood or status, or barely touched yet\n"
+                "- pick one concrete moment from this week first: one bill, one purchase, one shift, one repair, one argument, one school issue, one family coordination problem, one side hustle, one local outage, one hobby opportunity, one relief, or one irritation\n"
+                "- pick one feeling and let it color the update: relieved, pleased, proud, annoyed, wary, rattled, bemused, angry, or mostly untouched\n"
+                "- vary the lead arena across the population instead of repeating one office-work or helper-app story\n"
+                "- good lead arenas here include household budgeting, childcare, elder care, school, landlord or benefits fights, home repair, shopping, commuting, neighborhood safety, local business, community life, migration ties, scams, insurance, platform dependence, or barely touched yet\n"
+                "- pick one concrete mechanism that is specific to this person's life rather than a generic helper-app summary: repair quotes, dispatch, fraud screening, inventory, lesson prep, licensing, diagnosis support, permitting, bidding, routing, customer acquisition, benefits appeals, or something just as local and specific\n"
+                "- if it feels natural, anchor the update in one concrete macro detail this person would actually notice: rent, wages, hours, prices, staffing, service reliability, access, or household purchasing power\n"
+                "- pick one primary channel this person would notice first, and let everything else stay secondary\n"
+                "- if the previous stage already leaned on the same channel, switch to a different one unless persistence is the actual story this person would tell\n"
+                "- the first sentence should name the most material change since the last stage, but it does not need to say AI out loud if this person would not talk that way\n"
                 "- include one concrete household, price, service, or job effect this person feels\n"
-                "- when it fits, let one sentence imply that something else still feels ordinary or unchanged; not every person should sound like their whole life flipped at once\n"
-                "- let current_update contain one idiosyncratic detail or turn of phrase this person would actually repeat; slightly biased, unfair, or incomplete is better than balanced\n"
-                "- politics is optional unless it is salient in this person's life right now, and if it appears it should be tied to pay, staffing, bills, service reliability, status loss, or local business conditions\n"
-                "- do not mention the incumbent, player, or opponent by name unless this person would spontaneously bring them up in ordinary conversation\n"
-                "- current_update should sound like something this person would actually say out loud to a neighbor, parent, coworker, or campaign volunteer\n"
-                "- use plain spoken language, contractions when natural, and specific daily-life detail\n"
-                "- focus on what this person actually notices in daily life, not policy analysis\n"
+                "- sound like something this person would actually say out loud to a neighbor, parent, coworker, or campaign volunteer\n"
+                "- let the update stay ordinary if that is the honest read; not everyone needs a dramatic AI opinion\n"
+                "- use plain spoken language, contractions when natural, and one idiosyncratic turn of phrase this person would actually repeat\n"
                 "- avoid policy jargon, consultant phrasing, slogans, or tidy both-sides wrapups\n"
-                "- let the tone be ordinary and a little uneven; a natural fragment, gripe, shrug, or sharp aside is better than polished balance\n"
-                "- if the best update is mostly good news, let it be mostly good news; do not force a balancing complaint into every answer\n"
-                "- if the best update is mostly indirect, let it stay indirect; not every person needs an explicit AI opinion\n"
-                "- do not make the last sentence a tidy moral or campaign verdict unless that is honestly how this person talks\n"
-                "- broad stage facts are background only; the answer should sound local, partial, and lived-in\n"
-                "- mention upside when this person genuinely feels it, not only losses\n"
-                "- at least some people should sound casually pleased, relieved, or quietly impressed by something that now works better; do not force every person into grievance mode\n"
-                "- if the first honest thing this person would mention is a convenience, a cheaper service, or a hassle that disappeared, start there without apology\n"
-                "- some people should genuinely say that AI is not a huge personal issue for them yet; if that is the honest read, let the update stay ordinary and indirect\n"
-                "- do not default to a starter-job, junior-ladder, or office-admin complaint unless that is genuinely central to this particular person's life\n"
-                "- do not lean on paperwork, queue relief, admin hassle, or office cleanup unless this specific person would truly lead with that detail first\n"
-                "- some people barely use AI directly yet; if that fits, let them say they mostly notice it through service changes, prices, coworkers, or not much yet\n"
-                "- do not make everyone worried in the same way; some people should sound pleased, proud, amused, lightly touched, or simply unconvinced this matters much to them yet\n"
-                "- across the full population, preserve a real spread: some people should sound enthusiastic, some quietly positive, some mixed, some lightly touched, some skeptical, and some materially harmed\n"
-                "- many people should begin from one ordinary life detail, not an ideology about AI; household reality comes first and the politics follows from that if it shows up at all\n"
-                "- if AI is not the first thing this person would say, let it stay in the background or go unnamed; the update can still be about price, routine, care, school, status, work, or one odd local change\n"
-                "- do not force every update to explain AI directly; start from the lived event and mention the system only if this person would naturally do that\n"
-                "- let some people first talk about feeling more capable, less dependent on scarce experts, or newly able to handle a task they used to avoid\n"
-                "- if the honest update is about tutoring help, shopping confidence, translation, planning, care coordination, design help, entertainment, or one strange new convenience, let that be the center of the answer\n"
-                "- do not let the population collapse into one repeating office-work story; rotate through care, errands, schooling, logistics, entertainment, small business, status, prices, household planning, neighborhood life, and people who mostly notice better services\n"
+                "- the tone can be pleased, skeptical, relieved, annoyed, or mixed, but it should always sound local, partial, and lived-in\n"
+                "- if the best update is mostly good news, let it be mostly good news\n"
+                "- if the best update is mostly indirect, let it stay indirect\n"
+                "- politics is optional unless it is salient right now, and if it appears it should be tied to pay, staffing, bills, service reliability, status loss, or local business conditions\n"
+                "- do not mention the incumbent, player, or opponent by name unless this person would spontaneously bring them up in ordinary conversation\n"
+                "- if AI is not the first thing this person would say, let it stay in the background or go unnamed\n"
+                "- do not force every update to explain AI directly\n"
+                "- recent_ai_moment can be indirect, quiet, or even effectively absent if AI is not actually salient in the moment\n"
+                "- do not lean on one recycled helper-app, tutoring, translation, office-cleanup, or paperwork story unless the seed or prior update truly makes that mechanism central for this specific person\n"
+                "- let some people first talk about feeling more capable, less dependent on scarce experts, newly able to handle a task they used to avoid, newly able to compare options, newly exposed to a new dependency, or newly able to run a household or small organization differently\n"
+                "- spread those concrete gains and frictions across very different domains: home repairs, parenting, farming, selling online, hobbies, design, care planning, insurance fights, school placement, benefits appeals, fraud defense, inventory, diagnosis, contracting, scheduling, neighborhood alerts, permitting, procurement, remittances, informal trade, disaster prep, or something idiosyncratic to this person\n"
+                "- some people should sound casually pleased, relieved, or quietly impressed by something that now works better; do not force every person into grievance mode\n"
+                "- across the full population, preserve a real spread: enthusiastic, quietly positive, mixed, lightly touched, skeptical, and materially harmed all need to exist\n"
+                "- do not let the population collapse into one repeating office-work story\n"
                 "- if the stage already lives inside a changed settlement, let some people name that new baseline directly: what now pays the bills, what account or institution they rely on, how their week changed, or which company or agency they feel dependent on\n"
-                "- in later or stranger chapters, do not make everyone sound like they are reacting to a slightly better app; some people should talk about a monthly machine check, the public system that pays for basic AI help, altered schedules, public systems, or platform dependence when that is what they honestly notice first\n"
+                "- in later or stranger chapters, some people may talk about new income arrangements, public AI access, platform dependence, altered schedules, security pressure, or changed family routines when that is what they honestly notice first, but do not make everyone echo the same new baseline phrase\n"
                 "- town_hall_question must be the one direct question this person would ask a candidate if handed a microphone today; usually 1 sentence, sometimes 2 very short ones\n"
                 "- town_hall_question should be plain, lived-in, and easy to understand on first hearing; no moderator framing, no speech, and no policy-jargon pileups\n"
                 "- town_hall_question should usually grow out of current_update, current_worries, or current_hopes rather than abstract ideology\n"
@@ -293,6 +287,7 @@ class GabrielService:
 
     def _stage_capsule(self, stage: StagePackage) -> str:
         macro_lines = [line for line in stage.economic_indicators[:3] if line]
+        background_lines = [line for line in stage.economic_indicators[3:6] if line]
         capability_line = stage.capability_frontier_now.strip()
         upside_line = stage.dominant_upside.strip() or next(
             (
@@ -311,6 +306,17 @@ class GabrielService:
             ("Ownership and chokepoints", stage.ownership_regime.strip()),
             ("Public services", stage.public_service_norm.strip()),
         ]
+        background_section = [
+            "Background currents worth noticing:",
+            *[f"- {line}" for line in background_lines[:2]],
+            *(
+                [f"- {stage.tension_points[0]}"]
+                if stage.tension_points and stage.tension_points[0] not in background_lines
+                else []
+            ),
+        ]
+        if len(background_section) == 1:
+            background_section.append("- No extra background current is dominating above the main story yet.")
         lines = [
             "Big capability change:",
             *([f"- {capability_line}"] if capability_line else []),
@@ -326,6 +332,18 @@ class GabrielService:
             f"- {stage.still_hard_now or 'Plenty of life still runs through people, trust, and ordinary local routines.'}",
             "Main split or friction:",
             f"- {unresolved_line or 'One important bottleneck or unfairness is still hanging over everyday life.'}",
+            "What different people are noticing differently:",
+            f"- Some are defending: {upside_line or 'a useful gain they do not want to lose'}",
+            f"- Others are pressing on: {unresolved_line or 'a bottleneck or unfairness they feel directly'}",
+            "Lived channels to rotate across the population:",
+            "- One household-budget or family-coordination change",
+            "- One work, small-business, or institutional workflow change",
+            "- One service-quality, access, or public-system change",
+            "- One dependence, choke-point, or platform-control anxiety",
+            "- One hobby, community, informal-market, or family-bargaining change",
+            "- One infrastructure, buildout, or geopolitical current touching ordinary life from the side",
+            "- One person who is only lightly touched or mostly noticing second-order effects",
+            *background_section,
         ]
         return "\n".join(lines)
 
@@ -588,18 +606,18 @@ class GabrielService:
 
     def _core_question_specs(self, player_name: str, opponent_name: str) -> list[PollQuestionSpec]:
         return [
-            PollQuestionSpec(key="capability_read", board_label="Capability read", board_slot="capability", question="Choose one: right now AI mostly feels able to handle broad computer work and guided decisions, strong expert-style help across daily life, only narrow assistant tasks, mostly search and drafting, or not much reliably yet."),
+            PollQuestionSpec(key="capability_read", board_label="Capability now", board_slot="capability", question="Choose one: right now AI mostly feels able to handle broad computer work and guided decisions, strong expert-style help across daily life, only narrow assistant tasks, mostly search and drafting, or not much reliably yet."),
             PollQuestionSpec(key="national_effect", board_label="National read", board_slot="national", question="Choose one: the biggest national effect of AI right now feels like broader capability across work and daily life, cheaper or better services, more leverage for smaller organizations, more power for big firms, or still too uneven to judge."),
             PollQuestionSpec(key="trusted_task", question="In one sentence, what is one task or service you now trust AI to handle that you would not have trusted a couple of years ago, and what makes it feel reliable enough now?"),
             PollQuestionSpec(key="still_human", board_label="Still human", question="In one sentence, what still clearly needs a person, trust, physical handling, or local judgment, no matter how good the software gets?"),
-            PollQuestionSpec(key="ai_gain", board_label="What got better", board_slot="gain", question="In one sentence, what part of life has gotten noticeably easier, cheaper, or better because of AI lately, and why would you miss it if it vanished?"),
+            PollQuestionSpec(key="ai_gain", board_label="Best gain", board_slot="gain", question="In one sentence, what part of life has gotten noticeably easier, cheaper, or better because of AI lately, and why would you miss it if it vanished?"),
             PollQuestionSpec(key="keep_change", board_label="People keep", board_slot="gain", question="In one sentence, what AI-enabled change in daily life would you hate to lose right now because it made something more possible, cheaper, or easier?"),
             PollQuestionSpec(key="new_capability", question="In one sentence, what can AI now help you do that used to take more time, money, or expertise than you had?"),
             PollQuestionSpec(key="newly_normal", question="In one sentence, what has quietly become normal because capable software is now in the background around you?"),
             PollQuestionSpec(key="barely_notice", question="In one sentence, where do you still barely notice AI in your own life, and what still feels basically ordinary?"),
             PollQuestionSpec(key="main_pressure", board_label="Main pressure", board_slot="pressure", question="In one sentence, what change from AI is most shaping your life right now, for better or worse, and how does it actually show up?"),
-            PollQuestionSpec(key="daily_role", question="Choose one: in your life right now, AI feels mostly like a useful convenience, a stronger work or study tool, a way to do more outside your old skill boundary, a background service that quietly helps, a risk you are watching, or not much yet."),
-            PollQuestionSpec(key="life_touchpoint", question="Choose one: AI is touching your life most through work tasks, shopping or bills, school or learning, medical or care coordination, entertainment or search, travel or planning, household organization, news or scams, or not much yet."),
+            PollQuestionSpec(key="daily_role", board_label="Daily role", question="Choose one: in your life right now, AI feels mostly like a useful convenience, a stronger work or study tool, a way to do more outside your old skill boundary, a background service that quietly helps, a risk you are watching, or not much yet."),
+            PollQuestionSpec(key="life_touchpoint", board_label="Where it lands", question="Choose one: AI is touching your life most through work tasks, shopping or bills, school or learning, medical or care coordination, entertainment or search, travel or planning, household organization, news or scams, or not much yet."),
             PollQuestionSpec(key="expertise_access", question="Choose one: compared with a few years ago, useful expertise now feels much easier to access, somewhat easier, about the same, more confusing, or no more available than before."),
             PollQuestionSpec(key="education_shift", question="Choose one: in school or learning around you, AI mostly feels like better tutoring and faster mastery, easier cheating and shortcuts, stronger tools with unclear rules, not much change, or not relevant to my life."),
             PollQuestionSpec(key="pace_read", question="Choose one: around you, AI adoption feels too slow to deliver the gains, about right, a bit too fast, much too fast, or hardly visible yet."),
@@ -607,9 +625,9 @@ class GabrielService:
             PollQuestionSpec(key="econ_read", question="Choose one: around you, the economy feels stronger and more capable, mixed but functioning, split between winners and losers, weaker, or stalled."),
             PollQuestionSpec(key="service_reliability", question="Choose one: compared with two years ago, everyday services now feel more reliable and more capable, faster but less trusted, cheaper but more confusing, not much different, or harder to trust."),
             PollQuestionSpec(key="ai_comfort", board_label="AI comfort", question="How comfortable do you feel with AI showing up in work, services, and daily routines: very comfortable, somewhat comfortable, mixed, somewhat uncomfortable, or very uncomfortable?"),
-            PollQuestionSpec(key="job_worry", question="How worried are you about job loss or income disruption from AI: not worried, slightly worried, mixed, worried, or very worried?"),
-            PollQuestionSpec(key="public_stability", board_label="Public stability", question="Choose one: compared with two years ago, daily life around you feels more capable and convenient, somewhat better, mixed, somewhat more strained, or much more strained."),
-            PollQuestionSpec(key="household_security", question="Choose one: over the next year, your household finances feel very secure, somewhat secure, mixed, somewhat insecure, or very insecure."),
+            PollQuestionSpec(key="job_worry", board_label="Job strain", question="How worried are you about job loss or income disruption from AI: not worried, slightly worried, mixed, worried, or very worried?"),
+            PollQuestionSpec(key="public_stability", board_label="Daily life", question="Choose one: compared with two years ago, daily life around you feels more capable and convenient, somewhat better, mixed, somewhat more strained, or much more strained."),
+            PollQuestionSpec(key="household_security", board_label="Household read", question="Choose one: over the next year, your household finances feel very secure, somewhat secure, mixed, somewhat insecure, or very insecure."),
             PollQuestionSpec(key="biggest_worry", board_label="Top worry", board_slot="pressure", question="Choose one: when you think about AI right now, which issue most needs attention first: job security, scams or misinformation, human control and safety, concentration of power, keeping the gains broad, international competition, or something else?"),
             PollQuestionSpec(key="fairness", question="In one sentence, what feels fairest or most unfair about how the gains and disruptions from AI are being shared where you live?"),
             PollQuestionSpec(key="next_two_years", question="Choose one: over the next two years, who most needs to benefit more clearly from AI for the country to feel on the right track: ordinary households, exposed workers, small local businesses, public services, large national firms, or no one clearly yet?"),
@@ -768,20 +786,20 @@ class GabrielService:
     def _dummy_updates(self, personas: pd.DataFrame, stage: StagePackage, incumbent_name: str) -> pd.DataFrame:
         out = personas.copy()
         summary_templates = [
-            "Warehouse supervisor in Ohio who likes the smoother systems on the floor but is still watching whether the gains reach regular workers.",
-            "Phoenix nurse practitioner who genuinely saves time with AI triage and wants the convenience without letting staffing get thinner.",
-            "Georgia long-haul driver who sees logistics getting sharper and cheaper but still wonders what that does to dignity and bargaining power.",
-            "Seattle product manager thriving on AI tools at work and arguing the country should spread the gains wider instead of slowing everything down.",
-            "Michigan retired teacher who trusts AI health helpers for daily life and still worries about what fake media is doing to public trust.",
-            "Texas small manufacturer using automation to stay competitive and wanting smaller firms to get the same tools instead of falling behind.",
+            "Warehouse supervisor in Ohio who feels the floor got smoother and is watching whether the gain reaches the people doing the work.",
+            "Phoenix nurse practitioner who saves real time with AI triage and wants the staffing to stay human enough to trust.",
+            "Georgia long-haul driver who likes the cleaner dispatch and worries the leverage still runs uphill to the company.",
+            "Seattle product manager who is using AI tools every day and arguing the country should spread the gains wider, not slower.",
+            "Michigan retired teacher who trusts AI health helpers for daily life but still worries about fake media and soft trust.",
+            "Texas small manufacturer using automation to stay competitive and wanting smaller firms to get the same shot at the good tools.",
         ]
         update_templates = [
-            f"The floor runs smoother now, and that part is real, because the system catches the stupid delays before they snowball. I still watch who actually keeps the upside though, because the big operators are widening the gap faster than the rest of us.",
-            f"AI triage is saving me real minutes every shift, which means fewer dumb delays for patients and a little more energy left when I get home. I just do not want management acting like a better tool means they can get away with fewer people forever.",
-            f"Dispatch is sharper and some routes are less chaotic, so I get why companies want more of this. I just keep asking whether regular drivers get more leverage out of the gain or whether the software just makes it easier to squeeze us.",
-            f"The tools at work are genuinely good now, and I would not give up the speed bump they give me. The question is whether we spread that capability out or turn it into another insiders-only advantage and call that progress.",
-            f"My health app is faster than the clinic half the time, and I am not eager to go back to the old waiting game. What makes me tense is that the same internet that helps me sort things out also feels easier to fake every month.",
-            f"The new automation lets me quote jobs faster and waste less material, which is the kind of edge a small shop usually never gets. I just do not want the whole thing to end with the biggest firms owning the good systems and everyone else renting scraps from them.",
+            "The floor runs smoother now, and that part is real, because the system catches dumb delays before they snowball. I still want to know who actually keeps the upside.",
+            "AI triage is saving me real minutes every shift, which means fewer pointless delays for patients and a little more energy left when I get home. I do not want that to become an excuse to thin the staff.",
+            "Dispatch is sharper and some routes are less chaotic, so I get why companies want more of this. I still want to know whether drivers get any leverage out of it.",
+            "The tools at work are genuinely good now, and I would miss them if they vanished. The question is whether this spreads or just becomes another insiders-only advantage.",
+            "My health app is faster than the clinic half the time, and I am not eager to go back to the old waiting game. What keeps me tense is how easy it is to fake the whole thing.",
+            "The new automation lets me quote jobs faster and waste less material, which is the kind of edge a small shop usually never gets. I just do not want the biggest firms owning the good version of the future.",
         ]
         display_names = []
         roles = []
@@ -896,7 +914,7 @@ class GabrielService:
             [
                 "If these tools are making shops leaner, what keeps people like me from getting priced out of the next round?",
                 "You say care is getting better, but what keeps hospitals from treating staffing like an optional extra now?",
-                "If routes and paperwork are getting automated, where exactly does that leave the people still hauling the real load?",
+                "If routes and paperwork are getting automated, where does that leave the people still hauling the real load?",
                 "If AI can do more of the desk work, what is your plan for the kids coming up behind me?",
                 "If public life is getting filtered through machine systems, how do regular people appeal a bad call?",
                 "If bigger firms get the best tools first, what is your plan for the towns built around smaller shops?",

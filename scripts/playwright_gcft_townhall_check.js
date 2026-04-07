@@ -52,6 +52,17 @@ async function clickIfVisible(page, label) {
   return false;
 }
 
+async function clickLocatorIfVisible(locator, timeout = 5000) {
+  if (!(await locator.count())) {
+    return false;
+  }
+  if (!(await locator.isVisible().catch(() => false))) {
+    return false;
+  }
+  await locator.click({ timeout });
+  return true;
+}
+
 async function run() {
   if (!fs.existsSync(GCFT_BIN)) {
     throw new Error(`GCFT binary not found at ${GCFT_BIN}`);
@@ -59,7 +70,7 @@ async function run() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { chromium } = loadPlaywright();
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.PLAYWRIGHT_HEADLESS === "1",
     executablePath: GCFT_BIN,
     args: [
       "--use-fake-ui-for-media-stream",
@@ -104,27 +115,43 @@ async function run() {
     const townHallTab = page.getByTestId("auditorium-tab-town-hall");
     const debateTab = page.getByTestId("auditorium-tab-debate");
     let townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
-    if (!townHallSelected && await townHallTab.count()) {
-      await townHallTab.click();
+    if (!townHallSelected) {
+      const sceneTownHallHotspot = page.getByRole("button", { name: /Town hall\./i }).first();
+      if (await clickLocatorIfVisible(sceneTownHallHotspot)) {
+        notes.push("Clicked 3D town hall hotspot.");
+      } else if (await townHallTab.count()) {
+        await townHallTab.click({ timeout: 5000 });
+        notes.push("Clicked drawer town hall tab.");
+      }
       await page.waitForTimeout(1400);
       townHallSelected = (await townHallTab.getAttribute("aria-selected").catch(() => null)) === "true";
     }
     const debateSelected = (await debateTab.getAttribute("aria-selected").catch(() => null)) === "true";
 
-    await page.screenshot({ path: path.join(OUT_DIR, "01-room.png"), fullPage: true });
+    await page.screenshot({ path: path.join(OUT_DIR, "01-room.png") });
 
     const questionPanel = page.locator(".debate-room__audience-floor-note").nth(1).locator("p").first();
-    const questionPreview = await questionPanel.innerText().catch(() => null);
+    const sceneQuestionPanel = page.locator(".scene-townhall-floor p").first();
+    const questionPreview =
+      await sceneQuestionPanel.innerText().catch(async () => await questionPanel.innerText().catch(() => null));
+    const sceneVoiceButton = page.locator(".scene__voice-trigger").filter({ hasText: /Call on voter/i }).first();
     const callButton = page.getByTestId("townhall-call-on-voter");
     const callVisible = await callButton.isVisible().catch(() => false);
-    if (callVisible && !SKIP_CALL) {
-      await callButton.click();
-      notes.push("Clicked Give them the mic.");
+    const callEnabled = callVisible && await callButton.isEnabled().catch(() => false);
+    if (callVisible && callEnabled && !SKIP_CALL) {
+      if (await clickLocatorIfVisible(sceneVoiceButton)) {
+        notes.push("Clicked 3D Call on voter button.");
+      } else {
+        await callButton.click({ timeout: 5000, force: true });
+        notes.push("Clicked Give them the mic in drawer.");
+      }
       try {
         await page.waitForFunction(
           (previousText) => {
+            const sceneText = document.querySelector(".scene-townhall-floor p")?.textContent?.trim() ?? "";
             const note = document.querySelectorAll(".debate-room__audience-floor-note")[1];
-            const nextText = note?.querySelector("p")?.textContent?.trim() ?? "";
+            const drawerText = note?.querySelector("p")?.textContent?.trim() ?? "";
+            const nextText = sceneText || drawerText;
             return Boolean(nextText) && nextText !== (previousText || "").trim();
           },
           questionPreview,
@@ -133,15 +160,25 @@ async function run() {
       } catch {
         await page.waitForTimeout(3000);
       }
+    } else if (callVisible && !callEnabled) {
+      notes.push("Town hall question was already live; did not click disabled drawer button.");
+      await page.waitForTimeout(3000);
+    } else {
+      if (!SKIP_CALL && await clickLocatorIfVisible(sceneVoiceButton)) {
+        notes.push("Clicked 3D Call on voter button.");
+        await page.waitForTimeout(9000);
+      }
     }
 
-    await page.screenshot({ path: path.join(OUT_DIR, "02-townhall.png"), fullPage: true });
-    const questionText = await questionPanel.innerText().catch(() => null);
+    await page.screenshot({ path: path.join(OUT_DIR, "02-townhall.png") });
+    const questionText =
+      await sceneQuestionPanel.innerText().catch(async () => await questionPanel.innerText().catch(() => null));
     const summary = {
       url: page.url(),
       townHallSelected,
       debateSelected,
       callVisible,
+      callEnabled,
       questionPreview,
       questionText,
       notes,

@@ -79,6 +79,21 @@ async function clickComposerSend(page) {
   await page.locator(".scene__inline-composer button").click();
 }
 
+async function screenshot(page, name, consoleLines, options = {}) {
+  try {
+    await page.screenshot({
+      path: path.join(OUT_DIR, name),
+      timeout: 12000,
+      ...options,
+    });
+  } catch (error) {
+    consoleLines.push({
+      type: "screenshot",
+      text: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
 async function run() {
   if (!fs.existsSync(GCFT_BIN)) {
     throw new Error(`GCFT binary not found at ${GCFT_BIN}`);
@@ -106,27 +121,32 @@ async function run() {
     try {
       await page.locator(".scene__channel-bar--setup .scene__inline-composer input").first().waitFor({ timeout: 60000 });
     } catch (error) {
-      await page.screenshot({ path: path.join(OUT_DIR, "00-root-timeout.png"), fullPage: true });
+      await screenshot(page, "00-root-timeout.png", consoleLines, { fullPage: true });
       throw error;
     }
     await page.waitForTimeout(1500);
-    await page.screenshot({ path: path.join(OUT_DIR, "01-root.png") });
+    await screenshot(page, "01-root.png", consoleLines);
 
     const input = page.locator(".scene__channel-bar--setup .scene__inline-composer input");
     await input.fill(SETUP_PROMPT);
     await clickComposerSend(page);
     await page.waitForTimeout(3500);
-    await page.screenshot({ path: path.join(OUT_DIR, "02-root-after-setup-prompt.png") });
+    await screenshot(page, "02-root-after-setup-prompt.png", consoleLines);
 
     if (!/\?sim=/.test(page.url())) {
-      const followupInput = page.locator(".scene__channel-bar--setup .scene__inline-composer input");
-      await followupInput.waitFor({ timeout: 30000 });
-      await followupInput.fill(FOLLOWUP_PROMPT);
-      await clickComposerSend(page);
+      const launchButton = page.getByRole("button", { name: /Launch|Begin simulation/i }).first();
+      if (await launchButton.isVisible().catch(() => false)) {
+        await launchButton.click();
+      } else {
+        const followupInput = page.locator(".scene__channel-bar--setup .scene__inline-composer input");
+        await followupInput.waitFor({ timeout: 30000 });
+        await followupInput.fill(FOLLOWUP_PROMPT);
+        await clickComposerSend(page);
+      }
       await page.waitForURL(/\?sim=/, { timeout: 30000 });
     }
     await page.waitForTimeout(2500);
-    await page.screenshot({ path: path.join(OUT_DIR, "03-after-launch.png") });
+    await screenshot(page, "03-after-launch.png", consoleLines);
 
     const currentUrl = new URL(page.url());
     const simId = currentUrl.searchParams.get("sim");
@@ -144,7 +164,7 @@ async function run() {
     }
     await page.goto(`${BASE_URL.replace(/\/?$/, "")}/?sim=${simId}`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(2500);
-    await page.screenshot({ path: path.join(OUT_DIR, stageReady ? "04-stage-ready.png" : "04-stage-pending.png") });
+    await screenshot(page, stageReady ? "04-stage-ready.png" : "04-stage-pending.png", consoleLines);
 
     const summary = {
       simId,

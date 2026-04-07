@@ -67,6 +67,52 @@ function sanitizeRealtimeText(text: string): string {
     .trim();
 }
 
+async function getUserMediaWithTimeout(constraints: MediaStreamConstraints, timeoutMs = 12000) {
+  const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
+  let timeoutHandle = 0;
+  let timedOut = false;
+  try {
+    const timeoutPromise = new Promise<MediaStream>((_, reject) => {
+      timeoutHandle = window.setTimeout(() => {
+        timedOut = true;
+        reject(new Error("Microphone permission timed out. Click Speak again to retry."));
+      }, timeoutMs);
+    });
+    return await Promise.race([streamPromise, timeoutPromise]);
+  } catch (caught) {
+    if (timedOut) {
+      void streamPromise
+        .then((lateStream) => {
+          lateStream.getTracks().forEach((track) => track.stop());
+        })
+        .catch(() => undefined);
+    }
+    throw caught;
+  } finally {
+    if (timeoutHandle) {
+      window.clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (caught) {
+    if (caught instanceof DOMException && caught.name === "AbortError") {
+      throw new Error("Realtime negotiation timed out");
+    }
+    throw caught;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export function useSetupRealtimeSession({
   session,
   onSessionSync,
@@ -80,9 +126,14 @@ export function useSetupRealtimeSession({
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [recordingVoiceTurn, setRecordingVoiceTurn] = useState(false);
   const [awaitingVoiceReply, setAwaitingVoiceReply] = useState(false);
+  const statusRef = useRef<SessionStatus>("idle");
+  statusRef.current = status;
+  const liveModeRef = useRef<"text" | "voice">("text");
+  liveModeRef.current = liveMode;
   const [events, setEvents] = useState<Array<{ id: string; speaker: "user" | "assistant" | "system"; text: string; mode: "text" | "voice" | "system"; created_at: string }>>([]);
   const eventsRef = useRef(events);
   const sessionRef = useRef<SetupSessionState | null>(session);
+  sessionRef.current = session;
   const sessionIdRef = useRef<string | null>(session?.session_id ?? null);
   const connectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -112,6 +163,7 @@ export function useSetupRealtimeSession({
   const pendingSyncPromiseRef = useRef<Promise<SetupSessionState> | null>(null);
   const voiceToggleInFlightRef = useRef(false);
   const connectionRequestedRef = useRef(false);
+  const controlChannelFailureRef = useRef(false);
 
   function nextVoiceEpoch() {
     voiceEpochRef.current += 1;
@@ -123,6 +175,17 @@ export function useSetupRealtimeSession({
       window.clearTimeout(disconnectGraceTimerRef.current);
       disconnectGraceTimerRef.current = null;
     }
+  }
+
+  async function waitForConnectedStatus(timeoutMs = 12000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (statusRef.current === "connected") {
+        return true;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    return statusRef.current === "connected";
   }
 
   const appendLocalTurn = useEffectEvent((speaker: "user" | "assistant" | "system", text: string, mode: "text" | "voice" | "system") => {
@@ -139,6 +202,28 @@ export function useSetupRealtimeSession({
     pendingStreamRef.current = null;
     pendingRemoteAudioRef.current = null;
     pendingSyntheticCleanupRef.current = null;
+  });
+
+  const flagControlChannelFailure = useEffectEvent((message: string) => {
+    if (controlChannelFailureRef.current) {
+      return;
+    }
+    controlChannelFailureRef.current = true;
+    setError(message);
+    disconnect();
+  });
+
+  const attemptRemoteAudioPlay = useEffectEvent(async (audioElement: HTMLAudioElement, context: string) => {
+    try {
+      await audioElement.play();
+      return true;
+    } catch (caught) {
+      const detail = caught instanceof Error ? caught.message : "Audio playback was blocked";
+      setError(`${context}. ${detail}. Click Speak again to resume audio.`);
+      releaseAssistantSpeaking();
+      setAwaitingVoiceReply(false);
+      return false;
+    }
   });
 
   const syncInputTrackState = useEffectEvent((nextMuted = mutedRef.current) => {
@@ -158,28 +243,29 @@ export function useSetupRealtimeSession({
       audioElement.muted = nextMuted;
       if (pause) {
         audioElement.pause();
+        continue;
+      }
+      if (!nextMuted) {
+        void attemptRemoteAudioPlay(audioElement, "Orchestrator audio could not start");
       }
     }
   });
 
-  const sendEvent = useEffectEvent((payload: Record<string, unknown>) => {
+  const sendEvent = useEffectEvent((payload: Record<string, unknown>, options?: { tolerateClosed?: boolean }) => {
     const channel = dataChannelRef.current;
     if (channel?.readyState === "open") {
       channel.send(JSON.stringify(payload));
+      return true;
     }
+    if (!options?.tolerateClosed && (statusRef.current === "connected" || statusRef.current === "connecting")) {
+      flagControlChannelFailure("The setup voice control channel dropped");
+    }
+    return false;
   });
 
-  const updateVoiceTurnDetection = useEffectEvent((paused: boolean) => {
-    sendEvent({
-      type: "session.update",
-      session: {
-        audio: {
-          input: {
-            turn_detection: paused ? null : REALTIME_TURN_DETECTION,
-          },
-        },
-      },
-    });
+  const updateVoiceTurnDetection = useEffectEvent((_paused: boolean) => {
+    // Keep setup pause/resume local so the chamber mic toggle does not depend
+    // on schema-sensitive session.update payloads.
   });
 
   const disposeRealtimeTransport = useEffectEvent((
@@ -315,9 +401,28 @@ export function useSetupRealtimeSession({
     syncInputTrackState(true);
     updateVoiceTurnDetection(true);
     syncRemoteAudioState(true, true);
-    sendEvent({ type: "input_audio_buffer.clear" });
-    sendEvent({ type: "response.cancel" });
-    sendEvent({ type: "output_audio_buffer.clear" });
+    sendEvent({ type: "input_audio_buffer.clear" }, { tolerateClosed: true });
+    sendEvent({ type: "response.cancel" }, { tolerateClosed: true });
+    sendEvent({ type: "output_audio_buffer.clear" }, { tolerateClosed: true });
+    releaseAssistantSpeaking();
+    setRecordingVoiceTurn(false);
+    setAwaitingVoiceReply(false);
+  });
+
+  const pauseRealtime = useEffectEvent(() => {
+    nextVoiceEpoch();
+    activeInputEpochRef.current = null;
+    awaitFreshInputRef.current = true;
+    dropPendingVoiceResponsesRef.current = true;
+    Object.keys(responseEpochRef.current).forEach((responseId) => {
+      ignoredResponseIdsRef.current.add(responseId);
+    });
+    syncInputTrackState(true);
+    updateVoiceTurnDetection(true);
+    syncRemoteAudioState(true, true);
+    sendEvent({ type: "input_audio_buffer.clear" }, { tolerateClosed: true });
+    sendEvent({ type: "response.cancel" }, { tolerateClosed: true });
+    sendEvent({ type: "output_audio_buffer.clear" }, { tolerateClosed: true });
     releaseAssistantSpeaking();
     setRecordingVoiceTurn(false);
     setAwaitingVoiceReply(false);
@@ -337,6 +442,10 @@ export function useSetupRealtimeSession({
     syncInputTrackState(false);
     updateVoiceTurnDetection(false);
     syncRemoteAudioState(false, false);
+    const audio = remoteAudioRef.current;
+    if (audio) {
+      void attemptRemoteAudioPlay(audio, "Orchestrator audio could not resume");
+    }
   });
 
   const awaitPendingSync = useEffectEvent(async () => {
@@ -372,7 +481,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "response.created") {
-      if (liveMode === "voice") {
+      if (liveModeRef.current === "voice") {
         const response = (payload.response as Record<string, unknown> | undefined) ?? {};
         const responseId = String(response.id ?? payloadResponseId ?? "");
         if (responseId) {
@@ -394,7 +503,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "input_audio_buffer.speech_started") {
-      if (liveMode !== "voice" || mutedRef.current) {
+      if (liveModeRef.current !== "voice" || mutedRef.current) {
         return;
       }
       activeInputEpochRef.current = voiceEpochRef.current;
@@ -405,7 +514,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "input_audio_buffer.speech_stopped") {
-      if (liveMode !== "voice" || mutedRef.current) {
+      if (liveModeRef.current !== "voice" || mutedRef.current) {
         return;
       }
       setRecordingVoiceTurn(false);
@@ -413,7 +522,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "output_audio_buffer.started" || eventType === "response.output_audio.delta") {
-      if (liveMode === "voice") {
+      if (liveModeRef.current === "voice") {
         if (mutedRef.current || dropPendingVoiceResponsesRef.current) {
           return;
         }
@@ -422,7 +531,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "output_audio_buffer.stopped" || eventType === "output_audio_buffer.cleared") {
-      if (liveMode === "voice") {
+      if (liveModeRef.current === "voice") {
         releaseAssistantSpeaking();
       }
       return;
@@ -432,7 +541,7 @@ export function useSetupRealtimeSession({
       return;
     }
     if (eventType === "conversation.item.input_audio_transcription.completed") {
-      if (liveMode === "voice" && (mutedRef.current || activeInputEpochRef.current !== voiceEpochRef.current)) {
+      if (liveModeRef.current === "voice" && (mutedRef.current || activeInputEpochRef.current !== voiceEpochRef.current)) {
         return;
       }
       const transcript = String(payload.transcript ?? "").trim();
@@ -482,7 +591,7 @@ export function useSetupRealtimeSession({
     if (eventType === "response.output_text.done") {
       const responseId = String(payload.response_id ?? "");
       const finalText = sanitizeRealtimeText(String(payload.text ?? responseTextRef.current[responseId] ?? ""));
-      const voiceLikeResponse = liveMode === "voice" || Boolean(responseAudioTranscriptRef.current[responseId]);
+      const voiceLikeResponse = liveModeRef.current === "voice" || Boolean(responseAudioTranscriptRef.current[responseId]);
       if (voiceLikeResponse && (mutedRef.current || dropPendingVoiceResponsesRef.current)) {
         if (responseId) {
           delete responseTextRef.current[responseId];
@@ -521,7 +630,7 @@ export function useSetupRealtimeSession({
         return;
       }
       const responseStatus = String(response.status ?? "completed");
-      const wasVoiceResponse = liveMode === "voice" || Boolean(responseAudioTranscriptRef.current[responseId]);
+      const wasVoiceResponse = liveModeRef.current === "voice" || Boolean(responseAudioTranscriptRef.current[responseId]);
       const text = sanitizeRealtimeText(
         extractRealtimeText(response.output) ||
         String(responseTextRef.current[responseId] ?? responseAudioTranscriptRef.current[responseId] ?? ""),
@@ -553,6 +662,7 @@ export function useSetupRealtimeSession({
   });
 
   const disconnect = useEffectEvent(() => {
+    controlChannelFailureRef.current = false;
     voiceToggleInFlightRef.current = false;
     connectionRequestedRef.current = false;
     connectGenerationRef.current += 1;
@@ -579,17 +689,20 @@ export function useSetupRealtimeSession({
   });
 
   const connectInternal = useEffectEvent(async (withAudio: boolean, options?: { silentOpen?: boolean }) => {
-    const activeSession = sessionRef.current;
+    const activeSession = session ?? sessionRef.current;
     if (!activeSession) {
       throw new Error("setup chamber is not ready");
     }
-    if (status === "connecting") {
+    if (statusRef.current === "connecting") {
       return;
     }
-    if (status === "connected" && ((withAudio && liveMode === "voice") || (!withAudio && liveMode === "text"))) {
+    if (
+      statusRef.current === "connected" &&
+      ((withAudio && liveModeRef.current === "voice") || (!withAudio && liveModeRef.current === "text"))
+    ) {
       return;
     }
-    if (status === "connected") {
+    if (statusRef.current === "connected") {
       disconnect();
     }
     if (connectionRef.current || pendingConnectionRef.current || dataChannelRef.current || pendingDataChannelRef.current || remoteAudioRef.current || pendingRemoteAudioRef.current) {
@@ -597,6 +710,7 @@ export function useSetupRealtimeSession({
     }
     const generation = connectGenerationRef.current + 1;
     connectGenerationRef.current = generation;
+    controlChannelFailureRef.current = false;
     connectionRequestedRef.current = true;
     const generationMatches = () => connectGenerationRef.current === generation;
     responseTextRef.current = {};
@@ -647,7 +761,7 @@ export function useSetupRealtimeSession({
           return;
         }
         audioElement.srcObject = event.streams[0];
-        void audioElement.play().catch(() => undefined);
+        void attemptRemoteAudioPlay(audioElement, "Orchestrator audio could not start");
       };
       peerConnection.onconnectionstatechange = () => {
         if (!generationMatches()) {
@@ -680,7 +794,7 @@ export function useSetupRealtimeSession({
       };
 
       if (withAudio) {
-        localStream = await navigator.mediaDevices.getUserMedia({
+        localStream = await getUserMediaWithTimeout({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
@@ -727,6 +841,18 @@ export function useSetupRealtimeSession({
           appendLocalTurn("system", withAudio ? "Orchestrator channel live." : "Text channel live.", "system");
         }
       });
+      dataChannel.addEventListener("close", () => {
+        if (!generationMatches()) {
+          return;
+        }
+        flagControlChannelFailure("The setup voice control channel closed");
+      });
+      dataChannel.addEventListener("error", () => {
+        if (!generationMatches()) {
+          return;
+        }
+        flagControlChannelFailure("The setup voice control channel failed");
+      });
       dataChannel.onmessage = (event) => {
         if (!generationMatches()) {
           return;
@@ -737,14 +863,14 @@ export function useSetupRealtimeSession({
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
-      const response = await fetch("https://api.openai.com/v1/realtime/calls", {
+      const response = await fetchWithTimeout("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         body: offer.sdp,
         headers: {
           Authorization: `Bearer ${realtimeSession.client_secret}`,
           "Content-Type": "application/sdp",
         },
-      });
+      }, 15000);
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -766,7 +892,7 @@ export function useSetupRealtimeSession({
       await peerConnection.setRemoteDescription(answer);
       if (dataChannel.readyState !== "open") {
         await new Promise<void>((resolve, reject) => {
-          const timeout = window.setTimeout(() => reject(new Error("Realtime data channel did not open in time")), 5000);
+          const timeout = window.setTimeout(() => reject(new Error("Realtime data channel did not open in time")), 12000);
           dataChannel.addEventListener(
             "open",
             () => {
@@ -816,8 +942,13 @@ export function useSetupRealtimeSession({
       clearPendingRealtimeTransportRefs();
       const message = caught instanceof Error ? caught.message : "Failed to connect realtime session";
       setError(message);
+      setLiveMode("text");
+      mutedRef.current = false;
+      setMuted(false);
+      setRecordingVoiceTurn(false);
+      setAwaitingVoiceReply(false);
+      releaseAssistantSpeaking();
       setStatus("error");
-      disconnect();
       throw caught;
     }
   });
@@ -828,22 +959,31 @@ export function useSetupRealtimeSession({
       return;
     }
     try {
-      appendLocalTurn("user", trimmed, "text");
       if (setupLaunchIntent(trimmed)) {
+        appendLocalTurn("user", trimmed, "text");
         await awaitPendingSync();
         await syncPromptTurn(trimmed);
         return;
       }
-      queueSetupSync(trimmed);
-      const useVoiceReply = status === "connected" && liveMode === "voice";
-      if (status !== "connected") {
+      const wantsVoiceReply =
+        liveModeRef.current === "voice" ||
+        connectionRequestedRef.current ||
+        statusRef.current === "connecting";
+      if (statusRef.current !== "connected") {
         try {
-          await connectInternal(false);
+          await connectInternal(wantsVoiceReply);
+          if (wantsVoiceReply) {
+            await waitForConnectedStatus();
+          }
         } catch {
+          appendLocalTurn("user", trimmed, "text");
           await awaitPendingSync();
           return;
         }
       }
+      const useVoiceReply = statusRef.current === "connected" && liveModeRef.current === "voice";
+      appendLocalTurn("user", trimmed, "text");
+      queueSetupSync(trimmed);
       sendEvent({
         type: "conversation.item.create",
         item: {
@@ -879,7 +1019,10 @@ export function useSetupRealtimeSession({
     }
     voiceToggleInFlightRef.current = true;
     try {
-      if (status === "connected" && liveMode === "voice") {
+      if (statusRef.current === "error") {
+        disconnect();
+      }
+      if (statusRef.current === "connected" && liveModeRef.current === "voice") {
         return;
       }
       await connectInternal(true);
@@ -896,7 +1039,7 @@ export function useSetupRealtimeSession({
     if (voiceToggleInFlightRef.current) {
       return;
     }
-    if (status !== "connected" || liveMode !== "voice") {
+    if (statusRef.current !== "connected" || liveModeRef.current !== "voice") {
       return;
     }
     voiceToggleInFlightRef.current = true;
@@ -907,7 +1050,7 @@ export function useSetupRealtimeSession({
       }
       mutedRef.current = true;
       setMuted(true);
-      hardStopRealtime();
+      pauseRealtime();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Voice connection failed";
       setError(message);
@@ -917,20 +1060,22 @@ export function useSetupRealtimeSession({
   }
 
   async function toggleVoiceCapture() {
-    if (connectionRequestedRef.current && status !== "connected") {
+    if (
+      statusRef.current === "connecting" ||
+      (connectionRequestedRef.current && statusRef.current !== "connected")
+    ) {
       disconnect();
       return;
     }
     if (voiceToggleInFlightRef.current) {
       return;
     }
-    if (status === "connecting") {
-      disconnect();
+    if (statusRef.current === "connected" && liveModeRef.current === "voice") {
+      await toggleMute();
       return;
     }
-    if (status === "connected" && liveMode === "voice") {
+    if (statusRef.current === "error") {
       disconnect();
-      return;
     }
     await enableVoice();
   }

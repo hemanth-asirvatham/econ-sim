@@ -58,7 +58,7 @@ async function run() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { chromium } = loadPlaywright();
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.PLAYWRIGHT_HEADLESS === "1",
     executablePath: GCFT_BIN,
     args: [
       "--use-fake-ui-for-media-stream",

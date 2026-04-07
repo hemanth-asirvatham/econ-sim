@@ -30,11 +30,16 @@ class AppSettings(BaseSettings):
     allow_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
+            "http://localhost:5174",
+            "http://localhost:5175",
             "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174",
+            "http://127.0.0.1:5175",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
         ]
     )
+    allow_origin_regex: str = r"^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?$"
     dummy_openai: bool = False
     default_population_description: str = (
         "A representative sample of the current United States adult population, "
@@ -42,35 +47,45 @@ class AppSettings(BaseSettings):
         "family structure, ideology, ethnicity, age, and AI exposure."
     )
     default_visual_style: str = (
-        "Cezanne-Monet-Matisse civic impressionism with grounded people, public institutions, visible brushwork, "
-        "broad color planes, softened edges, luminous atmosphere, and simplified human forms; "
+        "Cezanne-Monet-Matisse civic impressionism with grounded people, public institutions, thicker layered brushstrokes, "
+        "broad color planes, softened edges, luminous atmosphere, selective abstraction, simplified human forms, and painterly illegibility for screens, labels, and signage; "
         "never glossy CGI, stock-photo realism, or cartoon stylization."
     )
     max_stage_count: int = 5
     default_persona_count: int = 64
 
     orchestrator_model: str = "gpt-5.4"
-    orchestrator_reasoning_effort: str = "low"
+    orchestrator_reasoning_effort: str = "medium"
     narration_model: str = "gpt-5.4"
     narration_reasoning_effort: str = "low"
     debate_model: str = "gpt-5.4"
     debate_reasoning_effort: str = "low"
+    council_draft_model: str = "gpt-5.4-mini"
+    council_decider_model: str = "gpt-5.4-nano"
+    council_audio_model: str = "gpt-audio"
     persona_update_model: str = "gpt-5.4"
     persona_update_reasoning_effort: str = "low"
     poll_model: str = "gpt-5.4"
     poll_reasoning_effort: str = "low"
     poll_questions_per_run: int = 24
     service_tier: str = "priority"
+    openai_response_timeout_seconds: float = 120.0
 
     realtime_model: str = "gpt-realtime-1.5"
     realtime_voice: str = "cedar"
     realtime_debate_voice: str = "ash"
     narration_voice: str = "ballad"
     realtime_input_transcription_model: str = "gpt-4o-mini-transcribe"
+    realtime_semantic_vad_eagerness: str = "low"
+    realtime_capture_vad_threshold: float = 0.88
+    realtime_capture_vad_prefix_padding_ms: int = 260
+    realtime_capture_vad_silence_duration_ms: int = 840
     speech_model: str = "gpt-4o-mini-tts"
     image_model: str = "gpt-image-1.5"
     image_size: str = "1536x1024"
-    image_quality: str = "high"
+    image_quality: str = "medium"
+    image_output_format: str = "jpeg"
+    image_output_compression: int = 85
 
     def prepare(self) -> "AppSettings":
         self.runs_dir.mkdir(parents=True, exist_ok=True)

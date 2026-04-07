@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,10 +10,14 @@ from econ_sim.config import AppSettings
 from econ_sim.models import (
     AdvisorMode,
     AuditoriumMode,
+    CouncilAdvisorDraft,
     CouncilAdvisorBeat,
+    CouncilAdvisorProfile,
+    CouncilSpeakerDecision,
     CouncilTurnPlan,
     CouncilTurnRequest,
     ConversationSyncRequest,
+    ConversationTurn,
     ConversationTurnInput,
     DocumentaryFeaturette,
     NarrativeBeat,
@@ -28,12 +33,92 @@ from econ_sim.models import (
     SetupSessionTurnRequest,
     SimulationCreateRequest,
     SimulationStatus,
+    TownHallOpponentReplyDraft,
+    TownHallOpponentReplyRequest,
     TownHallQuestionDraft,
     TownHallQuestionRequest,
 )
 from econ_sim.services import gabriel_service as gabriel_service_module
 from econ_sim.services.gabriel_service import GabrielService
 from econ_sim.services.orchestrator import StagePolishOutput
+
+
+def _standard_council_roster() -> list[CouncilAdvisorProfile]:
+    return [
+        CouncilAdvisorProfile(
+            key="capacity",
+            name="Rowan",
+            room_role="Economy",
+            country_role="national economic and industrial strategy director",
+            remit=(
+                "tracks prices, household purchasing power, machine-income flows, capability diffusion, "
+                "industrial buildout, competition, compute access, and which concrete gains households or "
+                "smaller firms would fight to keep if politics tried to choke useful capacity and supply chains"
+            ),
+            voice="cedar",
+            viewpoint="leans pro-diffusion when the gains are real, but can back restraint around bottlenecks or concentrated capture",
+        ),
+        CouncilAdvisorProfile(
+            key="innovation",
+            name="Leila",
+            room_role="Innovation",
+            country_role="science, innovation, and frontier systems advisor",
+            remit=(
+                "tracks research speed, robotics rollout, compute bottlenecks, talent pipelines, laboratory and "
+                "startup diffusion, and which institutional changes, standards, or public interfaces would unlock "
+                "more real capability instead of merely protecting incumbents"
+            ),
+            voice="marin",
+            viewpoint="pushes capability forward first, but worries about cartelized chokepoints and frozen frontier access",
+        ),
+        CouncilAdvisorProfile(
+            key="politics",
+            name="Mateo",
+            room_role="Politics",
+            country_role="political strategy director",
+            remit=(
+                "tracks coalition mood, legitimacy, polling movement, debate framing, public tolerance for change, "
+                "and which lines the player can actually defend in public without sounding evasive, bloodless, abstract, or overconfident"
+            ),
+            voice="ash",
+            viewpoint="sharp on voter interpretation, willing to defend speed when people see gains and punishing caution when it sounds fake",
+        ),
+        CouncilAdvisorProfile(
+            key="state",
+            name="Amina",
+            room_role="Security",
+            country_role="national security and state-capacity advisor",
+            remit=(
+                "tracks infrastructure, strategic dependence, war and coercion risk, resilience, defense-industrial "
+                "readiness, alliances, and what the state can actually execute, procure, secure, ration, or defend in the real world"
+            ),
+            voice="shimmer",
+            viewpoint="starts from resilience and execution, but can favor openness when it clearly makes the state stronger",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_incomplete_simulations_requeues_initializing_runs(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    initializing = await director.create_simulation(SimulationCreateRequest())
+    ready = await director.create_simulation(SimulationCreateRequest())
+    ready.status = SimulationStatus.stage_ready
+    await director.store.save(ready)
+
+    resumed: list[str] = []
+
+    async def fake_prepare_stage(simulation_id: str) -> None:
+        resumed.append(simulation_id)
+
+    director._prepare_stage = fake_prepare_stage  # type: ignore[method-assign]
+    director._tasks.clear()
+
+    await director.resume_incomplete_simulations()
+    await asyncio.sleep(0)
+
+    assert resumed == [initializing.simulation_id]
 
 
 @pytest.mark.asyncio
@@ -85,12 +170,20 @@ async def test_create_simulation_infers_later_opening_from_premise(tmp_path: Pat
         )
     )
 
-    assert director.orchestrator._effective_world_mode(state.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        state.config.premise,
+        state.config.topic_lens,
+        state.config.stakes,
+    ) >= 3
 
     await director.wait_for_pending(state.simulation_id)
     loaded = await director.get_simulation(state.simulation_id)
 
-    assert director.orchestrator._effective_world_mode(loaded.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        loaded.config.premise,
+        loaded.config.topic_lens,
+        loaded.config.stakes,
+    ) >= 3
 
 
 @pytest.mark.asyncio
@@ -344,7 +437,11 @@ async def test_setup_session_skip_ahead_stays_natural_language_only(tmp_path: Pa
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert all("starting_world_mode" not in change for change in updated.guidance.applied_updates)
 
 
@@ -364,7 +461,11 @@ async def test_setup_session_future_brief_stays_in_premise_without_turning_into_
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert "fifteen years" in updated.config.premise.lower()
     assert updated.config.topic_lens == ""
     assert updated.config.population_description == settings.default_population_description
@@ -386,7 +487,11 @@ async def test_setup_session_future_world_request_stays_in_premise_not_topic_len
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert "fifteen to twenty years in the future" in updated.config.premise.lower()
     assert updated.config.topic_lens == ""
     assert "structurally remade by advanced ai" not in updated.config.population_description.lower()
@@ -409,7 +514,11 @@ async def test_setup_session_broad_future_brief_with_values_stays_out_of_topic_l
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert "fifteen years from now" in updated.config.premise.lower()
     assert updated.config.topic_lens == ""
     assert updated.config.population_description == settings.default_population_description
@@ -431,7 +540,11 @@ async def test_setup_session_broad_future_world_with_schools_keeps_broad_populat
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert updated.config.topic_lens == ""
     assert updated.config.population_description == settings.default_population_description
 
@@ -468,7 +581,11 @@ async def test_setup_session_future_after_transition_brief_infers_later_opening(
         ),
     )
 
-    assert director.orchestrator._effective_world_mode(updated.config) == "radical"
+    assert director.orchestrator._starting_phase_anchor(
+        updated.config.premise,
+        updated.config.topic_lens,
+        updated.config.stakes,
+    ) >= 3
     assert "fifteen to twenty years after" in updated.config.premise.lower()
     assert updated.config.topic_lens == ""
 
@@ -1007,6 +1124,19 @@ async def test_create_simulation_without_names_uses_randomized_ticket(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_prepare_stage_autogenerates_dynamic_council_roster(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(country="Mexico", premise="Start later in a machine-heavy settlement with a sharper focus on public services and household security."))
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    assert loaded.config.council_roster
+    assert loaded.config.council_roster[0].name not in {"Rowan", "Leila", "Mateo", "Amina"}
+    assert all(advisor.voice for advisor in loaded.config.council_roster)
+
+
+@pytest.mark.asyncio
 async def test_debate_realtime_session_uses_stored_opponent_voice(tmp_path: Path):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
@@ -1066,7 +1196,9 @@ async def test_advisor_realtime_session_uses_manual_response_for_council_only(tm
     )
 
     assert captured[0]["create_response"] is False
+    assert captured[0]["capture_only"] is True
     assert captured[1]["create_response"] is True
+    assert captured[1]["capture_only"] is False
     council_tool_names = [tool["name"] for tool in captured[0]["tools"]]
     solo_tool_names = [tool["name"] for tool in captured[1]["tools"]]
     assert captured[0]["tools"] == []
@@ -1097,12 +1229,10 @@ async def test_council_prompts_push_for_real_arguments_not_slogans(tmp_path: Pat
 
     assert "if a line could fit on a campaign sticker, it is too empty" in live_prompt
     assert "plain speech beats smart-sounding fog" in live_prompt
-    assert "text must contain a concrete argument, not a generic posture line" in turn_prompt
-    assert "understandable to a smart layperson on first hearing" in turn_prompt
-    assert "Settlement in force:" in turn_prompt
-    assert "Decision brief in force:" in turn_prompt
-    assert "machine income, public AI help, compute chokepoints" in turn_prompt
-    assert "Usually exactly one advisor should speak in a beat" in turn_prompt
+    assert "This council runs in three moving parts." in turn_prompt
+    assert "Do not ask advisors to report urgency." in turn_prompt
+    assert "Keep each spoken beat one lane wide, concrete, and ready for audio." in turn_prompt
+    assert "Council roster:" in turn_prompt
 
 
 def test_resolve_asset_file_finds_frontend_bundle_and_run_media(tmp_path: Path):
@@ -1146,8 +1276,53 @@ async def test_debate_realtime_session_uses_town_hall_floor_prompt_when_requeste
     assert session.session_type == "debate"
     assert session.session_variant == "town_hall"
     assert captured[0]["create_response"] is False
-    assert "not as a moderator composite or a second candidate" in str(captured[0]["instructions"])
-    assert "The audience question should land first" in str(captured[0]["instructions"])
+    assert captured[0]["capture_only"] is True
+    assert "Your only job is to hear the player's answer clearly" in str(captured[0]["instructions"])
+    assert "Ignore applause, chair noise, audience murmur" in str(captured[0]["instructions"])
+
+
+@pytest.mark.asyncio
+async def test_generate_town_hall_opponent_reply_persists_opponent_turn(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index]
+    citizen = stage.sample_citizens[0]
+
+    await director.generate_town_hall_question(
+        loaded.simulation_id,
+        TownHallQuestionRequest(citizen_id=citizen.citizen_id, mode="voice"),
+    )
+    await director.sync_conversation(
+        loaded.simulation_id,
+        ConversationSyncRequest(
+            role=RealtimeRole.debate,
+            auditorium_mode=AuditoriumMode.town_hall,
+            turns=[ConversationTurnInput(speaker="user", text="I want faster gains, but I also want a backstop if this strips bargaining power.", mode="voice")],
+        ),
+    )
+
+    async def fake_parse(**kwargs):
+        return (
+            TownHallOpponentReplyDraft(
+                reply="Then build the backstop without freezing the gains. Keep the tools open, force real competition, and make the payout visible when the upside pools upward."
+            ),
+            None,
+        )
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_town_hall_opponent_reply(
+        loaded.simulation_id,
+        TownHallOpponentReplyRequest(mode="voice"),
+    )
+
+    assert response.reply_turn.speaker == "assistant"
+    assert response.reply_turn.speaker_name == loaded.config.opponent_name
+    assert response.reply_turn.speaker_voice == loaded.config.opponent_voice
+    assert "freeze the gains" in response.reply_turn.text.lower() or "freezing the gains" in response.reply_turn.text.lower()
 
 
 @pytest.mark.asyncio
@@ -1179,27 +1354,35 @@ async def test_advisor_council_conversation_thread_is_separate_from_solo_thread(
 
 
 @pytest.mark.asyncio
-async def test_generate_council_turn_is_provisional_until_synced(tmp_path: Path):
+async def test_generate_council_turn_commits_transcript_and_board_notes(tmp_path: Path):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
-    state = await director.create_simulation(SimulationCreateRequest())
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
     await director.wait_for_pending(state.simulation_id)
     loaded = await director.get_simulation(state.simulation_id)
 
     async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        if text_format is CouncilAdvisorDraft:
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="Keep the broad gains open while we watch concentration.",
+                    board_notes=["Keep consumer AI open"],
+                ),
+                "advisor-response-id",
+            )
+        assert text_format is CouncilSpeakerDecision
         return (
-            CouncilTurnPlan(
-                lead="Rowan",
+            CouncilSpeakerDecision(
+                next_speaker="Rowan",
                 reason="capability and buildout",
+                yield_after_turn=False,
                 board_notes=["Keep consumer AI open"],
-                advisors=[
-                    CouncilAdvisorBeat(name="Rowan", urgency=8, speak=True, text="Keep the broad gains open while we watch concentration."),
-                    CouncilAdvisorBeat(name="Leila", urgency=6, speak=False, text=""),
-                    CouncilAdvisorBeat(name="Mateo", urgency=4, speak=False, text=""),
-                    CouncilAdvisorBeat(name="Amina", urgency=3, speak=False, text=""),
-                ],
+                contrast=[],
             ),
-            "response-id",
+            "decider-response-id",
         )
 
     director.gateway.parse = fake_parse  # type: ignore[method-assign]
@@ -1210,43 +1393,23 @@ async def test_generate_council_turn_is_provisional_until_synced(tmp_path: Path)
     )
 
     updated = await director.get_simulation(loaded.simulation_id)
-    assert updated.conversation_threads.get(response.thread_key, []) == []
-    assert updated.stages[updated.active_stage_index].policy_notes == []
+    assert [turn.text for turn in updated.conversation_threads.get(response.thread_key, [])] == [
+        "What does the room think?",
+        "Keep the broad gains open while we watch concentration.",
+    ]
+    assert updated.stages[updated.active_stage_index].policy_notes == ["Keep consumer AI open."]
     assert response.board_notes == ["Keep consumer AI open."]
     assert response.yield_after_turn is False
-    assert response.player_proxy_urgency == 0
-    assert response.speaker_order == ["Rowan"]
+    assert response.next_speaker == "capacity"
+    assert [turn.speaker_name for turn in response.turns] == ["Rowan"]
     assert [turn.text for turn in response.turns] == ["Keep the broad gains open while we watch concentration."]
-
-    await director.sync_conversation(
-        loaded.simulation_id,
-        ConversationSyncRequest(
-            role=RealtimeRole.advisor,
-            advisor_mode=AdvisorMode.council,
-            turns=[
-                ConversationTurnInput(speaker="user", text="What does the room think?", mode="voice"),
-                ConversationTurnInput(
-                    speaker="assistant",
-                    speaker_name="Rowan",
-                    speaker_voice="cedar",
-                    text="Keep the broad gains open while we watch concentration.",
-                    mode="voice",
-                ),
-            ],
-            board_notes=response.board_notes,
-        ),
-    )
-
-    committed = await director.get_simulation(loaded.simulation_id)
-    assert len(committed.conversation_threads.get(response.thread_key, [])) == 2
-    assert committed.stages[committed.active_stage_index].policy_notes == ["Keep consumer AI open."]
 
 
 @pytest.mark.asyncio
 async def test_generate_council_turn_can_continue_without_new_player_text(tmp_path: Path):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
-    state = await director.create_simulation(SimulationCreateRequest())
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
     await director.wait_for_pending(state.simulation_id)
     loaded = await director.get_simulation(state.simulation_id)
 
@@ -1271,22 +1434,28 @@ async def test_generate_council_turn_can_continue_without_new_player_text(tmp_pa
     captured_input_texts: list[str] = []
 
     async def fake_parse(**kwargs):
-        captured_input_texts.append(str(kwargs["input_text"]))
-        return (
-            CouncilTurnPlan(
-                lead="Leila",
-                reason="household fairness pressure now matters more",
-                yield_after_turn=True,
-                player_proxy_urgency=8,
-                advisors=[
-                    CouncilAdvisorBeat(name="Leila", urgency=9, speak=True, text="Then answer the family question directly, because people will forgive speed before they forgive feeling cut out."),
-                    CouncilAdvisorBeat(name="Rowan", urgency=6, speak=False, text=""),
-                    CouncilAdvisorBeat(name="Mateo", urgency=5, speak=False, text=""),
-                    CouncilAdvisorBeat(name="Amina", urgency=4, speak=False, text=""),
-                ],
-            ),
-            "response-id",
-        )
+        text_format = kwargs["text_format"]
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="Leila",
+                    reason="household fairness pressure now matters more",
+                    yield_after_turn=True,
+                    contrast=[],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            captured_input_texts.append(str(kwargs["input_text"]))
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="innovation",
+                    advisor_name="Leila",
+                    text="Then answer the family question directly, because people will forgive speed before they forgive feeling cut out.",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
 
     director.gateway.parse = fake_parse  # type: ignore[method-assign]
 
@@ -1296,57 +1465,138 @@ async def test_generate_council_turn_can_continue_without_new_player_text(tmp_pa
     )
 
     assert len(captured_input_texts) == 1
-    assert captured_input_texts[0].startswith("Council continuation turn.")
-    assert "React directly to that last spoken line instead of restarting from the president's original prompt." in captured_input_texts[0]
-    assert "If the room should now wait for the president, set yield_after_turn true and leave advisor text empty." in captured_input_texts[0]
+    assert captured_input_texts[0].startswith("Take the next live beat in the current council exchange.")
+    assert "The president explicitly wants the room to argue it out." in captured_input_texts[0]
+    assert "Speak naturally and directly." in captured_input_texts[0]
     assert response.lead == "Leila"
-    assert response.yield_after_turn is True
-    assert response.player_proxy_urgency == 8
-    assert response.speaker_order == ["Leila"]
+    assert response.next_speaker == "innovation"
+    assert response.yield_after_turn is False
+    assert [turn.speaker_name for turn in response.turns] == ["Leila"]
     assert [turn.text for turn in response.turns] == [
         "Then answer the family question directly, because people will forgive speed before they forgive feeling cut out."
     ]
 
 
 @pytest.mark.asyncio
+async def test_generate_council_turn_trims_persisted_council_context(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    long_turns = []
+    for index in range(14):
+        if index % 2 == 0:
+            long_turns.append(ConversationTurnInput(speaker="user", text=f"Question {index}", mode="voice"))
+        else:
+            long_turns.append(
+                ConversationTurnInput(
+                    speaker="assistant",
+                    speaker_name="Rowan",
+                    speaker_voice="cedar",
+                    text=f"Reply {index}",
+                    mode="voice",
+                )
+            )
+
+    sync = await director.sync_conversation(
+        loaded.simulation_id,
+        ConversationSyncRequest(
+            role=RealtimeRole.advisor,
+            advisor_mode=AdvisorMode.council,
+            turns=long_turns,
+        ),
+    )
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="Rowan",
+                    reason="Rowan has the clearest next beat.",
+                    yield_after_turn=False,
+                    contrast=[],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="Start with the cheap gains people already feel.",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(
+            text="What is the first thing I should say back to them?",
+            mode="voice",
+            provisional_turns=[
+                ConversationTurnInput(
+                    speaker=turn.speaker,
+                    speaker_name=turn.speaker_name,
+                    speaker_voice=turn.speaker_voice,
+                    text=turn.text,
+                    mode=turn.mode,
+                )
+                for turn in (sync.simulation.conversation_threads.get(sync.thread_key, []))
+            ],
+        ),
+    )
+
+    updated = await director.get_simulation(loaded.simulation_id)
+    thread = updated.conversation_threads[response.thread_key]
+    assert len(thread) == director._COUNCIL_CONTEXT_TURN_LIMIT
+    assert thread[-2].text == "What is the first thing I should say back to them?"
+    assert thread[-1].text == "Start with the cheap gains people already feel."
+    assert thread[0].text == "Question 4"
+
+
+@pytest.mark.asyncio
 async def test_generate_council_turn_explicit_disagreement_adds_stronger_room_fight_guidance(tmp_path: Path):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
-    state = await director.create_simulation(SimulationCreateRequest())
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
     await director.wait_for_pending(state.simulation_id)
     loaded = await director.get_simulation(state.simulation_id)
 
     captured: dict[str, object] = {}
 
     async def fake_parse(**kwargs):
-        captured["input_text"] = kwargs["input_text"]
-        captured["instructions"] = kwargs["instructions"]
-        captured["max_output_tokens"] = kwargs["max_output_tokens"]
-        return (
-            CouncilTurnPlan(
-                lead="Rowan",
-                reason="Rowan opens and Leila should answer next",
-                yield_after_turn=False,
-                player_proxy_urgency=2,
-                advisors=[
-                    CouncilAdvisorBeat(
-                        name="Rowan",
-                        urgency=9,
-                        speak=True,
-                        text="If we freeze deployment into administered pricing first, we lock scarce capacity into the incumbents already sitting on the best systems.",
-                    ),
-                    CouncilAdvisorBeat(
-                        name="Leila",
-                        urgency=8,
-                        speak=True,
-                        text="And if we leave it to market rollout first, families pay monopoly rents while you wait for competition that may never show up in childcare, care, or housing.",
-                    ),
-                    CouncilAdvisorBeat(name="Mateo", urgency=5, speak=False, text=""),
-                    CouncilAdvisorBeat(name="Amina", urgency=4, speak=False, text=""),
-                ],
-            ),
-            "response-id",
-        )
+        text_format = kwargs["text_format"]
+        captured.setdefault("max_output_tokens", []).append(kwargs["max_output_tokens"])
+        if text_format is CouncilSpeakerDecision:
+            captured["decider_input_text"] = kwargs["input_text"]
+            captured["decider_instructions"] = kwargs["instructions"]
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="Rowan",
+                    reason="Rowan opens and Leila should answer next",
+                    yield_after_turn=False,
+                    contrast=["Leila"],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            captured.setdefault("candidate_instructions", []).append(kwargs["instructions"])
+            captured.setdefault("candidate_input_texts", []).append(kwargs["input_text"])
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="If we freeze deployment into administered pricing first, we lock scarce capacity into the incumbents already sitting on the best systems.",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
 
     director.gateway.parse = fake_parse  # type: ignore[method-assign]
 
@@ -1358,17 +1608,178 @@ async def test_generate_council_turn_explicit_disagreement_adds_stronger_room_fi
         ),
     )
 
-    assert captured["max_output_tokens"] == 420
-    assert "The player explicitly wants an internal argument." in str(captured["input_text"])
-    assert "let that disagreement surface now or in the very next beat" in str(captured["input_text"])
-    assert "This is a real private strategy room" in str(captured["instructions"])
-    assert "A good line usually contains one claim plus one mechanism, tradeoff, or consequence" in str(captured["instructions"])
-    assert "Aim for roughly 10 to 28 words." in str(captured["instructions"])
-    assert "Rowan should usually notice deployment, prices, competition" in str(captured["instructions"])
-    assert "Leila should usually notice research speed, robotics, compute bottlenecks, frontier diffusion" in str(captured["instructions"])
-    assert response.speaker_order == ["Rowan", "Leila"]
-    assert [turn.speaker_name for turn in response.turns] == ["Rowan", "Leila"]
+    assert captured["max_output_tokens"] == [96, 120]
+    assert len(captured["candidate_input_texts"]) == 1
+    assert "The president explicitly wants the room to argue it out." in str(captured["candidate_input_texts"][0])
+    assert "Speak naturally and directly." in str(captured["candidate_input_texts"][0])
+    assert "You already have the floor." in str(captured["candidate_instructions"][0])
+    assert "Because you already have the floor, default to a real spoken line instead of yielding." in str(captured["candidate_instructions"][0])
+    assert "If the player clearly asked for a poll, a room move, or a board change" in str(captured["candidate_instructions"][0])
+    assert "You are the floor arbiter for a live strategy council." in str(captured["decider_instructions"])
+    assert "Choose the next floor owner now." in str(captured["decider_input_text"])
+    assert [turn.speaker_name for turn in response.turns] == ["Rowan"]
     assert response.contrast == ["Leila"]
+
+
+@pytest.mark.asyncio
+async def test_generate_council_turn_uses_dynamic_roster(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(
+        SimulationCreateRequest(
+            council_roster=[
+                CouncilAdvisorProfile(
+                    key="growth",
+                    name="Nova",
+                    room_role="Innovation",
+                    country_role="frontier diffusion advisor",
+                    remit="tracks product diffusion, tooling, and how ordinary households see gains",
+                    voice="marin",
+                ),
+                CouncilAdvisorProfile(
+                    key="stability",
+                    name="Iris",
+                    room_role="State",
+                    country_role="resilience and public-services advisor",
+                    remit="tracks resilience, public trust, and execution risk",
+                    voice="shimmer",
+                ),
+            ]
+        )
+    )
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        instructions = str(kwargs["instructions"])
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="growth",
+                    reason="Nova best advances the visible gain",
+                    contrast=["stability"],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            if "Nova" in instructions:
+                return (
+                    CouncilAdvisorDraft(
+                        advisor_key="growth",
+                        advisor_name="Nova",
+                        text="Keep the new capability flowing so households and small firms actually feel it.",
+                    ),
+                    "advisor-response-id",
+                )
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="stability",
+                    advisor_name="Iris",
+                    text="",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(text="What should we do first?", mode="text"),
+    )
+
+    assert response.next_speaker == "growth"
+    assert response.lead == "Nova"
+    assert [turn.speaker_name for turn in response.turns] == ["Nova"]
+    assert [turn.speaker_name for turn in response.turns] == ["Nova"]
+    assert response.turns[0].speaker_voice == "marin"
+
+
+@pytest.mark.asyncio
+async def test_generate_council_turn_keeps_provisional_advisor_context_on_new_user_turn(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(
+        SimulationCreateRequest(
+            council_roster=[
+                CouncilAdvisorProfile(
+                    key="growth",
+                    name="Nova",
+                    room_role="Innovation",
+                    country_role="frontier diffusion advisor",
+                    remit="tracks product diffusion, tooling, and how ordinary households see gains",
+                    voice="marin",
+                ),
+                CouncilAdvisorProfile(
+                    key="stability",
+                    name="Iris",
+                    room_role="State",
+                    country_role="resilience and public-services advisor",
+                    remit="tracks resilience, public trust, and execution risk",
+                    voice="shimmer",
+                ),
+                CouncilAdvisorProfile(
+                    key="politics",
+                    name="Mateo",
+                    room_role="Politics",
+                    country_role="coalition and public mandate advisor",
+                    remit="tracks coalition mood, rhetoric, and debate risk",
+                    voice="ash",
+                ),
+            ]
+        )
+    )
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    captured: dict[str, list[str]] = {"candidate_instructions": []}
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        instructions = str(kwargs["instructions"])
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="growth",
+                    reason="Nova has the clean next beat",
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            captured["candidate_instructions"].append(instructions)
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="growth",
+                    advisor_name="Nova",
+                    text="Keep the lines open where households are already seeing the gain.",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    provisional_turns = [
+        ConversationTurnInput(
+            speaker="assistant",
+            speaker_name="Iris",
+            speaker_voice="shimmer",
+            text="If the grid and procurement stay brittle, the visible gains will not hold.",
+            mode="voice",
+        )
+    ]
+    await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(
+            text="So where do you want to push first?",
+            mode="voice",
+            provisional_turns=provisional_turns,
+        ),
+    )
+
+    assert captured["candidate_instructions"]
+    assert "Most recent spoken advisor line:\n- If the grid and procurement stay brittle, the visible gains will not hold." in captured["candidate_instructions"][0]
 
 
 def test_council_turn_helpers_detect_room_fights_and_trailing_beats(tmp_path: Path):
@@ -1410,6 +1821,267 @@ def test_council_turn_helpers_detect_room_fights_and_trailing_beats(tmp_path: Pa
         ]
     )
     assert trailing_count == 2
+
+
+@pytest.mark.asyncio
+async def test_targeted_council_roster_prefers_named_advisor(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+
+    roster = director._targeted_council_roster(
+        state,
+        [
+            ConversationTurn(
+                speaker="user",
+                text="Leila, what does the compute and robotics bottleneck actually look like here?",
+                mode="text",
+            )
+        ],
+    )
+
+    assert roster is not None
+    assert [advisor.key for advisor in roster] == ["innovation"]
+
+
+@pytest.mark.asyncio
+async def test_targeted_council_roster_prefers_semantic_match_when_question_is_specific(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+
+    roster = director._targeted_council_roster(
+        state,
+        [
+            ConversationTurn(
+                speaker="user",
+                text="What happens to prices and household purchasing power if we slow this down too hard?",
+                mode="text",
+            )
+        ],
+    )
+
+    assert roster is not None
+    assert [advisor.key for advisor in roster] == ["capacity"]
+
+
+@pytest.mark.asyncio
+async def test_targeted_council_roster_can_narrow_to_top_two_semantic_matches(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+
+    roster = director._targeted_council_roster(
+        state,
+        [
+            ConversationTurn(
+                speaker="user",
+                text="What is happening to purchasing power, and how is the coalition mood moving?",
+                mode="text",
+            )
+        ],
+    )
+
+    assert roster is not None
+    assert [advisor.key for advisor in roster] == ["capacity", "politics"]
+
+
+@pytest.mark.asyncio
+async def test_generate_council_turn_continuation_uses_floor_decider_and_single_speaker_path(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    await director.sync_conversation(
+        loaded.simulation_id,
+        ConversationSyncRequest(
+            role=RealtimeRole.advisor,
+            advisor_mode=AdvisorMode.council,
+            turns=[
+                ConversationTurnInput(speaker="user", text="Let the room argue it out.", mode="voice"),
+                ConversationTurnInput(
+                    speaker="assistant",
+                    speaker_name="Rowan",
+                    speaker_voice="cedar",
+                    text="If we freeze the rollout here, the gains stay trapped with the incumbents already sitting on the best systems.",
+                    mode="voice",
+                ),
+            ],
+        ),
+    )
+
+    parse_calls: list[object] = []
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        parse_calls.append(text_format)
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="innovation",
+                    reason="Leila has the next live beat.",
+                    yield_after_turn=False,
+                    board_notes=["Keep frontier access open"],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="innovation",
+                    advisor_name="Leila",
+                    text="Then say which public interface keeps frontier access open instead of rationing it through the same few firms.",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(continue_dialogue=True, mode="voice"),
+    )
+
+    assert parse_calls.count(CouncilAdvisorDraft) == 1
+    assert parse_calls.count(CouncilSpeakerDecision) == 1
+    assert response.lead == "Leila"
+    assert response.next_speaker == "innovation"
+    assert response.yield_after_turn is False
+    assert response.board_notes == ["Keep frontier access open."]
+    assert [turn.speaker_name for turn in response.turns] == ["Leila"]
+
+
+@pytest.mark.asyncio
+async def test_council_candidate_roster_broadens_on_continuation_after_first_advisor_beat(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+
+    roster = director._council_candidate_roster(
+        state,
+        [
+            ConversationTurn(
+                speaker="user",
+                text="What happens to prices and household purchasing power if we slow this down too hard?",
+                mode="text",
+            ),
+            ConversationTurn(
+                speaker="assistant",
+                speaker_name="Rowan",
+                speaker_voice="cedar",
+                text="If you slow the buildout too hard, households lose the cheap help before they gain a new income floor.",
+                mode="voice",
+            ),
+        ],
+        continue_dialogue=True,
+        trailing_advisor_beats=1,
+    )
+
+    assert [advisor.key for advisor in roster] == ["innovation", "politics", "state"]
+
+
+@pytest.mark.asyncio
+async def test_generate_council_turn_room_fight_continuation_does_not_yield_too_early(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    await director.sync_conversation(
+        loaded.simulation_id,
+        ConversationSyncRequest(
+            role=RealtimeRole.advisor,
+            advisor_mode=AdvisorMode.council,
+            turns=[
+                ConversationTurnInput(speaker="user", text="Let the room argue it out.", mode="voice"),
+                ConversationTurnInput(
+                    speaker="assistant",
+                    speaker_name="Rowan",
+                    speaker_voice="cedar",
+                    text="If we freeze diffusion now, the visible gains stay trapped with the firms already holding the best systems.",
+                    mode="voice",
+                ),
+            ],
+        ),
+    )
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        if text_format is CouncilSpeakerDecision:
+            return (
+                CouncilSpeakerDecision(
+                    next_speaker="innovation",
+                    reason="Leila still carries the clearest unresolved objection.",
+                    yield_after_turn=False,
+                    contrast=[],
+                ),
+                "decider-response-id",
+            )
+        if text_format is CouncilAdvisorDraft:
+            instructions = str(kwargs["instructions"])
+            if "Leila" in instructions:
+                return (
+                    CouncilAdvisorDraft(
+                        advisor_key="innovation",
+                        advisor_name="Leila",
+                        text="Then say what keeps access broad, because a slowdown without a public on-ramp just hardens the same private choke points.",
+                    ),
+                    "advisor-response-id",
+                )
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="",
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(continue_dialogue=True, mode="voice"),
+    )
+
+    assert response.next_speaker == "innovation"
+    assert response.lead == "Leila"
+    assert response.yield_after_turn is False
+    assert [turn.speaker_name for turn in response.turns] == ["Leila"]
+
+
+def test_orchestrator_normalize_council_roster_realigns_common_name_voice_pairs(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+
+    normalized = director.orchestrator._normalize_council_roster([
+        CouncilAdvisorProfile(
+            key="darius",
+            name="Darius",
+            room_role="Industry",
+            country_role="industrial strategy advisor",
+            remit="tracks frontier deployment into the real economy",
+            voice="shimmer",
+            viewpoint="pushes diffusion",
+        ),
+        CouncilAdvisorProfile(
+            key="maya",
+            name="Maya",
+            room_role="Security",
+            country_role="security advisor",
+            remit="tracks critical infrastructure and state resilience",
+            voice="ash",
+            viewpoint="pushes risk containment",
+        ),
+    ])
+
+    assert normalized[0].voice in {"cedar", "ash", "verse"}
+    assert normalized[1].voice in {"marin", "shimmer", "sage"}
 
 
 @pytest.mark.asyncio
@@ -1461,17 +2133,8 @@ async def test_generate_town_hall_question_prefers_seeded_citizen_question(tmp_p
     stage.sample_citizens[0].town_hall_cue = "dependency on civic accounts"
     await director.store.save(loaded)
 
-    captured = {}
-
     async def fake_parse(**kwargs):
-        captured.update(kwargs)
-        return (
-            TownHallQuestionDraft(
-                question="My civic account covers rent, but if it freezes me out again, who do I actually call and how fast do they have to fix it?",
-                cue="dependency on civic accounts",
-            ),
-            "response-id",
-        )
+        raise AssertionError("seeded town-hall questions should not re-enter the model path")
 
     director.gateway.parse = fake_parse  # type: ignore[method-assign]
 
@@ -1480,9 +2143,7 @@ async def test_generate_town_hall_question_prefers_seeded_citizen_question(tmp_p
         TownHallQuestionRequest(citizen_id=stage.sample_citizens[0].citizen_id, mode="voice"),
     )
 
-    assert "Main pressure from this person's life: dependency on civic accounts" in str(captured["input_text"])
-    assert "If useful, here is a rough earlier phrasing from the citizen profile: My civic account covers rent, but who fixes it when the system freezes me out?" in str(captured["input_text"])
-    assert response.question_turn.text == "My public account covers rent, but if it freezes me out again, who do I actually call and how fast do they have to fix it?"
+    assert response.question_turn.text == "My public account covers rent, but who fixes it when the system freezes me out?"
     assert response.cue == "dependency on public accounts."
 
 
@@ -1511,7 +2172,7 @@ async def test_generate_town_hall_question_falls_back_and_persists_to_citizen_sn
 
     updated = await director.get_simulation(loaded.simulation_id)
     refreshed_citizen = updated.stages[updated.active_stage_index].sample_citizens[0]
-    assert response.question_turn.text == "My public account pays most of our rent, but it freezes long enough to blow up the week. What does your plan do for people like me?"
+    assert response.question_turn.text == "My public account pays most of our rent, but it freezes long enough to blow up the week. What would change for people like me next month?"
     assert refreshed_citizen.town_hall_question == response.question_turn.text
     assert refreshed_citizen.town_hall_cue
 
@@ -1524,6 +2185,9 @@ async def test_generate_town_hall_question_cleans_adjacent_word_repetition(tmp_p
     await director.wait_for_pending(state.simulation_id)
     loaded = await director.get_simulation(state.simulation_id)
     stage = loaded.stages[loaded.active_stage_index]
+    stage.sample_citizens[0].town_hall_question = ""
+    stage.sample_citizens[0].town_hall_cue = ""
+    await director.store.save(loaded)
 
     async def fake_parse(**kwargs):
         return (
@@ -1573,7 +2237,7 @@ async def test_generate_town_hall_question_falls_back_when_model_line_ends_dangl
         TownHallQuestionRequest(citizen_id=stage.sample_citizens[0].citizen_id, mode="voice"),
     )
 
-    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What does your plan do for people like me?"
+    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What would change for people like me next month?"
 
 
 @pytest.mark.asyncio
@@ -1588,13 +2252,7 @@ async def test_generate_town_hall_question_uses_seed_question_when_live_rewrite_
     await director.store.save(loaded)
 
     async def fake_parse(**kwargs):
-        return (
-            TownHallQuestionDraft(
-                question="What are you actually going to do so a few AI companies can't just jack",
-                cue="review rights still feel weak",
-            ),
-            "response-id",
-        )
+        raise AssertionError("seeded town-hall questions should not re-enter the model path")
 
     director.gateway.parse = fake_parse  # type: ignore[method-assign]
 
@@ -1634,4 +2292,4 @@ async def test_generate_town_hall_question_ignores_clipped_seed_and_uses_fallbac
         TownHallQuestionRequest(citizen_id=stage.sample_citizens[0].citizen_id, mode="voice"),
     )
 
-    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What does your plan do for people like me?"
+    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What would change for people like me next month?"

@@ -1,6 +1,7 @@
 import type {
   AdvisorMode,
   AuditoriumMode,
+  CouncilAdvisorProfile,
   CouncilTurnResponse,
   ConversationSyncResponse,
   RealtimeRole,
@@ -14,6 +15,7 @@ import type {
   SimulationCreateRequest,
   SimulationState,
   TownHallQuestionResponse,
+  TownHallOpponentReplyResponse,
 } from "../types";
 import { makeDefaultSetupDraft, setupDraftToCreateRequest } from "../types";
 
@@ -73,6 +75,35 @@ function asReasoning(value: unknown): SetupDraft["orchestrator_reasoning_effort"
   return undefined;
 }
 
+function normalizeCouncilRoster(value: unknown): CouncilAdvisorProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .flatMap((entry) => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const key = asString(entry.key);
+      const name = asString(entry.name);
+      const room_role = asString(entry.room_role);
+      const country_role = asString(entry.country_role);
+      const remit = asString(entry.remit);
+      if (!key || !name || !room_role || !country_role || !remit) {
+        return [];
+      }
+      return [{
+        key,
+        name,
+        room_role,
+        country_role,
+        remit,
+        voice: asString(entry.voice) ?? "cedar",
+        viewpoint: asString(entry.viewpoint) ?? "",
+      } satisfies CouncilAdvisorProfile];
+    });
+}
+
 function setupRoot(payload: unknown): Record<string, unknown> {
   if (!isRecord(payload)) {
     return {};
@@ -96,6 +127,8 @@ function normalizeSetupDraft(payload: unknown, fallbackDraft: SetupDraft): Setup
         ? root.config
         : root;
 
+  const council_roster = normalizeCouncilRoster(draftSource.council_roster);
+
   return {
     ...fallbackDraft,
     title: asString(draftSource.title) ?? fallbackDraft.title,
@@ -116,6 +149,7 @@ function normalizeSetupDraft(payload: unknown, fallbackDraft: SetupDraft): Setup
     orchestrator_reasoning_effort:
       asReasoning(draftSource.orchestrator_reasoning_effort) ?? fallbackDraft.orchestrator_reasoning_effort,
     realtime_model: asString(draftSource.realtime_model) ?? fallbackDraft.realtime_model,
+    council_roster: council_roster.length > 0 ? council_roster : fallbackDraft.council_roster,
   };
 }
 
@@ -176,7 +210,7 @@ function seedTranscript(draft: SetupDraft, note?: string): SetupTranscriptTurn[]
   const transcript = [
     makeSetupTurn(
       "assistant",
-      "I am the setup orchestrator. Give me a country, scale, lens, or style nudge if you want one. If not, say go and I will launch the broad default run.",
+      "I am the setup orchestrator. Tell me what world, institution, or future you want to examine if you want to steer it. If not, say go and I will launch the broad default run.",
     ),
   ];
   if (note) {
@@ -706,10 +740,30 @@ export function generateCouncilTurn(
   text: string,
   mode: "text" | "voice",
   continueDialogue = false,
+  preferredSpeaker = "",
+  avoidSpeaker = "",
+  provisionalTurns: Array<{
+    speaker: "user" | "assistant" | "system";
+    speaker_name?: string;
+    speaker_voice?: string;
+    text: string;
+    mode: "text" | "voice" | "system";
+  }> = [],
+  boardNotes: string[] = [],
+  signal?: AbortSignal,
 ) {
   return request<CouncilTurnResponse>(`/api/simulations/${simulationId}/advisor/council-turn`, {
     method: "POST",
-    body: JSON.stringify({ text, mode, continue_dialogue: continueDialogue }),
+    body: JSON.stringify({
+      text,
+      mode,
+      continue_dialogue: continueDialogue,
+      preferred_speaker: preferredSpeaker,
+      avoid_speaker: avoidSpeaker,
+      provisional_turns: provisionalTurns,
+      provisional_board_notes: boardNotes,
+    }),
+    signal,
   }).then((response) => {
     const simulation = normalizeSimulation(response.simulation);
     if (!simulation) {
@@ -742,6 +796,31 @@ export function generateTownHallQuestion(
   });
 }
 
+export function generateTownHallOpponentReply(
+  simulationId: string,
+  citizenId?: string,
+  questionText = "",
+  mode: "text" | "voice" = "voice",
+) {
+  return request<TownHallOpponentReplyResponse>(`/api/simulations/${simulationId}/debate/town-hall-opponent-reply`, {
+    method: "POST",
+    body: JSON.stringify({
+      citizen_id: citizenId,
+      question_text: questionText,
+      mode,
+    }),
+  }).then((response) => {
+    const simulation = normalizeSimulation(response.simulation);
+    if (!simulation) {
+      return response;
+    }
+    return {
+      ...response,
+      simulation,
+    };
+  });
+}
+
 export async function synthesizeSpeech(text: string, voice: string, signal?: AbortSignal): Promise<Blob> {
   const response = await fetch(`${API_BASE}/api/audio/speech`, {
     method: "POST",
@@ -756,6 +835,13 @@ export async function synthesizeSpeech(text: string, voice: string, signal?: Abo
     throw new Error(body || `speech request failed with ${response.status}`);
   }
   return await response.blob();
+}
+
+export function speechStreamUrl(text: string, voice: string) {
+  const url = new URL(`${API_BASE}/api/audio/speech`);
+  url.searchParams.set("text", text);
+  url.searchParams.set("voice", voice);
+  return url.toString();
 }
 
 export function toAbsoluteAssetUrl(assetUrl?: string | null): string | undefined {

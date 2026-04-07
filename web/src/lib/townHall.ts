@@ -81,9 +81,9 @@ function fallbackQuestionForCitizen(stage: StagePackage, citizen = stage.sample_
   }
   const lead = focus.slice(0, 1).toUpperCase() + focus.slice(1);
   if (/^(?:i|my|we|our)\b/i.test(focus)) {
-    return `${lead}. What does your plan do for people like me?`;
+    return `${lead}. What would change for people like me next month?`;
   }
-  return `${lead}. What would you do about that?`;
+  return `${lead}. How would your plan change that for someone like me?`;
 }
 
 function questionForCitizen(stage: StagePackage, citizen = stage.sample_citizens[0]) {

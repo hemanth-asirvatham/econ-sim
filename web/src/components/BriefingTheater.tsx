@@ -22,8 +22,8 @@ export function BriefingTheater({
   const [activeBeat, setActiveBeat] = useState(0);
   const [readyToEnter, setReadyToEnter] = useState(false);
   const [showTitleCard, setShowTitleCard] = useState(variant === "cinematic");
-  const [previousImageUrl, setPreviousImageUrl] = useState<string | null>(null);
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
+  const [previousImageUrl, setPreviousImageUrl] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const audioGuardTimerRef = useRef<number | null>(null);
@@ -58,6 +58,17 @@ export function BriefingTheater({
       window.clearTimeout(previousImageTimerRef.current);
       previousImageTimerRef.current = null;
     }
+  }
+
+  function settleLoadedImage(nextImageUrl: string | null) {
+    setLoadedImageUrl(nextImageUrl);
+    if (previousImageTimerRef.current) {
+      window.clearTimeout(previousImageTimerRef.current);
+    }
+    previousImageTimerRef.current = window.setTimeout(() => {
+      setPreviousImageUrl(null);
+      previousImageTimerRef.current = null;
+    }, 980);
   }
 
   function queueEnterWarRoom() {
@@ -143,14 +154,15 @@ export function BriefingTheater({
       audio && (audio.currentTime = 0);
       return;
     }
-    if (index !== activeBeat && imageUrl && imageUrl !== nextImageUrl) {
-      setPreviousImageUrl(imageUrl);
+    const priorImageUrl = toAbsoluteAssetUrl(stage.narrative_beats[activeBeat]?.image_url) ?? null;
+    if (priorImageUrl && priorImageUrl !== nextImageUrl) {
+      setPreviousImageUrl(priorImageUrl);
     } else {
       setPreviousImageUrl(null);
     }
-    setLoadedImageUrl((current) => (current === nextImageUrl ? current : null));
     setReadyToEnter(false);
     setActiveBeat(index);
+    settleLoadedImage(nextImageUrl);
     await new Promise((resolve) => window.setTimeout(resolve, 240));
     if (playbackGenerationRef.current !== playbackGeneration) {
       audio?.pause();
@@ -221,8 +233,8 @@ export function BriefingTheater({
     setActiveBeat(0);
     setReadyToEnter(false);
     setShowTitleCard(variant === "cinematic");
-    setPreviousImageUrl(null);
     setLoadedImageUrl(null);
+    setPreviousImageUrl(null);
     if (variant === "cinematic" && stage.narrative_beats.length > 0) {
       timerRef.current = window.setTimeout(() => {
         setShowTitleCard(false);
@@ -247,8 +259,20 @@ export function BriefingTheater({
     return (
       <section className={`briefing briefing--cinematic ${hidden ? "briefing--hidden" : ""}`} style={chromeStyle}>
         <div className={`briefing__media briefing__media--cinematic briefing__media--motion-${activeBeat % 4}`}>
+          {imageUrl ? (
+            <div
+              className="briefing__frame-backdrop"
+              style={{ backgroundImage: `url(${imageUrl})` }}
+              aria-hidden="true"
+            />
+          ) : null}
           {previousImageUrl ? (
-            <img className="briefing__image briefing__image--previous" src={previousImageUrl} alt="" aria-hidden="true" />
+            <img
+              className="briefing__image briefing__image--previous"
+              src={previousImageUrl}
+              alt=""
+              aria-hidden="true"
+            />
           ) : null}
           {imageUrl ? (
             <img
@@ -258,20 +282,6 @@ export function BriefingTheater({
               }`}
               src={imageUrl}
               alt={beat.line ?? stage.title}
-              onLoad={() => {
-                setLoadedImageUrl(imageUrl);
-                if (previousImageTimerRef.current) {
-                  window.clearTimeout(previousImageTimerRef.current);
-                }
-                previousImageTimerRef.current = window.setTimeout(() => {
-                  setPreviousImageUrl(null);
-                  previousImageTimerRef.current = null;
-                }, 620);
-              }}
-              onError={() => {
-                setLoadedImageUrl(imageUrl);
-                setPreviousImageUrl(null);
-              }}
             />
           ) : null}
           <div className="briefing__cinematic-chrome">

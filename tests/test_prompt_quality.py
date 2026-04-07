@@ -36,6 +36,7 @@ async def test_advisor_and_debate_prompts_include_operational_context(tmp_path: 
         stage.sample_citizens[0],
         [],
     )
+    council_turn_prompt = director.realtime_prompts.council_turn_generation_instructions(loaded, [])
     council_prompt = director.realtime_prompts.advisor_instructions(
         loaded,
         stage.state_of_world,
@@ -51,9 +52,11 @@ async def test_advisor_and_debate_prompts_include_operational_context(tmp_path: 
     assert "no extra lens unless they ask for one" in setup_prompt
     assert "Keep replies short and conversational" in setup_prompt
     assert "Treat any example lists in the prompt as menus, not content to copy." in stage_instructions
+    assert "Use concrete macro cues that a listener can picture" in stage_instructions
     assert "Stay macro-first" in stage_instructions
     assert "Lead with a real gain before the strain" in stage_instructions
     assert "Decide the settlement once and carry it through" in stage_instructions
+    assert "Sound like a sharp field reporter" in stage_instructions
     assert "let the first paragraph surprise a 2026 listener" in stage_instructions
     assert "Prefer broad capability, prices, who gets access, who owns the systems, how public services run, state capacity, family routine, and geopolitics" in stage_instructions
     assert "Avoid consultant filler, vague futurist language, slogan writing" in stage_instructions
@@ -63,9 +66,11 @@ async def test_advisor_and_debate_prompts_include_operational_context(tmp_path: 
     assert "Build one arc the viewer can retell" in montage_instructions
     assert "Keep the opening macro-first. In the opening half" in montage_instructions
     assert "Sound like future history when the chapter is later or stranger" in montage_instructions
+    assert "history with pulse" in montage_instructions
     assert "Do not march mechanically through identical beat jobs" in montage_instructions
     assert "Let a beat linger when that makes the narration feel human and legible" in montage_instructions
     assert "One early beat may simply name the new normal in a blunt line" in montage_instructions
+    assert "lived fact the audience could repeat" in montage_instructions
     assert "Avoid listy sector tours, office cliches, queue cliches, vague futurism, named-place filler" in montage_instructions
     assert "Not every chapter should climax on convenience or service quality" in montage_instructions
     assert "Do not open with a token local color vignette like one farmer, one diner, or one town" in montage_instructions
@@ -96,13 +101,16 @@ async def test_advisor_and_debate_prompts_include_operational_context(tmp_path: 
     assert "If you concede a point, keep the concession short" in debate_prompt
     assert "Settlement in force:" in debate_prompt
     assert "Speak as one current audience member at a time" in town_hall_prompt
-    assert "In later or radical stages, questions can target the new settlement directly" in town_hall_prompt
+    assert "In later or stranger chapters, questions can target the new settlement directly" in town_hall_prompt
     assert "Settlement in force:" in town_hall_prompt
     assert "Do not narrate yourself as moderator" in town_hall_prompt
     assert "Derive the question first from this voter's current update" in town_hall_question_prompt
     assert "Keep it concrete and single-threaded." in town_hall_question_prompt
     assert "Never leave the sentence hanging on a bare verb or unfinished clause." in town_hall_question_prompt
     assert "Prefer public names like monthly machine check, public AI help line, or monthly help credits" in town_hall_question_prompt
+    assert "This council runs in three moving parts." in council_turn_prompt
+    assert "Do not ask advisors to report urgency." in council_turn_prompt
+    assert "A separate arbiter picks the next speaker or yields to the player." in council_turn_prompt
     assert "small council of senior advisors in a live room" in council_prompt
     assert "If the player is asking about a radically different future, speak in terms of income, access, ownership, public services, security, and daily routine" in council_prompt
     assert "Speak like people in a private strategy meeting" in council_prompt
@@ -170,6 +178,7 @@ async def test_stage_prompt_uses_macro_first_documentary_contract(tmp_path: Path
     assert "surface at least 2 of them as active settled facts in the opening" in prompt
     assert "the world-state paragraph should open macro-first with 3 or 4 clean sentences" in prompt
     assert "the world-state paragraph should include several concrete macro cues" in prompt
+    assert "when the narrative needs a macro cue, prefer a concrete one a listener can repeat" in prompt
     assert "the opening should move in a short script arc: capability first, then spread, then lived gain, then constraint, then the split" in prompt
     assert "if the future brief explicitly says the old job week stopped organizing life or that rival compute blocs shape power" in prompt
     assert "do not write final montage beats or image prompts here" in prompt
@@ -180,6 +189,7 @@ async def test_stage_prompt_uses_macro_first_documentary_contract(tmp_path: Path
     assert "Build one arc the viewer can retell" in director.orchestrator._montage_instructions()
     assert "make the capability, the defended gain, the stubborn limit, and the baseline that organizes daily security easy to hear" in director.orchestrator._montage_instructions()
     assert "Do not make every beat sound like a thesis sentence." in director.orchestrator._montage_instructions()
+    assert "history with pulse" in director.orchestrator._montage_instructions()
     assert "Do not spend tokens writing final documentary beats in this pass" in director.orchestrator._stage_instructions(loaded.config)
     assert "Do not spend tokens writing final documentary beats in this pass" in director.orchestrator._stage_instructions(loaded.config)
 
@@ -203,7 +213,7 @@ def test_later_stage_prompt_demands_named_sectoral_change(tmp_path: Path):
         queued_poll_questions=[],
     )
 
-    assert "name at least 3 sectors or institutions being reshaped and at least 2 that are still lagging, protected, or bottlenecked" in prompt
+    assert "make it obvious that multiple sectors or institutions are being reshaped while others still lag, resist, or stay bottlenecked" in prompt
     assert "later stages should feel materially different from stage 1" in prompt
     assert "one live lever government can move this cycle" in prompt
     assert "what AI can now reliably do" in prompt
@@ -234,7 +244,11 @@ def test_radical_prompts_require_settlement_structure_without_present_day_anchor
     phase = director.orchestrator._phase_brief(
         0,
         radical_config.stage_count,
-        director.orchestrator._effective_world_mode(radical_config),
+        director.orchestrator._starting_phase_anchor(
+            radical_config.premise,
+            radical_config.topic_lens,
+            radical_config.stakes,
+        ),
     )
     blueprint_prompt = director.orchestrator._stage_blueprint_prompt(
         config=radical_config,
@@ -261,7 +275,7 @@ def test_radical_prompts_require_settlement_structure_without_present_day_anchor
         queued_poll_questions=[],
     )
 
-    assert "Do not let a radical chapter sound like normal unemployment plus better copilots." in blueprint_instructions
+    assert "Do not let a later-world chapter sound like normal unemployment plus better copilots." in blueprint_instructions
     assert "If the chapter is years ahead, change how people live before you change how commentators describe it." in blueprint_instructions
     assert "cheap expert help can be one effect, but the blueprint should center the deeper settlement" in blueprint_instructions
     assert "household_income_system" in blueprint_prompt
@@ -277,7 +291,7 @@ def test_radical_prompts_require_settlement_structure_without_present_day_anchor
     assert "Build one arc the viewer can retell" in montage_instructions
     assert "If the world is already strange, explain the new normal directly" in montage_instructions
     assert "Do not make every beat sound like a thesis sentence." in montage_instructions
-    assert "Start from an already changed settlement" in stage_instructions
+    assert "Honor the player's natural-language future brief directly instead of translating it back into a safer default transition template." in stage_instructions
     assert "If the chapter could plausibly describe a mildly advanced 2026 with slightly better software, it is not far enough." in stage_instructions
     assert "Do not let every later chapter collapse into service convenience or cheaper expert help" in stage_instructions
     assert "Build one arc the viewer can retell" in director.orchestrator._montage_instructions()
@@ -299,11 +313,11 @@ def test_later_world_premise_unlocks_radical_guidance_without_any_mode_field(tmp
     phase = director.orchestrator._phase_brief(
         0,
         config.stage_count,
-        director.orchestrator.resolve_starting_world_mode(config.premise, config.topic_lens, config.stakes),
+        director.orchestrator._starting_phase_anchor(config.premise, config.topic_lens, config.stakes),
     )
 
-    assert "Start from an already changed settlement" in stage_instructions
-    assert "Do not let a radical chapter sound like normal unemployment plus better copilots." in blueprint_instructions
+    assert "Honor the player's natural-language future brief directly instead of translating it back into a safer default transition template." in stage_instructions
+    assert "Do not let a later-world chapter sound like normal unemployment plus better copilots." in blueprint_instructions
     assert phase["label"] == "Settlement Opening"
 
 
@@ -341,7 +355,11 @@ def test_later_settlement_premise_relaxes_opening_stage_near_term_guardrails(tmp
             "and the old job order no longer explains ordinary security."
         )
     )
-    phase = director.orchestrator._phase_brief(0, config.stage_count, director.orchestrator._effective_world_mode(config))
+    phase = director.orchestrator._phase_brief(
+        0,
+        config.stage_count,
+        director.orchestrator._starting_phase_anchor(config.premise, config.topic_lens, config.stakes),
+    )
 
     prompt = director.orchestrator._stage_prompt(
         config=config,
@@ -374,23 +392,23 @@ def test_later_settlement_premise_relaxes_opening_stage_near_term_guardrails(tmp
     assert "how households secure ordinary life" in phase["brief"]
     assert "Decide which services became standing machine infrastructure" in phase["technology"]
     assert "Choose the main fight inside this settlement" in phase["politics"]
-    assert "inferred start point from the setup" in prompt
-    assert "inferred start point from the setup" in blueprint_prompt
-    assert "the setup implies the opening chapter begins inside a later and more structurally changed AI society" in prompt
-    assert "the setup implies the opening chapter begins after the old labor order has already been rewritten" in blueprint_prompt
+    assert "if the player's brief clearly begins later in the transition" in prompt
+    assert "if the player's brief clearly begins later in the transition" in blueprint_prompt
+    assert "the setup implies the opening chapter begins later in the transition or inside a more changed settlement" in prompt
+    assert "the setup implies the opening chapter begins later in the transition or inside a more changed settlement" in blueprint_prompt
     assert "if the setup opens inside a later settlement, the blueprint must commit to that settlement" in blueprint_prompt
     assert "how households secure ordinary life" in prompt
-    assert "by the end of the opening blueprint, it should already be clear what replaced the old baseline of jobs" in blueprint_prompt
+    assert "be imaginative but disciplined: pick one coherent settlement" in blueprint_prompt
     assert "do not use unemployment staying low as the default serious-sounding macro frame" in prompt
     assert "do not use unemployment staying low as the safe default macro line" in blueprint_prompt
-    assert "the world should not read like the 2020s with sharper branding" in prompt
-    assert "do not let it sound like today's world with one louder controversy" in blueprint_prompt
+    assert "older labor indicators no longer map cleanly onto security" in prompt
+    assert "older indicators no longer summarize security well" in blueprint_prompt
     assert "radical mode" not in prompt
     assert "radical mode" not in blueprint_prompt
     assert "keep the world recognizably near-term" not in prompt
     assert "stay recognizably near-term and practical" not in blueprint_prompt
-    assert "Name the changed settlement directly instead of hinting around it." in director.orchestrator._stage_blueprint_instructions(config)
-    assert "The audience should hear different income flows, access channels, firm structure, ownership, or public-service delivery" in director.orchestrator._stage_blueprint_instructions(config)
+    assert "Honor the player's future brief directly instead of converting it into a timid generic AI-economy story." in director.orchestrator._stage_blueprint_instructions(config)
+    assert "The audience should hear different income flows, access channels, firm structure, ownership, public-service delivery, time use, or geopolitical order" in director.orchestrator._stage_blueprint_instructions(config)
     assert "make the economic mechanism easy to repeat in ordinary language" in prompt
     assert "describe adoption in believable waves" in prompt
     assert "those opening sentences should make clear what AI can now reliably do" in prompt
@@ -408,8 +426,8 @@ def test_later_settlement_premise_relaxes_opening_stage_near_term_guardrails(tmp
     assert "in 3 or 4 short spoken lines" in prompt
     assert "one strong example is better than a list of three weak ones" in prompt
     assert "If the world is already strange, explain the new normal directly" in director.orchestrator._montage_instructions()
-    assert "Start from an already changed settlement" in director.orchestrator._stage_instructions(config)
-    assert "Prefer the settlement baseline over familiar labor shorthand when old job metrics no longer explain security well." in director.orchestrator._stage_blueprint_instructions(config)
+    assert "Honor the player's natural-language future brief directly instead of translating it back into a safer default transition template." in director.orchestrator._stage_instructions(config)
+    assert "Do not let a later-world chapter sound like normal unemployment plus better copilots." in director.orchestrator._stage_blueprint_instructions(config)
     assert "in later-settlement openings, at least 2 of those first 4 sentences should describe a changed settlement in ordinary language" in prompt
     assert "A viewer should be able to summarize the montage in one sentence" not in director.orchestrator._stage_instructions(
         config
@@ -465,7 +483,16 @@ async def test_summary_normalizer_strips_stiff_section_headers_and_featurettes_g
     ) == "The system feels cheap at first, which is why cities tolerate it even when appeals still break down."
     assert director.orchestrator._normalize_narration_line(
         "By 2041 the machine systems handle coding. compliance. routine claims review."
-    ) == "By 2041 the machine systems handle coding, compliance, routine claims review."
+    ) == "By 2041 the machine systems handle coding and compliance and routine claims review."
+    assert director.orchestrator._normalize_narration_line(
+        "By 2031, AI can reliably read, write, research, translate, code, plan, and carry ordinary screen work across several steps with little hand-holding."
+    ) == "By 2031, AI can reliably handle ordinary screen work across several steps with little hand-holding."
+    assert director.orchestrator._normalize_narration_line(
+        "Small businesses, school systems, clinics, and local governments are pressing for more diffusion because software now gives them staff-level help."
+    ) == "Small businesses, school systems, clinics, and local governments are pressing for more diffusion because software now gives them staff-level help."
+    assert director.orchestrator._normalize_narration_line(
+        "Small businesses, local governments, schools, and middle-income households wanted cheap competence kept open, while the biggest platforms moved to own the tollbooths."
+    ) == "Small businesses, local governments, schools, and middle-income households wanted cheap competence kept open, while the biggest platforms moved to own the tollbooths."
 
 
 def test_phase_briefs_stay_distinct_for_different_opening_contexts(tmp_path: Path):
@@ -474,9 +501,9 @@ def test_phase_briefs_stay_distinct_for_different_opening_contexts(tmp_path: Pat
 
     default_labels = [director.orchestrator._phase_brief(index, 5)["label"] for index in range(5)]
     advanced_labels = [
-        director.orchestrator._phase_brief(index, 5, "advanced")["label"] for index in range(5)
+        director.orchestrator._phase_brief(index, 5, 1)["label"] for index in range(5)
     ]
-    radical_labels = [director.orchestrator._phase_brief(index, 5, "radical")["label"] for index in range(5)]
+    radical_labels = [director.orchestrator._phase_brief(index, 5, 4)["label"] for index in range(5)]
 
     assert default_labels == [
         "Practical AI Breakout",
@@ -494,7 +521,7 @@ def test_phase_briefs_stay_distinct_for_different_opening_contexts(tmp_path: Pat
     ]
     assert radical_labels == [
         "Settlement Opening",
-        "AGI Power Contest",
+        "Settlement Era",
         "Settlement Era",
         "Settlement Era",
         "Settlement Era",
@@ -502,13 +529,24 @@ def test_phase_briefs_stay_distinct_for_different_opening_contexts(tmp_path: Pat
     assert advanced_labels != radical_labels
     assert advanced_labels[0] != radical_labels[0]
 
+    guided_later_world = (
+        "Begin the simulation several chapters into the AGI transition, after digital agents are powerful "
+        "enough to run much routine remote work and public-service coordination, while robotics is visible "
+        "in logistics and industrial corridors but still uneven."
+    )
+    assert director.orchestrator._starting_phase_anchor(guided_later_world) >= 3
+
     advanced_config = SimulationCreateRequest(
         premise="Start later in the transition, with deeper diffusion and more institutional change already underway."
     )
     advanced_phase = director.orchestrator._phase_brief(
         0,
         advanced_config.stage_count,
-        director.orchestrator._effective_world_mode(advanced_config),
+        director.orchestrator._starting_phase_anchor(
+            advanced_config.premise,
+            advanced_config.topic_lens,
+            advanced_config.stakes,
+        ),
     )
     advanced_prompt = director.orchestrator._stage_prompt(
         config=advanced_config,
@@ -536,7 +574,7 @@ def test_phase_briefs_stay_distinct_for_different_opening_contexts(tmp_path: Pat
     )
     assert "the setup implies the opening chapter begins later in the transition" in advanced_prompt
     assert "the setup implies the opening chapter begins later in the transition" in advanced_blueprint_prompt
-    assert "name which institutions, income flows, firm staffing patterns, or public-service channels are already different" in advanced_prompt
+    assert "name which institutions, income flows, firm staffing patterns, public-service channels, household routines, or geopolitical realities are already different" in advanced_prompt
 
 
 def test_orchestrator_normalizers_keep_briefs_and_lines_spoken(tmp_path: Path):
@@ -561,12 +599,13 @@ def test_orchestrator_normalizers_keep_briefs_and_lines_spoken(tmp_path: Path):
     split_fragment = director.orchestrator._normalize_narration_line(
         "Robot fleets are common in freight yards, fields. standard care settings."
     )
-    assert split_fragment == "Robot fleets are common in freight yards, fields, standard care settings."
+    assert split_fragment == "Robot fleets are common in freight yards, fields and standard care settings."
 
     policy_axes = director.orchestrator._normalize_short_lines(
         [
             "Accelerate embodied buildout where it raises national capacity, while widening access through",
             "Guarantee contestability in high-impact services with clear records, human review, appeals",
+            "Expand public-service AI where it clearly raises capacity, but require plain-language notice, human appeal rights, and staffed",
         ],
         limit=4,
         max_chars=96,
@@ -574,6 +613,19 @@ def test_orchestrator_normalizers_keep_briefs_and_lines_spoken(tmp_path: Path):
     )
     assert policy_axes[0] == "Accelerate embodied buildout where it raises national capacity, while widening access"
     assert not policy_axes[0].endswith("through")
+    assert policy_axes[2] == "Expand public-service AI where it clearly raises capacity, but require plain-language notice, human appeal rights"
+
+    clipped_indicators = director.orchestrator._normalize_short_lines(
+        [
+            "Households are using AI-mediated portals to contest quotes, compare bills, and interpret deductions, increasing consumer price pressure in everyday services.",
+            "Data-center and electrification demand continue to tighten power equipment, interconnection, and local siting politics, reinforcing bottlenecks.",
+        ],
+        limit=4,
+        max_chars=112,
+        sentence_fragment=True,
+    )
+    assert clipped_indicators[0] == "Households are using AI-mediated portals to contest quotes, compare bills, and interpret deductions"
+    assert clipped_indicators[1] == "Data-center and electrification demand continue to tighten power equipment, interconnection, and local siting politics"
 
     composed_brief = director.orchestrator._compose_room_briefing(
         dominant_mechanism="Physical rollout finally turns digital abundance into visible capacity gains in the real economy.",

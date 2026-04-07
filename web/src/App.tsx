@@ -1,7 +1,7 @@
 import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { BriefingTheater } from "./components/BriefingTheater";
 import { CitizenGrid } from "./components/CitizenGrid";
-import { DebateRoom } from "./components/DebateRoom";
+import { DebateRoom, type DebateRoomHandle, type TownHallSceneState } from "./components/DebateRoom";
 import { FeaturetteShelf } from "./components/FeaturetteShelf";
 import { SetupRoomViewport } from "./components/SetupRoomViewport";
 import { VoiceDock, type VoiceDockHandle } from "./components/VoiceDock";
@@ -281,6 +281,7 @@ const POLICY_DIRECTIONAL_PREFIXES = [
   "let's",
   "lets",
 ];
+const ROOM_DOCK_RETRY_LIMIT = 60;
 
 function clipInlineCopy(text: string, maxChars = 44) {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -371,12 +372,8 @@ function loadingPhaseMeta(progress: SimulationState["progress"]) {
 function simulationUrl(simulationId: string, advisorMode: AdvisorMode, auditoriumMode: AuditoriumMode) {
   const params = new URLSearchParams();
   params.set("sim", simulationId);
-  if (advisorMode === "council") {
-    params.set("advisor", "multi");
-  }
-  if (auditoriumMode === "town_hall") {
-    params.set("auditorium", "town_hall");
-  }
+  params.set("advisor", advisorModeSlug(advisorMode));
+  params.set("auditorium", auditoriumMode);
   return `?${params.toString()}`;
 }
 
@@ -445,6 +442,7 @@ export default function App() {
     return window.localStorage.getItem("econ-sim-auditorium-mode") === "town_hall" ? "town_hall" : "debate";
   });
   const [room, setRoom] = useState<RoomName>("briefing");
+  const roomRef = useRef<RoomName>("briefing");
   const [manualPollQuestion, setManualPollQuestion] = useState("");
   const [activeCitizenId, setActiveCitizenId] = useState<string | undefined>(undefined);
   const [streetCandidateCitizenId, setStreetCandidateCitizenId] = useState<string | undefined>(undefined);
@@ -463,20 +461,30 @@ export default function App() {
   const [sceneTextOpen, setSceneTextOpen] = useState(false);
   const [sceneTextDraft, setSceneTextDraft] = useState("");
   const [loadingQuoteIndex, setLoadingQuoteIndex] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [scenePresence, setScenePresence] = useState<Record<string, ScenePresence>>({
     advisor: EMPTY_PRESENCE,
     citizens: EMPTY_PRESENCE,
     debate: EMPTY_PRESENCE,
   });
+  const [liveSceneCaptions, setLiveSceneCaptions] = useState<Record<RoomName, ConversationTurn | null>>({
+    briefing: null,
+    advisor: null,
+    citizens: null,
+    debate: null,
+  });
   const advisorDockRef = useRef<VoiceDockHandle | null>(null);
   const citizenDockRef = useRef<VoiceDockHandle | null>(null);
   const debateDockRef = useRef<VoiceDockHandle | null>(null);
+  const debateRoomRef = useRef<DebateRoomHandle | null>(null);
   const [councilFloor, setCouncilFloor] = useState<{
     lead: string;
-    urgencies: Record<string, number>;
+    owner: string;
     contrast: string[];
     reason?: string;
   } | null>(null);
+  const [townHallSceneState, setTownHallSceneState] = useState<TownHallSceneState | null>(null);
+  const [townHallLaunchNonce, setTownHallLaunchNonce] = useState(0);
   const pendingCitizenActionRef = useRef<{ citizenId: string; action: (dock: VoiceDockHandle) => void } | null>(null);
   const dockActionGenerationRef = useRef(0);
   const refreshSnapshotGenerationRef = useRef(0);
@@ -522,7 +530,10 @@ export default function App() {
       : "Broad representative run. No special region or lens is locked.";
   }, [setupSession]);
   const setupReady = setupSession?.status === "ready";
-  const setupVoiceLive = setupRealtime.liveMode === "voice" && setupRealtime.status === "connected";
+  const setupVoiceLive =
+    setupRealtime.liveMode === "voice" &&
+    setupRealtime.status === "connected" &&
+    !setupRealtime.muted;
   const setupVoiceConnected = setupRealtime.liveMode === "voice" && setupRealtime.status === "connected";
   const setupVoiceRecording = setupRealtime.presence.voicePhase === "recording";
   const setupVoiceConnecting = setupRealtime.status === "connecting" && setupRealtime.liveMode === "voice";
@@ -626,30 +637,32 @@ export default function App() {
     () => (citizenThreadKey ? simulation?.conversation_threads[citizenThreadKey] ?? [] : []),
     [citizenThreadKey, simulation?.conversation_threads],
   );
+  const liveSceneCaption = liveSceneCaptions[room];
   const currentSceneTurns = room === "advisor" ? advisorTurns : room === "citizens" ? citizenTurns : room === "debate" ? debateTurns : [];
   const currentSceneCaption = useMemo(() => {
-    const visibleTurns = currentSceneTurns.filter((turn) => turn.speaker !== "system");
-    if (room === "advisor" && advisorMode === "council") {
-      const tail: typeof visibleTurns = [];
-      for (let index = visibleTurns.length - 1; index >= 0; index -= 1) {
-        const turn = visibleTurns[index];
-        if (turn.speaker !== "assistant") {
-          break;
-        }
-        tail.unshift(turn);
-        if (tail.length >= 3) {
-          break;
-        }
-      }
-      if (tail.length > 1 && tail.every((turn) => turn.speaker_name)) {
-        return {
-          ...tail[tail.length - 1],
-          text: tail.map((turn) => `${turn.speaker_name}: ${turn.text}`).join("\n"),
-        };
-      }
+    if (liveSceneCaption && liveSceneCaption.speaker !== "system" && liveSceneCaption.text.trim()) {
+      return liveSceneCaption;
     }
+    if (
+      room === "debate" &&
+      auditoriumMode === "town_hall" &&
+      townHallSceneState?.question?.question &&
+      (townHallSceneState.phase === "generating" ||
+        townHallSceneState.phase === "voter_speaking" ||
+        (townHallSceneState.phase === "player_turn" && !townHallSceneState.playerAnswered))
+    ) {
+      return {
+        id: townHallSceneState.activeTurnId ?? "town-hall-preview",
+        speaker: "assistant" as const,
+        speaker_name: townHallSceneState.question.displayName,
+        text: townHallSceneState.question.question,
+        mode: "voice" as const,
+        created_at: new Date().toISOString(),
+      };
+    }
+    const visibleTurns = currentSceneTurns.filter((turn) => turn.speaker !== "system");
     return visibleTurns.at(-1);
-  }, [advisorMode, currentSceneTurns, room]);
+  }, [auditoriumMode, currentSceneTurns, liveSceneCaption, room, townHallSceneState]);
   const isBusy = simulation?.status === "initializing" || simulation?.status === "resolving";
   const previousResolvedStage = useMemo(() => {
     if (!simulation || simulation.active_stage_index === 0) {
@@ -843,9 +856,17 @@ export default function App() {
                 : simulation?.progress.phase === "polling"
                   ? "Reading the country"
                   : (simulation?.progress.label ?? "Transition");
-  const showLiveTopbar = Boolean(simulation && !showCinematicIntro && !showLoadingStage && !reelsOpen);
-  const liveTopbarHeading = stage ? liveRoomHeading(room, advisorMode, auditoriumMode) : "Chapter briefing";
-  const liveTopbarSubhead = stage ? `${stage.title} · ${stage.phase_label}` : simulation?.config.title ?? "AGI Transition Command";
+  const debateAdvancePayload =
+    debatePlatform.trim()
+    || advisorPolicyNotes.join("\n").trim()
+    || currentStageAxes.join("\n").trim()
+    || stage?.state_of_world.trim()
+    || "Carry the current platform into the vote.";
+  const debateAdvanceDisabled = resolvingStage;
+  const debateAdvanceLabel = resolvingStage ? "Counting vote..." : "Call election and advance";
+  const debateAdvanceHint = debateAdvanceDisabled
+    ? "The election is being counted and folded into the next stage."
+    : "Lock the vote and move the simulation into the next chapter.";
   const visibleLoadingHighlights = useMemo(
     () => loadingHighlights.slice(0, 2),
     [loadingHighlights],
@@ -935,19 +956,20 @@ export default function App() {
   }, [themeMode]);
 
   useEffect(() => {
+    const syncFullscreen = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    syncFullscreen();
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem("econ-sim-advisor-mode", advisorModeSlug(advisorMode));
     window.localStorage.setItem("econ-sim-auditorium-mode", auditoriumMode);
     const url = new URL(window.location.href);
-    if (advisorMode === "council") {
-      url.searchParams.set("advisor", advisorModeSlug(advisorMode));
-    } else {
-      url.searchParams.delete("advisor");
-    }
-    if (auditoriumMode === "town_hall") {
-      url.searchParams.set("auditorium", "town_hall");
-    } else {
-      url.searchParams.delete("auditorium");
-    }
+    url.searchParams.set("advisor", advisorModeSlug(advisorMode));
+    url.searchParams.set("auditorium", auditoriumMode);
     window.history.replaceState({}, "", url);
   }, [advisorMode, auditoriumMode]);
 
@@ -969,6 +991,10 @@ export default function App() {
     }
     setError(setupRealtime.error);
   }, [setupRealtime.error]);
+
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
 
   useEffect(() => {
     if (!simulation || (simulation.status !== "initializing" && simulation.status !== "resolving")) {
@@ -1103,7 +1129,13 @@ export default function App() {
       return;
     }
     pendingCitizenActionRef.current = null;
-    withMountedDock(pending.action, 0, dockActionGenerationRef.current);
+    withMountedDock(
+      pending.action,
+      0,
+      dockActionGenerationRef.current,
+      "citizens",
+      dockScopeKeyForRoom("citizens", { citizenId: activeCitizen.citizen_id }),
+    );
   }, [activeCitizen?.citizen_id, room]);
 
   async function handleRestart() {
@@ -1281,7 +1313,7 @@ export default function App() {
     ) {
       return;
     }
-    if (nextRoom !== (currentSimulation?.current_room ?? room)) {
+    if (nextRoom !== roomRef.current) {
       disconnectLiveChannels();
     }
     startTransition(() => {
@@ -1360,7 +1392,8 @@ export default function App() {
       return;
     }
     if (hasPlayableFeaturettes) {
-      setReelsRequestedFeaturetteId(requestedFeaturetteId);
+      const defaultFeaturetteId = stage.featurettes.find((item) => item.status === "ready")?.id ?? null;
+      setReelsRequestedFeaturetteId(requestedFeaturetteId ?? defaultFeaturetteId);
       setReelsOpen(true);
       setPanelsOpen(false);
       return;
@@ -1369,6 +1402,14 @@ export default function App() {
     setReelsOpen(false);
     setDrawerTab("reels");
     setPanelsOpen(true);
+  }
+
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    await document.documentElement.requestFullscreen?.().catch(() => undefined);
   }
 
   async function handleRoomFocus(
@@ -1392,10 +1433,7 @@ export default function App() {
     setStageGate("live");
     setSceneTextOpen(false);
     setSceneTextDraft("");
-    if (nextRoom === "debate" && effectiveAuditoriumMode === "town_hall") {
-      setPanelsOpen(true);
-      setDrawerTab("room");
-    } else if (panelsOpen) {
+    if (panelsOpen) {
       setDrawerTab("room");
     }
     if (nextRoom !== "citizens") {
@@ -1445,6 +1483,26 @@ export default function App() {
     });
   }
 
+  function handleLiveCaptionChange(key: "advisor" | "citizens" | "debate", turn: ConversationTurn | null) {
+    setLiveSceneCaptions((current) => {
+      const previous = current[key];
+      if (!previous && !turn) {
+        return current;
+      }
+      if (
+        previous &&
+        turn &&
+        previous.id === turn.id &&
+        previous.speaker === turn.speaker &&
+        previous.text === turn.text &&
+        previous.mode === turn.mode
+      ) {
+        return current;
+      }
+      return { ...current, [key]: turn };
+    });
+  }
+
   function toggleAdvisorMode() {
     setAdvisorRoomMode(advisorMode === "solo" ? "council" : "solo");
   }
@@ -1460,21 +1518,25 @@ export default function App() {
   }
 
   function toggleAuditoriumMode() {
-    setAuditoriumRoomMode(auditoriumMode === "debate" ? "town_hall" : "debate");
+    setAuditoriumRoomMode(auditoriumMode === "debate" ? "town_hall" : "debate", {
+      launchTownHall: auditoriumMode === "debate",
+    });
   }
 
-  function setAuditoriumRoomMode(nextMode: AuditoriumMode) {
+  function setAuditoriumRoomMode(nextMode: AuditoriumMode, options?: { launchTownHall?: boolean }) {
     if (nextMode === auditoriumMode) {
+      if (nextMode === "town_hall" && options?.launchTownHall) {
+        setTownHallLaunchNonce((current) => current + 1);
+      }
       return;
     }
     honorQueryRequestedRoomRef.current = false;
     debateDockRef.current?.disconnect();
     handlePresenceChange("debate", EMPTY_PRESENCE);
-    if (nextMode === "town_hall") {
-      setPanelsOpen(true);
-      setDrawerTab("room");
-    }
     setAuditoriumMode(nextMode);
+    if (nextMode === "town_hall" && options?.launchTownHall) {
+      setTownHallLaunchNonce((current) => current + 1);
+    }
   }
 
   async function handleModeCommand(command: {
@@ -1490,7 +1552,9 @@ export default function App() {
       setAdvisorRoomMode(command.advisorMode);
     }
     if (command.auditoriumMode) {
-      setAuditoriumRoomMode(command.auditoriumMode);
+      setAuditoriumRoomMode(command.auditoriumMode, {
+        launchTownHall: command.auditoriumMode === "town_hall",
+      });
     }
     if (command.citizenName) {
       try {
@@ -1514,44 +1578,6 @@ export default function App() {
       return true;
     }
     return Boolean(command.advisorMode || command.auditoriumMode);
-  }
-
-  async function handleSceneQuickCommand(commandText: string) {
-    const normalized = commandText.trim().toLowerCase();
-    if (!normalized) {
-      return;
-    }
-    if (normalized === "talk to someone nearby") {
-      if (room === "citizens") {
-        await handleScenePrimaryInteract(candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id);
-        return;
-      }
-      await handleModeCommand({ room: "citizens" });
-      return;
-    }
-    if (normalized === "street") {
-      await handleModeCommand({ room: "citizens" });
-      return;
-    }
-    if (normalized === "debate") {
-      await handleModeCommand({ room: "debate", auditoriumMode: "debate" });
-      return;
-    }
-    if (normalized === "town hall") {
-      await handleModeCommand({ room: "debate", auditoriumMode: "town_hall" });
-      return;
-    }
-    if (normalized === "single advisor") {
-      await handleModeCommand({ room: "advisor", advisorMode: "solo" });
-      return;
-    }
-    if (normalized === "multi-advisor") {
-      await handleModeCommand({ room: "advisor", advisorMode: "council" });
-      return;
-    }
-    if (normalized === "briefing") {
-      await handleModeCommand({ room: "briefing" });
-    }
   }
 
   function handleStreetFocusChange(citizenId?: string) {
@@ -1588,17 +1614,53 @@ export default function App() {
     }
   }
 
-  function currentDockRef() {
-    if (room === "advisor") {
+  function dockRefForRoom(targetRoom: RoomName) {
+    if (targetRoom === "advisor") {
       return advisorDockRef.current;
     }
-    if (room === "citizens") {
+    if (targetRoom === "citizens") {
       return citizenDockRef.current;
     }
-    if (room === "debate") {
+    if (targetRoom === "debate") {
       return debateDockRef.current;
     }
     return null;
+  }
+
+  function dockScopeKeyForRoom(
+    targetRoom: RoomName,
+    options?: {
+      citizenId?: string;
+      advisorMode?: AdvisorMode;
+      auditoriumMode?: AuditoriumMode;
+    },
+  ) {
+    const simulationKey = simulation?.simulation_id ?? "local";
+    if (targetRoom === "advisor") {
+      return `${simulationKey}:advisor:${options?.advisorMode ?? advisorMode}`;
+    }
+    if (targetRoom === "citizens") {
+      return `${simulationKey}:citizen:${options?.citizenId ?? activeCitizen?.citizen_id ?? streetCandidateCitizenId ?? "none"}`;
+    }
+    if (targetRoom === "debate") {
+      return `${simulationKey}:debate:${options?.auditoriumMode ?? auditoriumMode}`;
+    }
+    return `${simulationKey}:${targetRoom}`;
+  }
+
+  function disconnectNonCurrentRoomChannels(targetRoom: RoomName) {
+    if (targetRoom !== "advisor") {
+      advisorDockRef.current?.disconnect();
+      handlePresenceChange("advisor", EMPTY_PRESENCE);
+    }
+    if (targetRoom !== "citizens") {
+      citizenDockRef.current?.disconnect();
+      handlePresenceChange("citizens", EMPTY_PRESENCE);
+    }
+    if (targetRoom !== "debate") {
+      debateDockRef.current?.disconnect();
+      handlePresenceChange("debate", EMPTY_PRESENCE);
+    }
   }
 
   async function handOffCitizenAction(nextCitizenId: string, action?: (dock: VoiceDockHandle) => void) {
@@ -1621,7 +1683,13 @@ export default function App() {
         if (!needsCitizenSwap && committedCitizenId === activeCitizen?.citizen_id) {
           const generation = dockActionGenerationRef.current;
           queueAfterPaint(() => {
-            withMountedDock(action, 0, generation);
+            withMountedDock(
+              action,
+              0,
+              generation,
+              "citizens",
+              dockScopeKeyForRoom("citizens", { citizenId: committedCitizenId }),
+            );
           });
         } else {
           pendingCitizenActionRef.current = { citizenId: committedCitizenId, action };
@@ -1635,20 +1703,35 @@ export default function App() {
     }
   }
 
-  function withMountedDock(action: (dock: VoiceDockHandle) => void, attempt = 0, generation = dockActionGenerationRef.current) {
+  function withMountedDock(
+    action: (dock: VoiceDockHandle) => void,
+    attempt = 0,
+    generation = dockActionGenerationRef.current,
+    targetRoom: RoomName = room,
+    expectedScopeKey = dockScopeKeyForRoom(targetRoom),
+  ) {
+    if (attempt === 0) {
+      const dock = dockRefForRoom(targetRoom);
+      if (dock && dock.getScopeKey() === expectedScopeKey) {
+        action(dock);
+        return;
+      }
+    }
     queueAfterPaint(() => {
       if (generation !== dockActionGenerationRef.current) {
         return;
       }
-      const dock = currentDockRef();
-      if (dock) {
+      const dock = dockRefForRoom(targetRoom);
+      if (dock && dock.getScopeKey() === expectedScopeKey) {
         action(dock);
         return;
       }
-      if (attempt < 6) {
+      if (attempt < ROOM_DOCK_RETRY_LIMIT) {
         window.setTimeout(() => {
-          withMountedDock(action, attempt + 1, generation);
-        }, 140);
+          withMountedDock(action, attempt + 1, generation, targetRoom, expectedScopeKey);
+        }, 120);
+      } else {
+        setError("The live room did not finish mounting. Try the mic again.");
       }
     });
   }
@@ -1677,21 +1760,50 @@ export default function App() {
   function focusCurrentChannel() {
     revealRoomChannel();
     queueAfterPaint(() => {
-      currentDockRef()?.focusComposer();
+      dockRefForRoom(room)?.focusComposer();
     });
   }
 
-  function toggleCurrentRoomVoice() {
-    const dock = currentDockRef();
-    if (!dock) {
+  async function handOffRoomAction(
+    targetRoom: RoomName,
+    action: (dock: VoiceDockHandle) => void,
+    options?: {
+      citizenId?: string;
+      advisorMode?: AdvisorMode;
+      auditoriumMode?: AuditoriumMode;
+    },
+  ) {
+    if (!simulation) {
       return;
     }
-    void dock.toggleVoiceCapture();
+    dockActionGenerationRef.current += 1;
+    let generation = dockActionGenerationRef.current;
+    const expectedScopeKey = dockScopeKeyForRoom(targetRoom, options);
+    if (room !== targetRoom || simulation.current_room !== targetRoom) {
+      await handleRoomFocus(targetRoom, options?.citizenId, {
+        nextAuditoriumMode: options?.auditoriumMode,
+      });
+      // Room focus intentionally disconnects old channels, which invalidates
+      // pending dock actions. Refresh the token after navigation so the
+      // follow-up mic/text action still reaches the newly mounted dock.
+      dockActionGenerationRef.current += 1;
+      generation = dockActionGenerationRef.current;
+    } else {
+      disconnectNonCurrentRoomChannels(targetRoom);
+      setSceneTextOpen(false);
+    }
+    withMountedDock(
+      action,
+      0,
+      generation,
+      targetRoom,
+      expectedScopeKey,
+    );
   }
 
   async function handleEnterWarRoom(options?: { startVoice?: boolean; openChannel?: boolean }) {
     if (!simulation) {
-      return;
+      return room;
     }
     setShowCinematicIntro(false);
     setStageGate("live");
@@ -1704,10 +1816,11 @@ export default function App() {
       revealRoomChannel();
     }
     if (options?.startVoice) {
-      withMountedDock((dock) => {
-        void dock.enableVoice();
+      await handOffRoomAction(targetRoom, (dock) => {
+        void dock.startOrToggleVoice();
       });
     }
+    return targetRoom;
   }
 
   function handleLaunchStageIntro() {
@@ -1730,22 +1843,20 @@ export default function App() {
     setSceneTextDraft("");
     setSceneTextOpen(false);
     if (showCinematicIntro || room === "briefing") {
-      await handleEnterWarRoom({ openChannel: true });
+      const targetRoom = await handleEnterWarRoom({ openChannel: false });
       withMountedDock((dock) => {
         void dock.sendText(next);
-      });
+      }, 0, dockActionGenerationRef.current, targetRoom, dockScopeKeyForRoom(targetRoom));
       queuePostTurnRefreshes();
       return;
     }
     if (room === "citizens" && candidateCitizen?.citizen_id && candidateCitizen.citizen_id !== activeCitizen?.citizen_id) {
-      revealRoomChannel();
       await handOffCitizenAction(candidateCitizen.citizen_id, (dock) => {
         void dock.sendText(next);
       });
       queuePostTurnRefreshes();
       return;
     }
-    revealRoomChannel();
     withMountedDock((dock) => {
       void dock.sendText(next);
     });
@@ -1759,7 +1870,7 @@ export default function App() {
     setSceneTextOpen(false);
     if (showCinematicIntro || room === "briefing") {
       disconnectLiveChannels();
-      await handleEnterWarRoom({ openChannel: true, startVoice: true });
+      await handleEnterWarRoom({ openChannel: false, startVoice: true });
       return;
     }
     if (room === "citizens") {
@@ -1767,27 +1878,30 @@ export default function App() {
       if (!nextCitizenId) {
         return;
       }
-      revealRoomChannel();
-      const reusingCurrentCitizen = nextCitizenId === activeCitizen?.citizen_id;
       await handOffCitizenAction(nextCitizenId, (dock) => {
-        if (reusingCurrentCitizen && scenePresence.citizens.status === "connected" && scenePresence.citizens.liveMode === "voice") {
-          void dock.toggleVoiceCapture();
-          return;
-        }
-        void dock.toggleVoiceCapture();
+        void dock.startOrToggleVoice();
       });
       return;
     }
-    revealRoomChannel();
-    withMountedDock(() => {
-      toggleCurrentRoomVoice();
+    if (
+      room === "debate" &&
+      auditoriumMode === "town_hall" &&
+      (townHallSceneState?.readyForNextQuestion ?? true) &&
+      townHallSceneState?.phase !== "generating"
+    ) {
+      await debateRoomRef.current?.askTownHallQuestion();
+      return;
+    }
+    await handOffRoomAction(room, (dock) => {
+      void dock.startOrToggleVoice();
     });
   }
 
   async function handleScenePrimaryInteract(citizenId?: string) {
-    setSceneTextOpen(false);
+    setSceneTextDraft("");
     if (showCinematicIntro || room === "briefing") {
-      await handleEnterWarRoom({ openChannel: true });
+      await handleEnterWarRoom({ openChannel: false });
+      setSceneTextOpen(true);
       return;
     }
     if (room === "citizens") {
@@ -1795,16 +1909,13 @@ export default function App() {
       if (!nextCitizenId) {
         return;
       }
-      revealRoomChannel();
-      await handOffCitizenAction(nextCitizenId, (dock) => {
-        dock.focusComposer();
-      });
+      if (nextCitizenId !== activeCitizen?.citizen_id) {
+        await handOffCitizenAction(nextCitizenId);
+      }
+      setSceneTextOpen(true);
       return;
     }
-    revealRoomChannel();
-    withMountedDock(() => {
-      toggleCurrentRoomVoice();
-    });
+    setSceneTextOpen(true);
   }
 
   async function handleSceneHotspotSelect(hotspot: SceneHotspot) {
@@ -1817,19 +1928,17 @@ export default function App() {
       return;
     }
     if (hotspot.action === "resolve") {
-      if (!debatePlatform.trim()) {
-        setError("Give the room at least one clear proposal before you call the vote.");
-        setPanelsOpen(true);
-        setDrawerTab("room");
-        return;
-      }
-      await handleResolveStage(debatePlatform, latestDebatePlayerTurn);
+      await handleResolveStage(debateAdvancePayload, latestDebatePlayerTurn);
       return;
     }
     if (hotspot.action === "townhall") {
-      setDrawerTab("room");
-      setPanelsOpen(true);
-      toggleAuditoriumMode();
+      setPanelsOpen(false);
+      if (auditoriumMode === "town_hall") {
+        setAuditoriumRoomMode("debate");
+        return;
+      }
+      void debateRoomRef.current?.primeTownHallAudio();
+      setAuditoriumRoomMode("town_hall", { launchTownHall: true });
       return;
     }
     if (hotspot.action === "advisor_mode") {
@@ -1857,9 +1966,11 @@ export default function App() {
 
   const setupVoiceButtonLabel =
     setupVoiceConnecting
-      ? "Joining…"
+      ? "Cancel joining"
       : setupVoiceConnected
-        ? "Stop"
+        ? setupRealtime.muted
+          ? "Resume"
+          : "Pause"
         : "Speak";
   const setupVoiceButtonHint =
     setupVoiceConnecting
@@ -1871,7 +1982,9 @@ export default function App() {
       : setupVoiceRecording
         ? "Listening"
       : setupVoiceConnected
-            ? "Stop the live chamber"
+            ? setupRealtime.muted
+              ? "Resume the live chamber"
+              : "Pause the live chamber"
             : "Talk to the orchestrator";
 
   const sceneHotspots = useMemo<SceneHotspot[]>(() => {
@@ -1933,9 +2046,9 @@ export default function App() {
         },
         {
           id: "advisor-mode",
-          label: advisorMode === "council" ? "Single advisor" : "Multi-advisor table",
+          label: advisorMode === "council" ? "Solo room" : "Council",
           hint: advisorMode === "council" ? "Return to the one-on-one room" : "Open the wider advisory table",
-          position: [0, 1.88, 2.12],
+          position: [3.05, 1.46, 0.9],
           tone: "sage",
           action: "advisor_mode",
           active: advisorMode === "council",
@@ -1986,22 +2099,13 @@ export default function App() {
       },
       {
         id: "debate-townhall",
-        label: auditoriumMode === "town_hall" ? "Debate stage" : "Town hall floor",
+        label: auditoriumMode === "town_hall" ? "Debate stage" : "Town hall",
         hint: auditoriumMode === "town_hall" ? "Return to the candidate exchange" : "Open the live audience floor",
-        position: [0, 1.96, 2.26],
+        position: [2.58, 1.28, 1.5],
         tone: "sage",
         action: "townhall",
         active: auditoriumMode === "town_hall",
       },
-        {
-          id: "debate-resolve",
-          label: resolvingStage ? "Counting election" : "Call election",
-          hint: resolvingStage ? "Election is being counted" : "Lock the election and advance",
-          position: [0, 0.42, 6.15],
-          tone: "sage",
-          action: "resolve",
-          disabled: resolvingStage,
-        },
     ];
   }, [activeCitizen?.citizen_id, advisorMode, auditoriumMode, candidateCitizen?.citizen_id, citizens, resolvingStage, room, stage]);
 
@@ -2012,11 +2116,17 @@ export default function App() {
       {room === "advisor" ? (
         <section className="room-grid immersive-room-grid">
           <VoiceDock
+            key={`${simulation?.simulation_id ?? "sim"}:${simulation?.active_stage_index ?? 0}:advisor:${advisorMode}`}
             ref={advisorDockRef}
+            scopeKey={`${simulation?.simulation_id ?? "local"}:advisor:${advisorMode}`}
             simulationId={simulation?.simulation_id}
             role="advisor"
+            themeMode={themeMode}
+            presentation="drawer"
             advisorMode={advisorMode}
+            autoResponse={advisorMode !== "council"}
             councilContext={advisorMode === "council" ? councilContext : undefined}
+            councilRoster={simulation?.config.council_roster}
             onCouncilFloorChange={advisorMode === "council" ? setCouncilFloor : undefined}
             title={advisorMode === "council" ? `Multi-advisor table · ${stage.phase_label}` : `Advisor desk · ${stage.phase_label}`}
             blurb={
@@ -2038,35 +2148,10 @@ export default function App() {
             metaChips={[stage.phase_label, `${simulation?.approval_rating.toFixed(0)} approval`, advisorMode === "council" ? "multi-advisor voice" : "single-advisor voice"]}
             onSimulationSync={handleSimulationSync}
             onPresenceChange={(presence) => handlePresenceChange("advisor", presence)}
+            onLiveCaptionChange={(turn) => handleLiveCaptionChange("advisor", turn)}
             onModeCommand={handleModeCommand}
           />
-          <section className="side-panel side-panel--desk">
-            <div className="side-panel__block side-panel__block--mode">
-              <span>Room voice</span>
-              <p className="side-panel__support">
-                {advisorMode === "council"
-                  ? "Multi-advisor mode keeps the full strategy table live. Switch back if you want one voice across the desk."
-                  : "Single-advisor mode keeps the room simple. Switch over if you want the full internal argument."}
-              </p>
-              <div className="topbar__mode-switch" role="tablist" aria-label="Advisor room mode">
-                <button
-                  className={`topbar__mode-option ${advisorMode === "solo" ? "topbar__mode-option--active" : ""}`}
-                  onClick={() => setAdvisorRoomMode("solo")}
-                  role="tab"
-                  aria-selected={advisorMode === "solo"}
-                >
-                  Single advisor
-                </button>
-                <button
-                  className={`topbar__mode-option ${advisorMode === "council" ? "topbar__mode-option--active" : ""}`}
-                  onClick={() => setAdvisorRoomMode("council")}
-                  role="tab"
-                  aria-selected={advisorMode === "council"}
-                >
-                  Multi-advisor
-                </button>
-              </div>
-            </div>
+          <section className={`side-panel side-panel--desk side-panel--theme-${themeMode}`}>
             <div className="side-panel__block">
               <span>Working agenda</span>
               {advisorPolicyNotes.length > 0 ? (
@@ -2118,8 +2203,11 @@ export default function App() {
             <VoiceDock
               key={activeCitizen.citizen_id}
               ref={citizenDockRef}
+              scopeKey={`${simulation?.simulation_id ?? "local"}:citizen:${activeCitizen.citizen_id}`}
               simulationId={simulation?.simulation_id}
               role="citizen"
+              themeMode={themeMode}
+              presentation="drawer"
               citizenId={activeCitizen.citizen_id}
               title={activeCitizen.display_name}
               blurb={activeCitizen.summary}
@@ -2133,6 +2221,7 @@ export default function App() {
               metaChips={[activeCitizen.role, activeCitizen.region, activeCitizen.support_label, activeCitizen.voice]}
               onSimulationSync={handleSimulationSync}
               onPresenceChange={(presence) => handlePresenceChange("citizens", presence)}
+              onLiveCaptionChange={(turn) => handleLiveCaptionChange("citizens", turn)}
               onModeCommand={handleModeCommand}
             />
           ) : null}
@@ -2141,8 +2230,11 @@ export default function App() {
 
       {room === "debate" ? (
         <DebateRoom
+          ref={debateRoomRef}
+          key={`${simulation?.simulation_id ?? "sim"}:${simulation?.active_stage_index ?? 0}:debate:${auditoriumMode}`}
           voiceDockRef={debateDockRef}
           simulationId={simulation?.simulation_id}
+          themeMode={themeMode}
           stage={stage}
           debateTurns={debateTurns}
           auditoriumTurns={combinedAuditoriumTurns}
@@ -2154,6 +2246,8 @@ export default function App() {
           onSimulationSync={handleSimulationSync}
           onPresenceChange={(presence) => handlePresenceChange("debate", presence)}
           onModeCommand={handleModeCommand}
+          onTownHallStateChange={setTownHallSceneState}
+          townHallLaunchNonce={townHallLaunchNonce}
         />
       ) : null}
     </section>
@@ -2276,44 +2370,19 @@ export default function App() {
   );
   const reelsDrawerOpen = panelsOpen && drawerTab === "reels";
 
+  useEffect(() => {
+    setLiveSceneCaptions({
+      briefing: null,
+      advisor: null,
+      citizens: null,
+      debate: null,
+    });
+  }, [simulation?.simulation_id]);
+
   return (
     <div className={`app-shell ${simulation ? "app-shell--live" : "app-shell--setup"} app-shell--theme-${themeMode}`}>
       <div className="app-shell__glow app-shell__glow--left" />
       <div className="app-shell__glow app-shell__glow--right" />
-
-      {showLiveTopbar ? (
-        <header className="topbar topbar--live">
-          <div className="topbar__actions">
-            <div className="topbar__live-context">
-              <span>{liveTopbarSubhead}</span>
-              <strong>{liveTopbarHeading}</strong>
-            </div>
-            <div className="topbar__live-utility">
-              {stage ? (
-                <button
-                  className="btn btn--ghost"
-                  data-testid="topbar-reels-button"
-                  onClick={() => openReelsSurface(null)}
-                >
-                  {featurettesPending
-                    ? hasPlayableFeaturettes
-                      ? `Future reels (${readyFeaturetteCount} ready)`
-                      : "Future reels rendering"
-                    : readyFeaturetteCount > 0
-                      ? `Future reels (${readyFeaturetteCount} ready)`
-                      : "Future reels"}
-                </button>
-              ) : null}
-              <button className="btn btn--ghost" onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}>
-                {themeMode === "light" ? "Dark" : "Light"}
-              </button>
-              <button className="btn btn--secondary" onClick={() => void handleRestart()} disabled={setupBooting || launchingSetup}>
-                New setup
-              </button>
-            </div>
-          </div>
-        </header>
-      ) : null}
 
       {!simulation ? (
         <main className="immersive-stage immersive-stage--setup">
@@ -2466,12 +2535,12 @@ export default function App() {
                       void handleSetupComposerSend();
                     }
                   }}
-                  disabled={setupBooting || launchingSetup}
-                  placeholder="Talk to the orchestrator. Change country, scale, lens, style, or just say go."
+                  disabled={setupBooting || launchingSetup || setupTextPreparing}
+                  placeholder="Tell the orchestrator what world, institution, or future to examine, or just say go."
                 />
                 <button
                   type="submit"
-                  disabled={!setupPromptDraft.trim() || setupBooting || launchingSetup}
+                  disabled={!setupPromptDraft.trim() || setupBooting || launchingSetup || setupTextPreparing}
                 >
                   {setupRealtime.status === "connecting" && setupRealtime.liveMode === "text" ? "Sending…" : "Send"}
                 </button>
@@ -2586,6 +2655,8 @@ export default function App() {
                     advisorMode={advisorMode}
                     auditoriumMode={auditoriumMode}
                     stage={stage}
+                    playerName={simulation.config.player_name}
+                    councilRoster={simulation.config.council_roster}
                     themeProfile={themeProfile}
                     playerInPower={simulation.player_in_power}
                     citizens={citizens}
@@ -2595,8 +2666,22 @@ export default function App() {
                     debateNotes={debateBoardNotes}
                     presence={activePresence}
                     councilFloorLead={advisorMode === "council" ? councilFloor?.lead : undefined}
-                    councilUrgencies={advisorMode === "council" ? councilFloor?.urgencies : undefined}
+                    councilFloorOwner={advisorMode === "council" ? councilFloor?.owner : undefined}
                     councilFloorContrast={advisorMode === "council" ? councilFloor?.contrast : undefined}
+                    townHallState={
+                      room === "debate" && auditoriumMode === "town_hall"
+                        ? {
+                            label: townHallSceneState?.label ?? "Town hall floor",
+                            detail: townHallSceneState?.detail ?? "A voter is about to step up.",
+                            speaker: townHallSceneState?.question?.displayName,
+                            question: townHallSceneState?.question?.question,
+                            active: townHallSceneState?.awaitingPlayer ?? false,
+                            readyForNextQuestion: townHallSceneState?.readyForNextQuestion ?? true,
+                            phase: townHallSceneState?.phase,
+                            error: townHallSceneState?.error ?? null,
+                          }
+                        : undefined
+                    }
                     resolvingStage={resolvingStage}
                     hotspots={sceneHotspots}
                     panelsOpen={panelsOpen}
@@ -2618,9 +2703,31 @@ export default function App() {
                     onTextComposerToggle={() => setSceneTextOpen((current) => !current)}
                     onTextComposerChange={setSceneTextDraft}
                     onTextComposerSend={() => void handleSceneTextSend()}
-                    onQuickCommand={(command) => void handleSceneQuickCommand(command)}
+                    onStageAdvance={() => void handleResolveStage(debateAdvancePayload, latestDebatePlayerTurn)}
+                    stageAdvanceLabel={debateAdvanceLabel}
+                    stageAdvanceHint={debateAdvanceHint}
+                    stageAdvanceDisabled={debateAdvanceDisabled}
                     onStreetFocusChange={handleStreetFocusChange}
-                    onTogglePanels={undefined}
+                    onTogglePanels={() => {
+                      setDrawerTab("room");
+                      setPanelsOpen((current) => !current || drawerTab !== "room");
+                    }}
+                    detailsOpen={panelsOpen && drawerTab === "room"}
+                    onOpenReels={() => openReelsSurface(null)}
+                    reelsLabel={
+                      featurettesPending
+                        ? hasPlayableFeaturettes
+                          ? `Reels ${readyFeaturetteCount}`
+                          : "Reels soon"
+                        : readyFeaturetteCount > 0
+                          ? `Reels ${readyFeaturetteCount}`
+                          : "Reels"
+                    }
+                    onToggleTheme={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+                    themeLabel={themeMode === "light" ? "Dark" : "Light"}
+                    onToggleFullscreen={() => void toggleFullscreen()}
+                    fullscreenLabel={isFullscreen ? "Window" : "Fullscreen"}
+                    onRestart={() => void handleRestart()}
                   />
                 </Suspense>
                 {showCinematicIntro ? (
@@ -2669,6 +2776,7 @@ export default function App() {
                         stage={stage}
                         variant="overlay"
                         requestedFeaturetteId={reelsRequestedFeaturetteId}
+                        onRequestedFeaturetteClear={() => setReelsRequestedFeaturetteId(null)}
                         onClose={() => {
                           setReelsOpen(false);
                           setReelsRequestedFeaturetteId(null);
@@ -2685,65 +2793,53 @@ export default function App() {
                     reelsDrawerOpen ? "immersive-drawer--reels" : ""
                   }`}
                 >
-                  <div className="immersive-drawer__rail">
-                    {panelsOpen ? (
-                      <>
-                        <div className="immersive-drawer__handle" />
-                        <nav className="room-nav room-nav--immersive">
-                          {ROOM_BUTTONS.map((entry) => (
-                            <button
-                              key={entry.key}
-                              className={`room-nav__button ${room === entry.key ? "room-nav__button--active" : ""}`}
-                              onClick={() => void handleRoomFocus(entry.key)}
-                              disabled={simulation.status !== "stage_ready" && entry.key !== "briefing"}
-                            >
-                              {entry.label}
-                            </button>
-                          ))}
-                        </nav>
-                        <div className="immersive-drawer__tabs">
+                  {panelsOpen ? (
+                    <div className="immersive-drawer__rail">
+                      <div className="immersive-drawer__handle" />
+                      <nav className="room-nav room-nav--immersive">
+                        {ROOM_BUTTONS.map((entry) => (
                           <button
-                            className={`immersive-drawer__tab ${drawerTab === "room" ? "immersive-drawer__tab--active" : ""}`}
-                            onClick={() => setDrawerTab("room")}
+                            key={entry.key}
+                            className={`room-nav__button ${room === entry.key ? "room-nav__button--active" : ""}`}
+                            onClick={() => void handleRoomFocus(entry.key)}
+                            disabled={simulation.status !== "stage_ready" && entry.key !== "briefing"}
                           >
-                            Room
+                            {entry.label}
                           </button>
-                          <button
-                            className={`immersive-drawer__tab ${drawerTab === "intel" ? "immersive-drawer__tab--active" : ""}`}
-                            onClick={() => setDrawerTab("intel")}
-                          >
-                            Intel
-                          </button>
-                          <button
-                            className={`immersive-drawer__tab ${drawerTab === "reels" ? "immersive-drawer__tab--active" : ""}`}
-                            onClick={() => setDrawerTab("reels")}
-                          >
-                            Reels
-                          </button>
-                        </div>
-                        <button className="btn btn--ghost immersive-drawer__toggle" onClick={() => setPanelsOpen(false)}>
-                          Close
+                        ))}
+                      </nav>
+                      <div className="immersive-drawer__tabs">
+                        <button
+                          className={`immersive-drawer__tab ${drawerTab === "room" ? "immersive-drawer__tab--active" : ""}`}
+                          onClick={() => setDrawerTab("room")}
+                        >
+                          Room
                         </button>
-                      </>
-                    ) : (
-                      <button
-                        className="btn btn--ghost immersive-drawer__toggle"
-                        onClick={() => {
-                          setDrawerTab("intel");
-                          setPanelsOpen(true);
-                        }}
-                      >
-                        Intel
+                        <button
+                          className={`immersive-drawer__tab ${drawerTab === "intel" ? "immersive-drawer__tab--active" : ""}`}
+                          onClick={() => setDrawerTab("intel")}
+                        >
+                          Intel
+                        </button>
+                        <button
+                          className={`immersive-drawer__tab ${drawerTab === "reels" ? "immersive-drawer__tab--active" : ""}`}
+                          onClick={() => setDrawerTab("reels")}
+                        >
+                          Reels
+                        </button>
+                      </div>
+                      <button className="btn btn--ghost immersive-drawer__toggle" onClick={() => setPanelsOpen(false)}>
+                        Close
                       </button>
-                    )}
-                  </div>
+                    </div>
+                  ) : null}
 
                   <div className={`immersive-drawer__body ${panelsOpen ? "immersive-drawer__body--open" : ""}`}>
                     <div className={`immersive-drawer__pane ${drawerTab === "room" ? "immersive-drawer__pane--active" : ""}`}>
-                      {panelsOpen && drawerTab === "room" ? roomDrawer : null}
+                      {roomDrawer}
                     </div>
                     <div className={`immersive-drawer__pane ${drawerTab === "intel" ? "immersive-drawer__pane--active" : ""}`}>
-                      {panelsOpen && drawerTab === "intel" ? intelDrawer : null}
+                      {intelDrawer}
                     </div>
                     <div className={`immersive-drawer__pane ${drawerTab === "reels" ? "immersive-drawer__pane--active" : ""}`}>
                       {!reelsOpen && reelsDrawerOpen ? reelsDrawer : null}

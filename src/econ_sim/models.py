@@ -253,7 +253,8 @@ class SimulationConfig(BaseModel):
     persona_count: int = Field(default=64, ge=8, le=256)
     stage_count: int = Field(default=5, ge=3, le=8)
     visual_style: str
-    orchestrator_reasoning_effort: ReasoningEffort = "low"
+    council_roster: list[CouncilAdvisorProfile] = Field(default_factory=list)
+    orchestrator_reasoning_effort: ReasoningEffort = "medium"
     realtime_model: str = "gpt-realtime-1.5"
 
 
@@ -295,7 +296,8 @@ class SimulationCreateRequest(BaseModel):
     persona_count: int = Field(default=48, ge=8, le=256)
     stage_count: int = Field(default=5, ge=3, le=8)
     visual_style: str | None = None
-    orchestrator_reasoning_effort: ReasoningEffort = "low"
+    council_roster: list["CouncilAdvisorProfile"] = Field(default_factory=list)
+    orchestrator_reasoning_effort: ReasoningEffort = "medium"
     realtime_model: str = "gpt-realtime-1.5"
 
 
@@ -315,6 +317,7 @@ class SetupSessionPatchRequest(BaseModel):
     persona_count: int | None = Field(default=None, ge=8, le=256)
     stage_count: int | None = Field(default=None, ge=3, le=8)
     visual_style: str | None = None
+    council_roster: list["CouncilAdvisorProfile"] | None = None
     orchestrator_reasoning_effort: ReasoningEffort | None = None
     realtime_model: str | None = None
 
@@ -441,17 +444,60 @@ class CouncilTurnRequest(BaseModel):
     text: str = ""
     mode: Literal["text", "voice"] = "text"
     continue_dialogue: bool = False
+    preferred_speaker: str = ""
+    avoid_speaker: str = ""
+    provisional_turns: list[ConversationTurnInput] = Field(default_factory=list)
+    provisional_board_notes: list[str] = Field(default_factory=list)
+
+
+class CouncilAdvisorProfile(BaseModel):
+    key: str
+    name: str
+    room_role: str
+    country_role: str
+    remit: str
+    voice: str = "alloy"
+    viewpoint: str = ""
+
+
+class CouncilAdvisorAction(BaseModel):
+    name: Literal[
+        "run_poll_now",
+        "run_queued_polls",
+        "update_policy_board",
+        "move_room_focus",
+        "focus_citizen_by_name",
+    ]
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class CouncilAdvisorDraft(BaseModel):
+    advisor_key: str
+    advisor_name: str
+    text: str = ""
+    reason: str = ""
+    board_notes: list[str] = Field(default_factory=list)
+    action: CouncilAdvisorAction | None = None
 
 
 class CouncilAdvisorBeat(BaseModel):
-    name: Literal["Rowan", "Leila", "Mateo", "Amina"]
+    name: str
     urgency: int = Field(ge=0, le=10)
     speak: bool = False
     text: str = ""
 
 
+class CouncilSpeakerDecision(BaseModel):
+    next_speaker: str
+    reason: str
+    yield_after_turn: bool = False
+    board_notes: list[str] = Field(default_factory=list)
+    contrast: list[str] = Field(default_factory=list)
+    action: CouncilAdvisorAction | None = None
+
+
 class CouncilTurnPlan(BaseModel):
-    lead: Literal["Rowan", "Leila", "Mateo", "Amina"]
+    lead: str
     reason: str
     yield_after_turn: bool = False
     player_proxy_urgency: int = Field(default=0, ge=0, le=10)
@@ -463,14 +509,14 @@ class CouncilTurnResponse(BaseModel):
     simulation: SimulationState
     thread_key: str
     lead: str
-    urgencies: dict[str, int]
-    speaker_order: list[str] = Field(default_factory=list)
+    next_speaker: str = "player"
     contrast: list[str] = Field(default_factory=list)
     reason: str | None = None
     yield_after_turn: bool = False
-    player_proxy_urgency: int = 0
     board_notes: list[str] = Field(default_factory=list)
     turns: list[ConversationTurn] = Field(default_factory=list)
+    audio_base64: str | None = None
+    audio_format: str | None = None
 
 
 class TownHallQuestionRequest(BaseModel):
@@ -488,3 +534,19 @@ class TownHallQuestionResponse(BaseModel):
     thread_key: str
     cue: str = ""
     question_turn: ConversationTurn
+
+
+class TownHallOpponentReplyRequest(BaseModel):
+    citizen_id: str | None = None
+    question_text: str = ""
+    mode: Literal["text", "voice"] = "voice"
+
+
+class TownHallOpponentReplyDraft(BaseModel):
+    reply: str
+
+
+class TownHallOpponentReplyResponse(BaseModel):
+    simulation: SimulationState
+    thread_key: str
+    reply_turn: ConversationTurn

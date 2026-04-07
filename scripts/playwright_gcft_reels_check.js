@@ -58,7 +58,7 @@ async function run() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { chromium } = loadPlaywright();
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.PLAYWRIGHT_HEADLESS === "1",
     executablePath: GCFT_BIN,
     args: [
       "--use-fake-ui-for-media-stream",
@@ -111,7 +111,9 @@ async function run() {
       }
     }
 
-    const cards = directOverlayOpen
+    const cinema = page.locator(".featurette-cinema").first();
+    let cinemaOpen = (await cinema.count()) > 0;
+    const cards = directOverlayOpen && !cinemaOpen
       ? page.locator(".featurette-overlay .featurette-card")
       : page.locator(".immersive-drawer__reel-card, .featurette-card");
     const reelTitles = await cards.locator("strong").evaluateAll((nodes) =>
@@ -123,13 +125,18 @@ async function run() {
 
     let viewerTitle = null;
     let reelAutoplayLabel = null;
+    if (cinemaOpen) {
+      viewerTitle = await page.locator(".featurette-cinema__title strong").first().innerText().catch(() => null);
+      reelAutoplayLabel = await page.getByRole("button", { name: /Stop|Replay|Play/i }).first().innerText().catch(() => null);
+    }
     const openableCard = directOverlayOpen
       ? page.locator(".featurette-overlay .featurette-card.featurette-card--ready").first()
       : page.locator(".featurette-card.featurette-card--ready, .immersive-drawer__reel-card.immersive-drawer__reel-card--ready").first();
-    if (await openableCard.count()) {
+    if (!cinemaOpen && await openableCard.count()) {
       await openableCard.click();
       await page.waitForTimeout(1000);
       await page.screenshot({ path: path.join(OUT_DIR, "03-viewer.png"), fullPage: true });
+      cinemaOpen = (await cinema.count()) > 0;
       viewerTitle = await page
         .locator(".featurette-cinema__title strong, .featurette-viewer h3")
         .first()
@@ -141,6 +148,7 @@ async function run() {
     const summary = {
       url: page.url(),
       directOverlayOpen,
+      cinemaOpen,
       reelCardCount: await cards.count(),
       reelTitles,
       reelQuestions,

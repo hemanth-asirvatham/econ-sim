@@ -3,15 +3,16 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import AppSettings, get_settings
 from .models import (
     CouncilTurnRequest,
     ConversationSyncRequest,
+    TownHallOpponentReplyRequest,
     TownHallQuestionRequest,
     QueuePollRequest,
     RealtimeRole,
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.director = build_director(settings)
+    await app.state.director.resume_incomplete_simulations()
     yield
 
 
@@ -231,6 +233,17 @@ async def debate_town_hall_question(simulation_id: str, request: TownHallQuestio
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/api/simulations/{simulation_id}/debate/town-hall-opponent-reply")
+async def debate_town_hall_opponent_reply(simulation_id: str, request: TownHallOpponentReplyRequest):
+    director: SimulationDirector = app.state.director
+    try:
+        return await director.generate_town_hall_opponent_reply(simulation_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/simulations/{simulation_id}/realtime/{role}/tools/{tool_name}")
 async def realtime_tool(simulation_id: str, role: RealtimeRole, tool_name: str, payload: dict):
     director: SimulationDirector = app.state.director
@@ -247,6 +260,22 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
     director: SimulationDirector = app.state.director
     audio_bytes = await director.gateway.synthesize_bytes(text=request.text, voice=request.voice)
     return Response(content=audio_bytes, media_type="audio/mpeg")
+
+
+@app.get("/api/audio/speech")
+async def synthesize_speech_stream(
+    text: str = Query(..., min_length=1, max_length=600),
+    voice: str = Query(..., min_length=1, max_length=32),
+):
+    director: SimulationDirector = app.state.director
+    return StreamingResponse(
+        director.gateway.synthesize_stream(text=text, voice=voice),
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def resolve_asset_file(asset_path: str, settings: AppSettings, web_dist: Path | None = None) -> Path | None:
@@ -279,6 +308,7 @@ def mount_static_files(fastapi_app: FastAPI, settings: AppSettings) -> None:
     fastapi_app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allow_origins,
+        allow_origin_regex=settings.allow_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

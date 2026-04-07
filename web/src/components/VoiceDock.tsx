@@ -1,17 +1,22 @@
 import { forwardRef, useEffect, useEffectEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useRealtimeSession } from "../hooks/useRealtimeSession";
-import { parseCouncilCaption, splitCouncilLines, type CouncilTurnContext } from "../lib/council";
-import type { AdvisorMode, AuditoriumMode, ConversationTurn, RealtimeRole, RoomName, ScenePresence, SimulationState } from "../types";
+import { normalizeCouncilRoster, parseCouncilCaption, splitCouncilLines, type CouncilTurnContext } from "../lib/council";
+import type { AdvisorMode, AuditoriumMode, ConversationTurn, CouncilAdvisorProfile, RealtimeRole, RoomName, ScenePresence, SimulationState } from "../types";
 
 interface VoiceDockProps {
+  scopeKey?: string;
   simulationId?: string;
   role: RealtimeRole;
+  themeMode?: "light" | "dark";
+  presentation?: "full" | "drawer";
   citizenId?: string;
   advisorMode?: AdvisorMode;
   auditoriumMode?: AuditoriumMode;
   sessionAuditoriumMode?: AuditoriumMode;
   autoResponse?: boolean;
+  externalPlaybackActive?: boolean;
   councilContext?: CouncilTurnContext;
+  councilRoster?: CouncilAdvisorProfile[];
   title: string;
   blurb: string;
   draftPlaceholder?: string;
@@ -20,9 +25,10 @@ interface VoiceDockProps {
   metaChips?: string[];
   onSimulationSync: (simulation: SimulationState) => void;
   onPresenceChange?: (presence: ScenePresence) => void;
+  onLiveCaptionChange?: (turn: ConversationTurn | null) => void;
   onCouncilFloorChange?: (floor: {
     lead: string;
-    urgencies: Record<string, number>;
+    owner: string;
     contrast: string[];
     reason?: string;
   } | null) => void;
@@ -34,7 +40,13 @@ interface VoiceDockProps {
   }) => Promise<boolean> | boolean;
 }
 
-function speakerLabel(role: RealtimeRole, turn: ConversationTurn, advisorMode: AdvisorMode, auditoriumMode: AuditoriumMode) {
+function speakerLabel(
+  role: RealtimeRole,
+  turn: ConversationTurn,
+  advisorMode: AdvisorMode,
+  auditoriumMode: AuditoriumMode,
+  councilRoster?: ReturnType<typeof normalizeCouncilRoster>,
+) {
   if (turn.speaker === "user") {
     return turn.mode === "voice" ? "You · live mic" : "You";
   }
@@ -46,7 +58,7 @@ function speakerLabel(role: RealtimeRole, turn: ConversationTurn, advisorMode: A
   }
   if (role === "advisor") {
     if (advisorMode === "council") {
-      const parsed = parseCouncilCaption(turn.text);
+      const parsed = parseCouncilCaption(turn.text, councilRoster);
       if (parsed.speaker) {
         return parsed.speaker;
       }
@@ -65,22 +77,29 @@ export interface VoiceDockHandle {
   enableVoice: () => Promise<void>;
   disconnect: () => void;
   focusComposer: () => void;
+  getScopeKey: () => string;
   injectContextTurn: (text: string) => Promise<boolean>;
   requestAssistantReply: (instructions?: string) => Promise<boolean>;
   sendText: (text: string) => Promise<void>;
+  startOrToggleVoice: () => Promise<void>;
   toggleMute: () => void;
   toggleVoiceCapture: () => Promise<void>;
 }
 
 export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function VoiceDock({
+  scopeKey,
   simulationId,
   role,
+  themeMode = "dark",
+  presentation = "full",
   citizenId,
   advisorMode = "solo",
   auditoriumMode = "debate",
   sessionAuditoriumMode,
   autoResponse = true,
+  externalPlaybackActive = false,
   councilContext,
+  councilRoster,
   title,
   blurb,
   draftPlaceholder,
@@ -89,12 +108,19 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
   metaChips = [],
   onSimulationSync,
   onPresenceChange,
+  onLiveCaptionChange,
   onCouncilFloorChange,
   onModeCommand,
 }: VoiceDockProps, ref) {
   const [draft, setDraft] = useState("");
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastPresenceSignatureRef = useRef("");
   const liveAuditoriumMode = sessionAuditoriumMode ?? auditoriumMode;
+  const normalizedCouncilRoster = useMemo(() => normalizeCouncilRoster(councilRoster), [councilRoster]);
+  const liveScopeKey = useMemo(
+    () => scopeKey ?? `${simulationId ?? "local"}:${role}:${citizenId ?? "shared"}:${advisorMode}:${liveAuditoriumMode}`,
+    [advisorMode, citizenId, liveAuditoriumMode, role, scopeKey, simulationId],
+  );
   const session = useRealtimeSession({
     simulationId,
     role,
@@ -102,7 +128,9 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
     advisorMode,
     auditoriumMode: liveAuditoriumMode,
     autoResponse,
+    externalPlaybackActive,
     councilContext,
+    councilRoster,
     initialTurns: turns,
     onSimulationSync,
     onCouncilFloorChange,
@@ -115,9 +143,9 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
         if (!(advisorMode === "council" && role === "advisor" && event.speaker === "assistant")) {
           return [{ ...event, displaySpeaker: undefined, displayText: event.text }];
         }
-        const councilLines = splitCouncilLines(event.text);
+        const councilLines = splitCouncilLines(event.text, normalizedCouncilRoster);
         if (councilLines.length <= 1) {
-          const parsed = parseCouncilCaption(event.text);
+          const parsed = parseCouncilCaption(event.text, normalizedCouncilRoster);
           return [{ ...event, displaySpeaker: parsed.speaker, displayText: parsed.text || event.text }];
         }
         return councilLines.map((line, index) => ({
@@ -127,14 +155,29 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
           displayText: line.text,
         }));
       }),
-    [advisorMode, role, session.events],
+    [advisorMode, normalizedCouncilRoster, role, session.events],
   );
+  const liveCaptionTurn = useMemo<ConversationTurn | null>(() => {
+    const latestEvent = [...renderedEvents]
+      .reverse()
+      .find((event) => event.speaker !== "system" && event.displayText.trim());
+    if (!latestEvent) {
+      return null;
+    }
+    return {
+      ...latestEvent,
+      speaker_name: latestEvent.displaySpeaker ?? latestEvent.speaker_name,
+      text: latestEvent.displayText,
+    };
+  }, [renderedEvents]);
 
   const conversationLabel =
     session.status === "connecting"
       ? session.liveMode === "voice"
         ? "connecting mic"
         : "opening text channel"
+      : session.status === "error"
+        ? "channel lost"
       : session.status === "connected"
         ? session.liveMode === "voice"
           ? session.assistantSpeaking
@@ -156,39 +199,72 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
     }
     return "idle";
   }, [session.presence.counterpartActivity, session.presence.playerActivity]);
-  const quickCommands = useMemo(() => {
-    if (role === "advisor") {
-      return advisorMode === "council"
-        ? ["Say \"go to single advisor\" for one voice", "Say \"go to street\" or \"go to debate stage\""]
-        : ["Say \"go to multi-advisor\" for the full table", "Say \"go to street\" or \"go to debate stage\""];
-    }
-    if (role === "debate") {
-      return auditoriumMode === "town_hall"
-        ? ["Say \"go to street\" or \"go to single advisor\"", "Answer the voter, then invite a rebuttal"]
-        : ["Say \"go to town hall\" to switch formats", "Say \"go to street\" or \"go to advisor\""];
-    }
-    return ["Say \"talk to someone nearby\"", "Say \"go to debate\" or \"go to advisor\""];
-  }, [advisorMode, auditoriumMode, role]);
-
   const emitPresenceChange = useEffectEvent((nextPresence: ScenePresence) => {
     onPresenceChange?.(nextPresence);
   });
+  const emitLiveCaptionChange = useEffectEvent((turn: ConversationTurn | null) => {
+    onLiveCaptionChange?.(turn);
+  });
+  const presenceSignature =
+    `${session.presence.status}:${session.presence.liveMode}:${session.presence.muted ? "muted" : "open"}:` +
+    `${session.presence.playerActivity}:${session.presence.counterpartActivity}:${session.presence.voicePhase}`;
 
   useEffect(() => {
-    emitPresenceChange(session.presence);
-  }, [emitPresenceChange, session.presence]);
+    if (lastPresenceSignatureRef.current === presenceSignature) {
+      return;
+    }
+    lastPresenceSignatureRef.current = presenceSignature;
+    emitPresenceChange({
+      status: session.presence.status,
+      liveMode: session.presence.liveMode,
+      muted: session.presence.muted,
+      playerActivity: session.presence.playerActivity,
+      counterpartActivity: session.presence.counterpartActivity,
+      voicePhase: session.presence.voicePhase,
+    });
+  }, [
+    emitPresenceChange,
+    presenceSignature,
+    session.presence.counterpartActivity,
+    session.presence.liveMode,
+    session.presence.muted,
+    session.presence.playerActivity,
+    session.presence.status,
+    session.presence.voicePhase,
+  ]);
+
+  useEffect(() => {
+    const liveSpeaking =
+      session.status === "connected" &&
+      ((session.assistantSpeaking || session.presence.counterpartActivity === "speaking")
+        ? liveCaptionTurn?.speaker === "assistant"
+        : session.recordingVoiceTurn || session.presence.playerActivity === "speaking"
+          ? liveCaptionTurn?.speaker === "user"
+          : false);
+    emitLiveCaptionChange(liveSpeaking ? liveCaptionTurn : null);
+  }, [
+    emitLiveCaptionChange,
+    liveCaptionTurn,
+    session.assistantSpeaking,
+    session.presence.counterpartActivity,
+    session.presence.playerActivity,
+    session.recordingVoiceTurn,
+    session.status,
+  ]);
 
   useImperativeHandle(ref, () => ({
     addTurn: session.addTurn,
     disconnect: session.disconnect,
     enableVoice: session.enableVoice,
     focusComposer: () => composerRef.current?.focus(),
+    getScopeKey: () => liveScopeKey,
     injectContextTurn: session.injectContextTurn,
     requestAssistantReply: session.requestAssistantReply,
     sendText: session.sendText,
+    startOrToggleVoice: session.startOrToggleVoice,
     toggleMute: session.toggleMute,
     toggleVoiceCapture: session.toggleVoiceCapture,
-  }), [session.addTurn, session.disconnect, session.enableVoice, session.injectContextTurn, session.requestAssistantReply, session.sendText, session.toggleMute, session.toggleVoiceCapture]);
+  }), [liveScopeKey, session.addTurn, session.disconnect, session.enableVoice, session.injectContextTurn, session.requestAssistantReply, session.sendText, session.startOrToggleVoice, session.toggleMute, session.toggleVoiceCapture]);
 
   async function handleSend() {
     if (!draft.trim()) {
@@ -200,11 +276,11 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
   }
 
   async function handleVoiceButton() {
-    await session.toggleVoiceCapture();
+    await session.startOrToggleVoice();
   }
 
   return (
-    <section className={`voice-dock voice-dock--${role}`}>
+    <section className={`voice-dock voice-dock--${role} voice-dock--theme-${themeMode} voice-dock--${presentation}`}>
       <div className="voice-dock__hero">
         <div className={`voice-dock__portrait voice-dock__portrait--${portraitState}`}>
           <div className="voice-dock__portrait-halo" />
@@ -234,11 +310,6 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
               ))}
             </div>
           ) : null}
-          <div className="voice-dock__hints">
-            {quickCommands.map((hint) => (
-              <span key={hint}>{hint}</span>
-            ))}
-          </div>
         </div>
       </div>
 
@@ -250,7 +321,7 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
         ) : null}
         {renderedEvents.map((event) => (
           <article key={event.id} className={`voice-log__entry voice-log__entry--${event.speaker}`}>
-            <span>{event.displaySpeaker ?? speakerLabel(role, event, advisorMode, liveAuditoriumMode)}</span>
+            <span>{event.displaySpeaker ?? speakerLabel(role, event, advisorMode, liveAuditoriumMode, normalizedCouncilRoster)}</span>
             <p>{event.displayText}</p>
           </article>
         ))}
@@ -273,6 +344,7 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
             ref={composerRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            disabled={session.status === "connecting" && session.liveMode === "text"}
             placeholder={
               draftPlaceholder ??
               (role === "advisor"
@@ -289,17 +361,27 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
           />
         </label>
         <div className="composer__actions">
-          <button className="btn btn--primary" onClick={handleSend} disabled={!simulationId || !draft.trim()}>
+          <button className="btn btn--primary" onClick={handleSend} disabled={!simulationId || !draft.trim() || (session.status === "connecting" && session.liveMode === "text")}>
             Send
           </button>
-          <button className="btn btn--secondary" onClick={handleVoiceButton} disabled={!simulationId}>
-            {session.liveMode === "voice" && session.status === "connected"
-              ? "Stop"
-              : "Speak"}
-          </button>
-          <button className="btn btn--ghost" onClick={session.disconnect} disabled={session.status === "idle"}>
-            End
-          </button>
+          {presentation === "full" ? (
+            <>
+              <button className="btn btn--secondary" onClick={handleVoiceButton} disabled={!simulationId}>
+                {session.status === "connecting"
+                  ? session.liveMode === "voice"
+                    ? "Cancel joining"
+                    : "Opening…"
+                  : session.liveMode === "voice" && session.status === "connected"
+                    ? session.muted
+                      ? "Resume"
+                      : "Pause"
+                    : "Speak"}
+              </button>
+              <button className="btn btn--ghost" onClick={session.disconnect} disabled={session.status === "idle"}>
+                End
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 

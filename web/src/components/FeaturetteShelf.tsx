@@ -7,6 +7,7 @@ interface FeaturetteShelfProps {
   stage: StagePackage;
   variant?: "drawer" | "overlay";
   requestedFeaturetteId?: string | null;
+  onRequestedFeaturetteClear?: () => void;
   onClose?: () => void;
 }
 
@@ -15,12 +16,65 @@ function beatDurationMs(line: string) {
   return Math.max(3200, Math.min(7800, 1800 + wordCount * 220));
 }
 
+async function settleAudioStart(playPromise: Promise<unknown>, timeoutMs = 1200) {
+  let started = false;
+  await Promise.race([
+    playPromise
+      .then(() => {
+        started = true;
+      })
+      .catch(() => undefined),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  return started;
+}
+
+function waitForFeaturetteAudio(audio: HTMLAudioElement, fallbackMs: number) {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const cleanup = () => {
+      audio.removeEventListener("ended", finish);
+      audio.removeEventListener("error", finish);
+      window.clearInterval(pollTimer);
+      window.clearTimeout(timeoutTimer);
+    };
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const pollTimer = window.setInterval(() => {
+      if (
+        audio.error ||
+        audio.ended ||
+        (Number.isFinite(audio.duration) && audio.duration > 0 && audio.currentTime >= audio.duration - 0.06)
+      ) {
+        finish();
+      }
+    }, 260);
+    const timeoutTimer = window.setTimeout(finish, fallbackMs);
+    audio.addEventListener("ended", finish, { once: true });
+    audio.addEventListener("error", finish, { once: true });
+  });
+}
+
 function isPlayable(featurette: DocumentaryFeaturette) {
   return featurette.status === "ready" && featurette.narrative_beats.length > 0;
 }
 
-export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturetteId, onClose }: FeaturetteShelfProps) {
-  const [activeFeaturetteId, setActiveFeaturetteId] = useState<string | null>(null);
+export function FeaturetteShelf({
+  stage,
+  variant = "drawer",
+  requestedFeaturetteId,
+  onRequestedFeaturetteClear,
+  onClose,
+}: FeaturetteShelfProps) {
+  const [activeFeaturetteId, setActiveFeaturetteId] = useState<string | null>(() => requestedFeaturetteId ?? null);
   const [activeBeatIndex, setActiveBeatIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
@@ -33,7 +87,12 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     () => featurettes.filter((featurette) => featurette.status === "ready").length,
     [featurettes],
   );
+  const featuretteSignature = useMemo(
+    () => featurettes.map((featurette) => `${featurette.id}:${featurette.status}:${featurette.narrative_beats.length}`).join("|"),
+    [featurettes],
+  );
   const renderPending = stage.featurettes_status !== "ready" && stage.featurettes_status !== "error";
+  const lastHandledRequestRef = useRef<string | null>(null);
 
   function ensureAudio() {
     const existing = audioRef.current;
@@ -76,6 +135,11 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     if (requestedFeaturetteId === undefined) {
       return;
     }
+    const requestKey = `${stage.index}:${requestedFeaturetteId ?? "shelf"}:${featuretteSignature}`;
+    if (lastHandledRequestRef.current === requestKey) {
+      return;
+    }
+    lastHandledRequestRef.current = requestKey;
     const requested =
       requestedFeaturetteId
         ? featurettes.find((featurette) => featurette.id === requestedFeaturetteId) ?? null
@@ -88,7 +152,7 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     }
     setActiveFeaturetteId(requestedFeaturetteId);
     setActiveBeatIndex(0);
-  }, [featurettes, requestedFeaturetteId]);
+  }, [featuretteSignature, featurettes, requestedFeaturetteId, stage.index]);
 
   useEffect(() => {
     if (activeFeaturetteId && featurettes.some((featurette) => featurette.id === activeFeaturetteId)) {
@@ -112,7 +176,15 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     }
     return featurettes.find((featurette) => featurette.id === activeFeaturetteId) ?? null;
   }, [activeFeaturetteId, featurettes]);
-  const activeBeat = activeFeaturette?.narrative_beats[activeBeatIndex] ?? activeFeaturette?.narrative_beats[0] ?? null;
+  const requestedOverlayFeaturette = useMemo(() => {
+    if (variant !== "overlay" || !requestedFeaturetteId) {
+      return null;
+    }
+    const requested = featurettes.find((featurette) => featurette.id === requestedFeaturetteId) ?? null;
+    return requested && isPlayable(requested) ? requested : null;
+  }, [featurettes, requestedFeaturetteId, variant]);
+  const visibleFeaturette = activeFeaturette ?? requestedOverlayFeaturette;
+  const activeBeat = visibleFeaturette?.narrative_beats[activeBeatIndex] ?? visibleFeaturette?.narrative_beats[0] ?? null;
   const activeImageUrl = toAbsoluteAssetUrl(activeBeat?.image_url);
   const showHero = variant !== "overlay";
 
@@ -121,6 +193,11 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     setActiveFeaturetteId(null);
     setActiveBeatIndex(0);
     setPlaybackError(null);
+  }
+
+  function returnToShelf() {
+    closeActiveFeaturette();
+    onRequestedFeaturetteClear?.();
   }
 
   async function playFeaturette(featurette: DocumentaryFeaturette, startIndex = 0) {
@@ -142,27 +219,9 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
         setActiveBeatIndex(index);
         const audioUrl = toAbsoluteAssetUrl(beat.audio_url);
         if (audioUrl) {
-          await new Promise<void>((resolve) => {
-            const done = () => {
-              audio.removeEventListener("ended", done);
-              audio.removeEventListener("error", done);
-              audio.removeEventListener("pause", done);
-              resolve();
-            };
-            audio.addEventListener("ended", done, { once: true });
-            audio.addEventListener("error", done, { once: true });
-            audio.addEventListener("pause", done, { once: true });
-            audio.src = audioUrl;
-            audio.play().catch((caught) => {
-              audio.removeEventListener("ended", done);
-              audio.removeEventListener("error", done);
-              audio.removeEventListener("pause", done);
-              resolve();
-              if (!(caught instanceof DOMException && caught.name === "AbortError")) {
-                setPlaybackError(caught instanceof Error ? caught.message : "Featurette playback failed");
-              }
-            });
-          });
+          audio.src = audioUrl;
+          const started = await settleAudioStart(audio.play(), 1100);
+          await waitForFeaturetteAudio(audio, beatDurationMs(beat.line) + (started ? 3200 : 0));
         } else {
           await new Promise((resolve) => window.setTimeout(resolve, beatDurationMs(beat.line)));
         }
@@ -177,15 +236,22 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
     }
   }
 
-  if (variant === "overlay" && activeFeaturette) {
+  if (variant === "overlay" && visibleFeaturette) {
     return (
       <section className="featurette-cinema" data-testid="featurette-cinema">
         <div className="featurette-cinema__media">
           {activeImageUrl ? (
-            <img className="featurette-cinema__image" src={activeImageUrl} alt={activeBeat?.line || activeFeaturette.title} />
+            <div
+              className="featurette-cinema__backdrop"
+              style={{ backgroundImage: `url(${activeImageUrl})` }}
+              aria-hidden="true"
+            />
+          ) : null}
+          {activeImageUrl ? (
+            <img className="featurette-cinema__image" src={activeImageUrl} alt={activeBeat?.line || visibleFeaturette.title} />
           ) : (
             <div className="featurette-cinema__placeholder">
-              {activeFeaturette.narrative_beats.length > 0
+              {visibleFeaturette.narrative_beats.length > 0
                 ? "Loading the reel frame..."
                 : "This reel is still rendering its documentary beats."}
             </div>
@@ -193,12 +259,47 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
           <div className="featurette-cinema__chrome">
             <div className="featurette-cinema__topline">
               <div className="featurette-cinema__title">
-                <span>{activeFeaturette.subject}</span>
-                <strong>{activeFeaturette.title}</strong>
-                <p>{featuretteQuestionLabel(activeFeaturette)}</p>
+                <span>{visibleFeaturette.subject}</span>
+                <strong>{visibleFeaturette.title}</strong>
+                <p>{visibleFeaturette.logline}</p>
               </div>
               <div className="featurette-cinema__top-actions">
-                <button className="btn btn--ghost" onClick={closeActiveFeaturette}>
+                <button
+                  className="btn btn--primary"
+                  onClick={() => {
+                    if (playing) {
+                      stopPlayback();
+                      return;
+                    }
+                    void playFeaturette(visibleFeaturette, activeBeatIndex);
+                  }}
+                  disabled={!isPlayable(visibleFeaturette)}
+                >
+                  {playing ? "Stop" : activeBeatIndex > 0 ? "Resume" : "Play"}
+                </button>
+                <button
+                  className="btn btn--ghost"
+                  onClick={() => {
+                    void playFeaturette(visibleFeaturette, 0);
+                  }}
+                  disabled={!isPlayable(visibleFeaturette)}
+                >
+                  Replay
+                </button>
+                <button
+                  className="btn btn--ghost"
+                  onClick={() => {
+                    stopPlayback();
+                    if (onClose) {
+                      onClose();
+                      return;
+                    }
+                    closeActiveFeaturette();
+                  }}
+                >
+                  Skip reel
+                </button>
+                <button className="btn btn--ghost" onClick={returnToShelf}>
                   Back to reels
                 </button>
                 {onClose ? (
@@ -210,52 +311,10 @@ export function FeaturetteShelf({ stage, variant = "drawer", requestedFeaturette
             </div>
 
             <div className="featurette-cinema__subtitle">
-              <span>Beat {activeBeatIndex + 1} of {activeFeaturette.narrative_beats.length}</span>
-              <p>{activeBeat?.line || activeFeaturette.logline}</p>
+              <span>Beat {activeBeatIndex + 1} of {visibleFeaturette.narrative_beats.length}</span>
+              <p>{activeBeat?.line || visibleFeaturette.logline}</p>
             </div>
-
-            <div className="featurette-cinema__footer">
-              <div className="featurette-cinema__controls">
-                <button
-                  className="btn btn--primary"
-                  onClick={() => {
-                    if (playing) {
-                      stopPlayback();
-                      return;
-                    }
-                    void playFeaturette(activeFeaturette, activeBeatIndex);
-                  }}
-                  disabled={!isPlayable(activeFeaturette)}
-                >
-                  {playing ? "Stop reel" : activeBeatIndex > 0 ? "Resume reel" : "Play reel"}
-                </button>
-                <button
-                  className="btn btn--ghost"
-                  onClick={() => {
-                    void playFeaturette(activeFeaturette, 0);
-                  }}
-                  disabled={!isPlayable(activeFeaturette)}
-                >
-                  Replay from start
-                </button>
-              </div>
-              <div className="featurette-cinema__beats">
-                {activeFeaturette.narrative_beats.map((beat, index) => (
-                  <button
-                    key={beat.id}
-                    className={`featurette-cinema__beat ${index === activeBeatIndex ? "featurette-cinema__beat--active" : ""}`}
-                    onClick={() => {
-                      stopPlayback();
-                      setActiveBeatIndex(index);
-                    }}
-                  >
-                    <span>Beat {index + 1}</span>
-                    <p>{beat.line}</p>
-                  </button>
-                ))}
-              </div>
-              {playbackError ? <p className="voice-dock__error">{playbackError}</p> : null}
-            </div>
+            {playbackError ? <p className="voice-dock__error">{playbackError}</p> : null}
           </div>
         </div>
       </section>

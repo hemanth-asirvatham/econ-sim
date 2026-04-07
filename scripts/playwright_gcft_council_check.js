@@ -45,14 +45,19 @@ function loadPlaywright() {
 }
 
 async function clickIfVisible(page, label) {
-  const button = page.getByRole("button", { name: label }).first();
-  if (await button.count() && await button.isVisible().catch(() => false)) {
-    try {
-      await button.click();
-    } catch {
-      await button.click({ force: true });
+  const candidates = [
+    page.getByRole("button", { name: label }).first(),
+    page.locator("button").filter({ hasText: label }).first(),
+  ];
+  for (const button of candidates) {
+    if (await button.count() && await button.isVisible().catch(() => false)) {
+      try {
+        await button.click();
+      } catch {
+        await button.click({ force: true });
+      }
+      return true;
     }
-    return true;
   }
   return false;
 }
@@ -75,7 +80,7 @@ async function run() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { chromium } = loadPlaywright();
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.PLAYWRIGHT_HEADLESS === "1",
     executablePath: GCFT_BIN,
     args: [
       "--use-fake-ui-for-media-stream",
@@ -108,12 +113,8 @@ async function run() {
       await page.waitForTimeout(2200);
     }
 
-    if (await clickIfVisible(page, /^Street$/i)) {
-      notes.push("Moved to street.");
-      await page.waitForTimeout(2200);
-    }
-    if (await clickIfVisible(page, /^War Room$/i)) {
-      notes.push("Moved to war room.");
+    if (await clickIfVisible(page, /^Council$/i)) {
+      notes.push("Moved to council.");
       await page.waitForTimeout(2200);
     }
     if (await clickIfVisible(page, /^Intel$/i)) {
@@ -136,18 +137,26 @@ async function run() {
 
     await page.screenshot({ path: path.join(OUT_DIR, "01-room.png") });
 
-    const drawerTextareas = page.locator(".voice-dock textarea");
-    const drawerCount = await drawerTextareas.count();
-    notes.push(`Drawer composer count: ${drawerCount}`);
-    const inlineInputs = page.locator(".scene__inline-composer input");
+    let inlineInputs = page.locator(".scene__inline-composer input:visible");
+    if ((await inlineInputs.count()) === 0) {
+      const typeButton = page.locator(".scene__text-trigger:visible").first();
+      if (await typeButton.count()) {
+        await typeButton.click();
+        notes.push("Opened inline text composer.");
+        await page.waitForTimeout(450);
+      }
+      inlineInputs = page.locator(".scene__inline-composer input:visible");
+    }
+    const drawerTextareas = page.locator(".voice-dock textarea:visible");
     const inlineCount = await inlineInputs.count();
+    const drawerCount = await drawerTextareas.count();
     notes.push(`Inline composer count: ${inlineCount}`);
-    const input = drawerCount > 0 ? drawerTextareas.first() : inlineCount > 0 ? inlineInputs.nth(inlineCount - 1) : page.locator(".voice-dock textarea").first();
+    notes.push(`Drawer composer count: ${drawerCount}`);
+    const input = inlineCount > 0 ? inlineInputs.nth(inlineCount - 1) : drawerTextareas.first();
+    const assistantEntryCountBefore = await page.locator(".voice-log__entry--assistant").count();
     await input.fill(PROMPT);
-    const drawerSend = page.locator(".voice-dock .btn.btn--primary").first();
-    if (drawerCount > 0 && await drawerSend.count()) {
-      await drawerSend.click();
-    } else {
+    const drawerSend = page.locator(".voice-dock .btn.btn--primary:visible").first();
+    if (inlineCount > 0) {
       const inlineButtons = page.locator(".scene__inline-composer button");
       const buttonCount = await inlineButtons.count();
       notes.push(`Inline send button count: ${buttonCount}`);
@@ -156,10 +165,17 @@ async function run() {
       } else {
         await page.getByRole("button", { name: /^Send$/i }).first().click();
       }
+    } else if (drawerCount > 0 && await drawerSend.count()) {
+      await drawerSend.click();
+    } else {
+      await page.getByRole("button", { name: /^Send$/i }).first().click();
     }
     await page.waitForFunction(
-      () => document.querySelectorAll(".voice-log__entry").length >= 2 || Boolean(document.querySelector(".scene-council-floor")),
-      { timeout: 20000 },
+      (countBefore) =>
+        document.querySelectorAll(".voice-log__entry--assistant").length > countBefore ||
+        Boolean(document.querySelector(".scene-council-floor")),
+      assistantEntryCountBefore,
+      { timeout: 30000 },
     ).catch(() => {});
     await page.waitForTimeout(3000);
 

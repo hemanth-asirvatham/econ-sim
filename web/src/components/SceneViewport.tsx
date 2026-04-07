@@ -1,17 +1,19 @@
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { ContactShadows, Float, Html, PerspectiveCamera, RoundedBox, Sparkles } from "@react-three/drei";
-import { type MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { COUNCIL_ADVISORS, parseCouncilCaption, splitCouncilLines } from "../lib/council";
+import { normalizeCouncilRoster, parseCouncilCaption, splitCouncilLines } from "../lib/council";
 import { stageRoomBrief } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
-import type { AdvisorMode, AuditoriumMode, CitizenSnapshot, RoomName, SceneHotspot, ScenePresence, StagePackage } from "../types";
+import type { AdvisorMode, AuditoriumMode, CitizenSnapshot, CouncilAdvisorProfile, RoomName, SceneHotspot, ScenePresence, StagePackage } from "../types";
 
 interface SceneViewportProps {
   room: RoomName;
   advisorMode?: AdvisorMode;
   auditoriumMode?: AuditoriumMode;
   stage: StagePackage;
+  playerName?: string;
+  councilRoster?: CouncilAdvisorProfile[];
   themeMode?: "light" | "dark";
   themeProfile?: CountryThemeProfile;
   playerInPower?: boolean;
@@ -22,8 +24,18 @@ interface SceneViewportProps {
   debateNotes?: string[];
   presence?: ScenePresence;
   councilFloorLead?: string;
-  councilUrgencies?: Record<string, number>;
+  councilFloorOwner?: string;
   councilFloorContrast?: string[];
+  townHallState?: {
+    label: string;
+    detail: string;
+    speaker?: string;
+    question?: string;
+    active?: boolean;
+    readyForNextQuestion?: boolean;
+    phase?: "idle" | "generating" | "voter_speaking" | "player_turn" | "opponent_turn";
+    error?: string | null;
+  };
   resolvingStage?: boolean;
   hotspots?: SceneHotspot[];
   panelsOpen?: boolean;
@@ -38,8 +50,19 @@ interface SceneViewportProps {
   onTextComposerToggle?: () => void;
   onTextComposerChange?: (value: string) => void;
   onTextComposerSend?: () => void;
-  onQuickCommand?: (command: string) => void;
+  onStageAdvance?: () => void;
+  stageAdvanceLabel?: string;
+  stageAdvanceHint?: string;
+  stageAdvanceDisabled?: boolean;
   onTogglePanels?: () => void;
+  detailsOpen?: boolean;
+  onOpenReels?: () => void;
+  reelsLabel?: string;
+  onToggleTheme?: () => void;
+  themeLabel?: string;
+  onToggleFullscreen?: () => void;
+  fullscreenLabel?: string;
+  onRestart?: () => void | Promise<void>;
   onStreetFocusChange?: (citizenId?: string) => void;
   onStreetPreviewChange?: (citizenId?: string) => void;
 }
@@ -84,7 +107,7 @@ interface StreetExtra {
 
 interface BoardPanel {
   kicker: string;
-  variant?: "stats" | "policy";
+  variant?: "stats" | "policy" | "mood";
   headline?: string;
   footerLabel?: string;
   footerText?: string;
@@ -256,8 +279,8 @@ function roomNote(room: RoomName, stage: StagePackage, activeCitizen?: CitizenSn
     case "advisor":
       if (advisorMode === "council") {
         return playerInPower
-          ? "The broader advisory table is live, with economy, innovation, politics, and state capacity all pressing the same decision in real time."
-          : "The campaign advisory table frames strategy as a live argument between economy, innovation, politics, and security instead of a single memo from one aide.";
+          ? "The broader advisory table is live, with several senior voices pressing the same decision from different angles in real time."
+          : "The campaign advisory table turns strategy into a live argument among competing specialists instead of a single memo from one aide.";
       }
       return playerInPower
         ? "The advisor reads the room for opportunity, backlash, and strategic drift from inside the seat of power."
@@ -304,6 +327,32 @@ function primaryTargetLabel(room: RoomName, activeCitizen?: CitizenSnapshot, adv
   }
 }
 
+function compactSceneMarkerLabel(label: string) {
+  const normalized = label.trim().toLowerCase();
+  if (normalized.includes("single advisor")) {
+    return "Advisor";
+  }
+  if (normalized.includes("multi-advisor") || normalized.includes("council")) {
+    return "Council";
+  }
+  if (normalized.includes("town hall")) {
+    return "Town hall";
+  }
+  if (normalized.includes("debate")) {
+    return "Debate";
+  }
+  if (normalized.includes("call election") || normalized.includes("counting election")) {
+    return "Vote";
+  }
+  if (normalized.includes("street") || normalized.includes("citizen")) {
+    return "Street";
+  }
+  if (normalized.includes("briefing") || normalized.includes("dossier")) {
+    return "Briefing";
+  }
+  return label;
+}
+
 function textPlaceholder(
   room: RoomName,
   activeCitizen?: CitizenSnapshot,
@@ -341,7 +390,11 @@ function boardPolicyLabel(text: string) {
     .trim()
     .replace(/[.]+$/, "")
     .replace(/^(?:i think we should|we should|let's|our plan is to|the plan is to|we need to)\s+/i, "");
-  return boardSnippet(cleaned, 34);
+  const primaryClause =
+    cleaned.length > 98
+      ? cleaned.replace(/\s+(?:while|so that|without|but)\s+.+$/i, "")
+      : cleaned;
+  return boardSnippet(primaryClause.length > 42 ? primaryClause : cleaned, 92);
 }
 
 function compactCitizenLabel(name: string, max = 22) {
@@ -487,6 +540,14 @@ function genericBoardAnswer(answer?: string | null) {
   return !normalized || ["other", "none", "mixed", "unsure", "not sure"].includes(normalized);
 }
 
+function boardQuoteSnippet(text: string, max = 76) {
+  const cleaned = text.trim().split(/\s+/).join(" ")
+    .replace(/^[^:"“”]{1,42}:\s*["“]?/, "")
+    .replace(/[”"]$/, "")
+    .trim();
+  return boardSnippet(cleaned || text, max);
+}
+
 function boardPollLaneLabel(id: string, question: string) {
   switch (id) {
     case "latest_custom":
@@ -630,6 +691,16 @@ function latestPollSummaryByKey(stage: StagePackage, keys: string[]) {
   });
 }
 
+function preferredPollSummaryByKey(stage: StagePackage, keys: string[]) {
+  for (const key of keys) {
+    const summary = latestPollSummaryByKey(stage, [key]);
+    if (summary) {
+      return summary;
+    }
+  }
+  return null;
+}
+
 function latestPollSummaryBySlot(stage: StagePackage, slots: string[], fallbackKeys: string[] = []) {
   return [...stage.poll_summaries].reverse().find((summary) => {
     const slot = (summary.board_slot ?? "").trim();
@@ -655,6 +726,24 @@ function boardSummaryChoice(summary?: StagePackage["poll_summaries"][number] | n
   }
   const [answer, share] =
     Object.entries(summary.shares).sort((left, right) => right[1] - left[1])[0] ?? ["n/a", 0];
+  const hasMeaningfulShares = Object.keys(summary.shares ?? {}).length > 0 && Number(share) > 0;
+  const quotedReason = Array.isArray(summary.sample_reasons)
+    ? summary.sample_reasons.find((entry) => typeof entry === "string" && entry.trim())
+    : null;
+  if (quotedReason && !hasMeaningfulShares) {
+    return {
+      question: summary.question,
+      answer: boardQuoteSnippet(quotedReason, 108),
+      share: "",
+    };
+  }
+  if (quotedReason && genericBoardAnswer(answer)) {
+    return {
+      question: summary.question,
+      answer: boardQuoteSnippet(quotedReason, 76),
+      share: "",
+    };
+  }
   return {
     question: summary.question,
     answer: boardSnippet(answer, 34),
@@ -666,16 +755,49 @@ function boardSummaryTitle(summary?: StagePackage["poll_summaries"][number] | nu
   const slot = summary?.board_slot ?? "";
   const key = summary?.key ?? "";
   if (slot === "capability" || key === "capability_read") {
-    return "Capability read";
+    return "Capability now";
   }
   if (slot === "national" || key === "national_effect") {
     return "National read";
   }
   if (slot === "gain" || key === "keep_change" || key === "ai_gain") {
-    return "Visible gain";
+    return "People keep";
+  }
+  if (key === "still_human") {
+    return "Still human";
+  }
+  if (key === "newly_normal") {
+    return "New normal";
   }
   if (slot === "pressure" || key === "biggest_worry" || key === "main_pressure") {
-    return "Top pressure";
+    return "Main pressure";
+  }
+  if (key === "household_security") {
+    return "Household read";
+  }
+  if (key === "job_worry") {
+    return "Job strain";
+  }
+  if (key === "ai_comfort") {
+    return "AI comfort";
+  }
+  if (key === "daily_role") {
+    return "Daily role";
+  }
+  if (key === "life_touchpoint") {
+    return "Where it lands";
+  }
+  if (key === "public_stability") {
+    return "Daily life";
+  }
+  if (key === "expertise_access") {
+    return "Expertise access";
+  }
+  if (key === "service_reliability") {
+    return "Service read";
+  }
+  if (key === "fairness") {
+    return "Fairness";
   }
   if (slot === "custom" || (summary?.source && summary.source !== "standard")) {
     return "Your poll";
@@ -687,21 +809,27 @@ function boardSummaryLabel(summary?: StagePackage["poll_summaries"][number] | nu
   if (!summary) {
     return "";
   }
-  return boardSnippet(summary.board_label || boardPollQuestionLabel(summary.question), 36);
+  return boardSnippet(summary.board_label || boardPollQuestionLabel(summary.question), 54);
 }
 
 function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
-  const capabilitySummary = latestPollSummaryBySlot(stage, ["capability"], ["capability_read"]) ?? null;
-  const nationalSummary = latestPollSummaryBySlot(stage, ["national"], ["national_effect"]) ?? null;
-  const gainSummary = latestPollSummaryBySlot(stage, ["gain"], ["keep_change", "ai_gain"]) ?? null;
-  const worrySummary = latestPollSummaryBySlot(stage, ["pressure"], ["biggest_worry", "main_pressure"]) ?? null;
+  const capabilitySummary = preferredPollSummaryByKey(stage, ["capability_read", "daily_role", "life_touchpoint"]);
+  const gainSummary = preferredPollSummaryByKey(stage, ["expertise_access", "keep_change", "ai_gain", "new_capability"]);
+  const stillHumanSummary = preferredPollSummaryByKey(stage, ["still_human"]);
+  const worrySummary = preferredPollSummaryByKey(stage, ["biggest_worry", "main_pressure", "job_worry"]);
+  const householdSummary = preferredPollSummaryByKey(stage, ["household_security", "better_off"]);
+  const serviceSummary = preferredPollSummaryByKey(stage, ["public_stability", "service_reliability", "ai_comfort"]);
+  const newlyNormalSummary = preferredPollSummaryByKey(stage, ["newly_normal"]);
+  const fairnessSummary = preferredPollSummaryByKey(stage, ["fairness"]);
+  const nationalSummary = preferredPollSummaryByKey(stage, ["national_effect", "econ_read", "gov_trust"]);
   const latestCustom = latestCustomPollSummary(stage);
   const columns: BoardPanel["columns"] = [];
 
   for (const summary of [
-    capabilitySummary ?? nationalSummary ?? gainSummary ?? worrySummary,
-    worrySummary ?? gainSummary ?? latestCustom ?? nationalSummary,
-    latestCustom ?? gainSummary ?? nationalSummary,
+    capabilitySummary ?? gainSummary ?? nationalSummary ?? serviceSummary,
+    gainSummary ?? householdSummary ?? serviceSummary ?? stillHumanSummary,
+    serviceSummary ?? stillHumanSummary ?? newlyNormalSummary ?? fairnessSummary,
+    latestCustom ?? householdSummary ?? nationalSummary ?? worrySummary,
   ]) {
     if (!summary) {
       continue;
@@ -719,8 +847,8 @@ function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
       title: boardSummaryTitle(summary),
       lines: [
         {
-          label: boardSummaryLabel(summary),
-          answer: boardPollLabel(choice.answer, { max: 32 }),
+          label: "",
+          answer: boardPollLabel(choice.answer, { max: choice.share ? 32 : 54 }),
           share: choice.share,
         },
       ],
@@ -756,35 +884,38 @@ function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
 }
 
 function boardMetricRows(stage: StagePackage): Array<{ label: string; value: string; note?: string }> {
+  const comfortSummary = latestPollSummaryByKey(stage, ["ai_comfort", "public_stability", "service_reliability"]) ?? null;
+  const [, comfortShareValue] =
+    comfortSummary
+      ? Object.entries(comfortSummary.shares).sort((left, right) => right[1] - left[1])[0] ?? ["", 0]
+      : ["", 0];
+  const comfortShare = comfortShareValue > 0 ? `${Math.round(comfortShareValue * 100)}%` : "";
+  const comfortLabel =
+    comfortSummary?.key === "public_stability"
+      ? "Daily life"
+      : comfortSummary?.key === "service_reliability"
+        ? "Services"
+        : "AI comfort";
   return [
     {
       label: "Approval",
       value: stage.tracking.approval.display,
     },
     {
-      label: "Vote today",
-      value: stage.tracking.vote_share_player.display,
-    },
-    {
-      label: "AI view",
-      value: stage.tracking.ai_comfort.display,
-    },
-    {
       label: "Better off",
       value: stage.tracking.better_off.display,
+    },
+    {
+      label: comfortShare ? comfortLabel : "Work worry",
+      value: comfortShare || stage.tracking.unemployment_anxiety.display || "n/a",
     },
   ];
 }
 
 function boardMetricsKey(stage: StagePackage) {
-  return [
-    stage.tracking.approval.display,
-    stage.tracking.vote_share_player.display,
-    stage.tracking.better_off.display,
-    stage.tracking.ai_comfort.display,
-    stage.tracking.trust_in_government.display,
-    stage.tracking.social_stability.display,
-  ].join("|");
+  return boardMetricRows(stage)
+    .map((row) => `${row.label}:${row.value}`)
+    .join("|");
 }
 
 function boardPollsKey(stage: StagePackage) {
@@ -800,6 +931,7 @@ function boardPollsKey(stage: StagePackage) {
         summary.board_slot ?? "",
         summary.board_label ?? "",
         shareKey,
+        (summary.sample_reasons ?? []).slice(0, 2).join("|"),
       ].join("::");
     })
     .join("||");
@@ -894,6 +1026,8 @@ export default function SceneViewport({
   advisorMode = "solo",
   auditoriumMode = "debate",
   stage,
+  playerName,
+  councilRoster,
   themeMode = "light",
   themeProfile,
   playerInPower = true,
@@ -904,8 +1038,9 @@ export default function SceneViewport({
   debateNotes = [],
   presence = DEFAULT_PRESENCE,
   councilFloorLead,
-  councilUrgencies,
+  councilFloorOwner,
   councilFloorContrast,
+  townHallState,
   resolvingStage = false,
   hotspots = [],
   panelsOpen = false,
@@ -920,46 +1055,95 @@ export default function SceneViewport({
   onTextComposerToggle,
   onTextComposerChange,
   onTextComposerSend,
-  onQuickCommand,
+  onStageAdvance,
+  stageAdvanceLabel,
+  stageAdvanceHint,
+  stageAdvanceDisabled = false,
   onTogglePanels,
+  detailsOpen = false,
+  onOpenReels,
+  reelsLabel = "Future reels",
+  onToggleTheme,
+  themeLabel = "Light",
+  onToggleFullscreen,
+  fullscreenLabel = "Fullscreen",
+  onRestart,
   onStreetFocusChange,
   onStreetPreviewChange,
 }: SceneViewportProps) {
+  const normalizedCouncilRoster = useMemo(() => normalizeCouncilRoster(councilRoster), [councilRoster]);
   const config = themedRoomConfig(room, themeMode, themeProfile, advisorMode);
   const palette = counterpartPalette(room, activeCitizen ?? previewCitizen);
   const councilCaption = useMemo(
     () => (
       room === "advisor" && advisorMode === "council"
-        ? parseCouncilCaption(captionText)
+        ? parseCouncilCaption(captionText, normalizedCouncilRoster)
         : { speaker: undefined, text: captionText?.trim() ?? "" }
     ),
-    [advisorMode, captionText, room],
+    [advisorMode, captionText, normalizedCouncilRoster, room],
   );
-  const councilCaptionLines = useMemo(
+  const councilCaptionEntries = useMemo(
     () => (
       room === "advisor" && advisorMode === "council"
-        ? splitCouncilLines(captionText)
-          .map((line) => (line.speaker ? `${line.speaker}: ${line.text}` : line.text))
-          .filter(Boolean)
+        ? splitCouncilLines(captionText, normalizedCouncilRoster).filter((line) => line.text)
         : []
     ),
-    [advisorMode, captionText, room],
+    [advisorMode, captionText, normalizedCouncilRoster, room],
   );
-  const activeCouncilLead =
+  const councilCaptionLines = useMemo(
+    () => councilCaptionEntries
+      .map((line) => (line.speaker ? `${line.speaker}: ${line.text}` : line.text))
+      .filter(Boolean),
+    [councilCaptionEntries],
+  );
+  const trailingCouncilSpeaker = councilCaptionEntries
+    .slice()
+    .reverse()
+    .find((line) => line.speaker)?.speaker;
+  const activeCouncilLeadRaw =
     room === "advisor" && advisorMode === "council"
-      ? councilCaption.speaker ?? councilFloorLead
+      ? councilFloorLead ?? (presence.counterpartActivity === "speaking" ? trailingCouncilSpeaker ?? councilCaption.speaker : undefined)
       : undefined;
+  const activeCouncilOwner =
+    room === "advisor" && advisorMode === "council"
+      ? councilFloorOwner ?? activeCouncilLeadRaw
+      : undefined;
+  const councilCaptionVisible =
+    room === "advisor" && advisorMode === "council"
+      ? presence.counterpartActivity === "speaking" || presence.voicePhase === "responding"
+      : true;
+  const playerHasCouncilFloor =
+    room === "advisor" &&
+    advisorMode === "council" &&
+    (activeCouncilOwner === "player" || (
+      Boolean(activeCouncilOwner) &&
+      Boolean(playerName) &&
+      activeCouncilOwner?.trim().toLowerCase() === playerName?.trim().toLowerCase()
+    ));
+  const activeCouncilLead = playerHasCouncilFloor ? undefined : activeCouncilLeadRaw;
   const visibleCaptionText = room === "advisor" && advisorMode === "council" ? councilCaption.text : captionText;
   const councilFloorText =
     room === "advisor" && advisorMode === "council"
-      ? activeCouncilLead
-        ? councilFloorContrast && councilFloorContrast.length > 0
-          ? `${activeCouncilLead} has the floor · ${councilFloorContrast.join(" / ")} close behind`
-          : `${activeCouncilLead} has the floor`
+      ? activeCouncilOwner
+        ? playerHasCouncilFloor
+          ? "You have the floor"
+          : councilFloorContrast && councilFloorContrast.length > 0
+            ? `${activeCouncilOwner} has the floor · ${councilFloorContrast.join(" / ")} close behind`
+            : `${activeCouncilOwner} has the floor`
         : presence.counterpartActivity === "speaking"
           ? "The table has the floor"
           : undefined
       : undefined;
+  const textComposerAvailable = Boolean(onTextComposerToggle && onTextComposerChange && onTextComposerSend);
+  const showStageAdvance =
+    !overlayActive &&
+    !panelsOpen &&
+    room === "debate" &&
+    Boolean(onStageAdvance) &&
+    Boolean(stageAdvanceLabel);
+  const showSceneUtilities =
+    !overlayActive &&
+    Boolean(onTogglePanels || onOpenReels || onToggleTheme || onToggleFullscreen || onRestart);
   const playerStateRef = useRef<StreetPlayerState>({ ...STREET_PLAYER_START });
   const streetAutoTargetRef = useRef<StreetAutoTarget | null>(null);
   const streetBootedRef = useRef(false);
@@ -994,8 +1178,14 @@ export default function SceneViewport({
       streetBootedRef.current = false;
       lastPublishedPoseRef.current = { ...STREET_PLAYER_START };
       lastPoseCommitRef.current = 0;
-      setPlayerPose({ ...STREET_PLAYER_START });
-      setHoveredCitizenId(null);
+      setPlayerPose((current) =>
+        Math.abs(current.x - STREET_PLAYER_START.x) < 0.001 &&
+        Math.abs(current.z - STREET_PLAYER_START.z) < 0.001 &&
+        Math.abs(current.heading - STREET_PLAYER_START.heading) < 0.001
+          ? current
+          : { ...STREET_PLAYER_START },
+      );
+      setHoveredCitizenId((current) => (current === null ? current : null));
       return;
     }
     const pressed = new Set<string>();
@@ -1214,7 +1404,7 @@ export default function SceneViewport({
 
   const voiceChannelOpen = presence.liveMode === "voice" && presence.status === "connected";
   const conversationMicLive = voiceChannelOpen && !presence.muted;
-  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || voiceChannelOpen);
+  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || conversationMicLive);
   const lockedStreetCitizen = streetSelectionLocked ? activeCitizen : undefined;
   const hoveredCitizen =
     room === "citizens" && hoveredCitizenId
@@ -1263,9 +1453,17 @@ export default function SceneViewport({
     room === "citizens" && streetAutoTargetRef.current?.kind === "approach" ? streetAutoTargetRef.current.citizenId : undefined;
   const voiceButtonLabel =
     voiceChannelConnecting
-      ? "Joining…"
+      ? "Cancel joining"
+      : presence.status === "error"
+        ? "Retry"
       : voiceChannelOpen
-        ? "Stop"
+        ? presence.muted
+          ? "Resume"
+          : "Pause"
+        : room === "debate" && auditoriumMode === "town_hall" && (townHallState?.readyForNextQuestion ?? true)
+          ? "Call on voter"
+        : room === "debate" && auditoriumMode === "town_hall" && Boolean(townHallState?.active && townHallState?.question)
+          ? "Answer voter"
         : room === "citizens"
           ? currentCitizen
             ? citizenInteractionReady
@@ -1276,72 +1474,59 @@ export default function SceneViewport({
             : "Pick someone"
           : "Speak";
   const voiceButtonHint =
-    voiceChannelConnecting
-      ? room === "citizens"
+    room === "citizens"
+      ? voiceChannelConnecting
         ? "Opening street line"
-        : "Opening live audio"
-      : textChannelPreparing
-        ? "Opening text"
-      : room === "citizens"
-        ? currentCitizen
-          ? presence.voicePhase === "responding"
-            ? `${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)} live`
-            : voiceChannelOpen
-              ? `Stop ${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)}`
-              : citizenInteractionReady
-                ? boardSnippet(currentCitizen.role, 20)
-                : approachingCitizenId === currentCitizen.citizen_id
-                  ? "Moving in"
-                  : "Move closer"
-        : "Choose a person"
-      : presence.voicePhase === "responding" && voiceChannelOpen
-        ? "Speaking"
-      : voiceChannelOpen
-          ? "Stop the live channel"
-          : room === "advisor"
-            ? advisorMode === "council"
-              ? "Multi-advisor table"
-              : "Advisor room"
-            : room === "debate"
-              ? "Podium line"
-              : primaryTargetLabel(room, currentCitizen, advisorMode);
+        : presence.status === "error" || textChannelPreparing
+          ? ""
+          : currentCitizen
+            ? presence.voicePhase === "responding"
+              ? `${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)} live`
+              : voiceChannelOpen
+                ? presence.muted
+                  ? `Resume ${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)}`
+                  : `Pause ${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)}`
+                : citizenInteractionReady
+                  ? boardSnippet(currentCitizen.role, 20)
+                  : approachingCitizenId === currentCitizen.citizen_id
+                    ? "Moving in"
+                    : "Move closer"
+            : "Choose a person"
+      : room === "debate" && auditoriumMode === "town_hall" && (townHallState?.readyForNextQuestion ?? true)
+        ? "Bring one voter to the mic"
+        : "";
+  const voiceTriggerCompact = !voiceButtonHint;
   const streetGuide =
     room === "citizens"
       ? currentCitizen
         ? citizenInteractionReady
-          ? [`Press Speak to talk with ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "You can also just say or tap debate, town hall, single advisor, or multi-advisor."]
-          : [`Click a person, then move closer to ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "If you want help picking, just say or tap talk to someone nearby."]
-        : ["Click a person to focus them, or say or tap talk to someone nearby.", "You can also jump rooms with bare phrases like debate or single advisor."]
+          ? [`Press Speak to talk with ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "You can still move rooms with a simple voice command."]
+          : [`Click a person, then move closer to ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "If you want help picking, just say talk to someone nearby."]
+        : ["Click a person to focus them, or say talk to someone nearby.", "You can jump rooms with plain voice commands like debate or single advisor."]
       : [];
-  const sceneVoiceCommands = useMemo(() => {
-    const commands =
-      room === "citizens"
-        ? currentCitizen
-          ? [auditoriumMode === "town_hall" ? "debate" : "town hall", advisorMode === "council" ? "single advisor" : "multi-advisor"]
-          : ["talk to someone nearby", "debate", advisorMode === "council" ? "single advisor" : "multi-advisor"]
-        : room === "debate"
-          ? ["street", advisorMode === "council" ? "single advisor" : "multi-advisor", auditoriumMode === "town_hall" ? "debate" : "town hall"]
-          : room === "advisor"
-            ? ["street", auditoriumMode === "town_hall" ? "debate" : "town hall", advisorMode === "council" ? "single advisor" : "multi-advisor"]
-            : ["debate", "street", advisorMode === "council" ? "single advisor" : "multi-advisor"];
-    return commands.filter((command, index) => commands.indexOf(command) === index);
-  }, [advisorMode, auditoriumMode, currentCitizen, room]);
-  const showCommandStrip =
-    sceneVoiceCommands.length > 0 &&
-    (
-      room !== "citizens" ||
-      !currentCitizen ||
-      citizenConversationLocked ||
-      voiceChannelOpen
-    );
   const showSceneCaption =
     Boolean(captionText) &&
+    councilCaptionVisible &&
     (
       room !== "citizens" ||
       citizenConversationLocked ||
       !currentCitizen ||
       currentCitizen.citizen_id === activeCitizen?.citizen_id
     );
+  const showTownHallBanner = room === "debate" && auditoriumMode === "town_hall" && Boolean(townHallState);
+  const textComposerInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!textComposerAvailable || !textComposerOpen) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      textComposerInputRef.current?.focus();
+      textComposerInputRef.current?.select();
+    }, 40);
+    return () => window.clearTimeout(timer);
+  }, [textComposerAvailable, textComposerOpen]);
+
   function handleVoiceTrigger() {
     if (room === "citizens") {
       if (!currentCitizen || !currentCitizenPlacement) {
@@ -1362,6 +1547,10 @@ export default function SceneViewport({
     }
     onStartVoice?.(room === "citizens" ? currentCitizen?.citizen_id : undefined);
   }
+  function handleComposerSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onTextComposerSend?.();
+  }
   const canvasDpr: [number, number] =
     room === "citizens" ? [0.66, 0.84] : room === "advisor" ? [1.04, 1.28] : [0.9, 1.08];
   const enableSceneShadows = room !== "citizens";
@@ -1378,6 +1567,7 @@ export default function SceneViewport({
             room={room}
             advisorMode={advisorMode}
             stage={stage}
+            councilRoster={normalizedCouncilRoster}
             playerInPower={playerInPower}
             activeCitizen={activeCitizen}
             previewCitizen={previewCitizen}
@@ -1387,7 +1577,6 @@ export default function SceneViewport({
             config={config}
             palette={palette}
             councilSpeaker={room === "advisor" && advisorMode === "council" ? activeCouncilLead : undefined}
-            councilUrgencies={room === "advisor" && advisorMode === "council" ? councilUrgencies : undefined}
             hotspots={hotspots}
             themeMode={themeMode}
             streetPlacements={streetPlacements}
@@ -1431,65 +1620,116 @@ export default function SceneViewport({
         </div>
       ) : null}
 
-      {onTogglePanels ? (
+      {showSceneUtilities ? (
         <div className="scene__controls">
-          <button className={`scene-control ${panelsOpen ? "scene-control--active" : ""}`} onClick={onTogglePanels}>
-            {panelsOpen ? "Hide intel" : "Intel"}
-          </button>
+          {onTogglePanels ? (
+            <button className={`scene-control ${detailsOpen ? "scene-control--active" : ""}`} onClick={onTogglePanels}>
+              {detailsOpen ? "Hide details" : "Details"}
+            </button>
+          ) : null}
+          {onOpenReels ? (
+            <button className="scene-control" onClick={onOpenReels}>
+              {reelsLabel}
+            </button>
+          ) : null}
+          {onToggleTheme ? (
+            <button className="scene-control" onClick={onToggleTheme}>
+              {themeLabel}
+            </button>
+          ) : null}
+          {onToggleFullscreen ? (
+            <button className="scene-control" onClick={onToggleFullscreen}>
+              {fullscreenLabel}
+            </button>
+          ) : null}
+          {onRestart ? (
+            <button className="scene-control" onClick={() => void onRestart()}>
+              New setup
+            </button>
+          ) : null}
         </div>
       ) : null}
 
-      {!overlayActive && !panelsOpen ? (
+      {!overlayActive ? (
         <>
-          <div className="scene__channel-bar">
-            <button
-              className={`scene__voice-trigger ${
-                conversationMicLive
-                  ? "scene__voice-trigger--live"
-                  : voiceChannelOpen && (presence.voicePhase === "waiting" || presence.voicePhase === "responding" || presence.muted)
-                    ? "scene__voice-trigger--muted"
-                    : ""
-              }`}
-              disabled={
-                resolvingStage ||
-                (room === "citizens" && presence.status === "idle" && !currentCitizen)
-              }
-              onClick={handleVoiceTrigger}
-            >
-              <span className="scene__voice-trigger-icon" aria-hidden="true">
-                {voiceChannelConnecting
-                  ? "◌"
-                  : conversationMicLive
-                    ? "●"
-                    : "○"}
-              </span>
-              <span className="scene__voice-trigger-copy">
-                <strong>{voiceButtonLabel}</strong>
-                <small>{voiceButtonHint}</small>
-              </span>
-            </button>
-            {onTextComposerChange && onTextComposerSend ? (
-              <form
-                className="scene__inline-composer"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  onTextComposerSend();
-                }}
+          <div className="scene__channel-stack">
+            {showStageAdvance ? (
+              <button
+                className={`scene__stage-action ${stageAdvanceDisabled ? "scene__stage-action--disabled" : ""}`}
+                onClick={() => onStageAdvance?.()}
+                disabled={stageAdvanceDisabled}
+                title={stageAdvanceHint}
               >
-                <input
-                  type="text"
-                  value={textComposerDraft}
-                  onChange={(event) => onTextComposerChange(event.target.value)}
-                  placeholder={textPlaceholder(room, currentCitizen, advisorMode, auditoriumMode)}
-                />
-                <button type="submit" disabled={!textComposerDraft.trim()} aria-label="Send text turn">
-                  →
-                </button>
-              </form>
+                <span>{stageAdvanceLabel}</span>
+                {stageAdvanceHint ? <small>{stageAdvanceHint}</small> : null}
+              </button>
             ) : null}
+            <div className={`scene__channel-bar ${textComposerOpen ? "scene__channel-bar--text-open" : ""}`}>
+              <button
+                className={`scene__voice-trigger scene__voice-trigger--scene ${
+                  conversationMicLive
+                    ? "scene__voice-trigger--live"
+                    : voiceChannelOpen && (presence.voicePhase === "waiting" || presence.voicePhase === "responding" || presence.muted)
+                      ? "scene__voice-trigger--muted"
+                      : ""
+                } ${voiceTriggerCompact ? "scene__voice-trigger--compact" : ""}`}
+                disabled={
+                  resolvingStage ||
+                  (room === "citizens" && presence.status === "idle" && !currentCitizen)
+                }
+                onClick={handleVoiceTrigger}
+              >
+                <span className="scene__voice-trigger-icon" aria-hidden="true">
+                  {voiceChannelConnecting
+                    ? "◌"
+                    : conversationMicLive
+                      ? "●"
+                      : "○"}
+                </span>
+                <span className="scene__voice-trigger-copy">
+                  <strong>{voiceButtonLabel}</strong>
+                  {voiceButtonHint ? <small>{voiceButtonHint}</small> : null}
+                </span>
+              </button>
+              {textComposerAvailable && textComposerOpen ? (
+                <form className="scene__inline-composer" onSubmit={handleComposerSubmit}>
+                  <input
+                    ref={textComposerInputRef}
+                    type="text"
+                    value={textComposerDraft}
+                    onChange={(event) => onTextComposerChange?.(event.target.value)}
+                    placeholder={textPlaceholder(room, currentCitizen, advisorMode, auditoriumMode)}
+                    aria-label="Type a turn"
+                  />
+                  <button type="submit" disabled={!textComposerDraft.trim()}>
+                    Send
+                  </button>
+                </form>
+              ) : null}
+              {textComposerAvailable ? (
+                <button
+                  type="button"
+                  className={`scene__text-trigger ${textComposerOpen ? "scene__text-trigger--active" : ""}`}
+                  onClick={onTextComposerToggle}
+                  aria-label={textComposerOpen ? "Hide text input" : "Open text input"}
+                  title={textComposerOpen ? "Hide text input" : "Type instead"}
+                >
+                  <span aria-hidden="true">⌨</span>
+                  <strong>{textComposerOpen ? "Hide" : "Type"}</strong>
+                </button>
+              ) : null}
+            </div>
           </div>
 
-          {showSceneCaption ? (
+          {!panelsOpen && showTownHallBanner ? (
+            <div className={`scene-townhall-floor ${townHallState?.error ? "scene-townhall-floor--error" : ""}`}>
+              <span>{townHallState?.label}</span>
+              <strong>{townHallState?.speaker ? `${townHallState.speaker} has the mic` : "The crowd has the mic"}</strong>
+              <p>{townHallState?.error ?? townHallState?.question ?? townHallState?.detail}</p>
+            </div>
+          ) : null}
+
+          {!panelsOpen && showSceneCaption && !showTownHallBanner && !citizenCardCitizen ? (
             <>
               {councilFloorText ? <div className="scene-council-floor">{councilFloorText}</div> : null}
               <div className={`scene__caption scene__caption--${captionSpeaker ?? "assistant"} scene__caption--centered`}>
@@ -1501,7 +1741,11 @@ export default function SceneViewport({
                         ? activeCouncilLead ?? "Advisor table"
                         : "Advisor"
                       : room === "debate"
-                        ? "Opponent"
+                        ? auditoriumMode === "town_hall"
+                          ? townHallState?.phase === "opponent_turn"
+                            ? "Opponent"
+                            : townHallState?.speaker ?? "Audience"
+                          : "Opponent"
                         : compactCitizenLabel(activeCitizen?.display_name ?? "Citizen")}
                 </span>
                 {councilCaptionLines.length > 1 ? (
@@ -1517,7 +1761,7 @@ export default function SceneViewport({
             </>
           ) : null}
 
-          {room === "citizens" && citizenCardCitizen ? (
+          {!panelsOpen && room === "citizens" && citizenCardCitizen ? (
             <div className={`scene__citizen-chip scene__citizen-chip--floating ${citizenCardReady ? "scene__citizen-chip--ready" : ""}`}>
               <strong>{citizenCardCitizen.display_name}</strong>
               <small className="scene__citizen-chip-meta">
@@ -1529,22 +1773,7 @@ export default function SceneViewport({
               </small>
             </div>
           ) : null}
-          {showCommandStrip ? (
-            <div className="scene__command-strip" aria-label="Voice command hints">
-              <span>Say or tap</span>
-              {sceneVoiceCommands.map((command) => (
-                <button
-                  key={command}
-                  type="button"
-                  className="scene__command-chip"
-                  onClick={() => onQuickCommand?.(command)}
-                >
-                  {command}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {room === "citizens" && streetGuide.length > 0 && !citizenConversationLocked && !voiceChannelOpen ? (
+          {!panelsOpen && room === "citizens" && streetGuide.length > 0 && !citizenConversationLocked && !voiceChannelOpen ? (
             <div className="scene__street-guide">
               {streetGuide.map((hint) => (
                 <span key={hint}>{hint}</span>
@@ -1562,6 +1791,7 @@ interface SceneWorldProps {
   room: RoomName;
   advisorMode: AdvisorMode;
   stage: StagePackage;
+  councilRoster: ReturnType<typeof normalizeCouncilRoster>;
   playerInPower: boolean;
   activeCitizen?: CitizenSnapshot;
   previewCitizen?: CitizenSnapshot;
@@ -1572,7 +1802,6 @@ interface SceneWorldProps {
   themeMode: "light" | "dark";
   palette: { base: string; glow: string; metallic: string };
   councilSpeaker?: string;
-  councilUrgencies?: Record<string, number>;
   hotspots: SceneHotspot[];
   streetPlacements: StreetPlacement[];
   streetExtras: StreetExtra[];
@@ -1594,6 +1823,7 @@ function SceneWorld({
   room,
   advisorMode,
   stage,
+  councilRoster,
   playerInPower,
   activeCitizen,
   previewCitizen,
@@ -1604,7 +1834,6 @@ function SceneWorld({
   themeMode,
   palette,
   councilSpeaker,
-  councilUrgencies,
   hotspots,
   streetPlacements,
   streetExtras,
@@ -1634,7 +1863,7 @@ function SceneWorld({
     );
   const voiceChannelOpen = presence.liveMode === "voice" && presence.status === "connected";
   const advisorCouncilMode = room === "advisor" && advisorMode === "council";
-  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || voiceChannelOpen);
+  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || (voiceChannelOpen && !presence.muted));
   const targetPosition =
     room === "citizens"
       ? streetPlacements.find((entry) => entry.citizen.citizen_id === activeCitizen?.citizen_id)?.position ?? counterpartPosition(room, advisorMode)
@@ -1779,32 +2008,28 @@ function SceneWorld({
   const playerPalette = playerInPower
     ? { base: "#4f667d", glow: "#e7d7b5", metallic: "#8aa1b8" }
     : { base: "#73504a", glow: "#f0decc", metallic: "#9d7a73" };
-  const councilAdvisors = [
-    {
-      ...COUNCIL_ADVISORS[0],
-      position: [-4.05, 0, -0.22] as [number, number, number],
-      facing: 0.2,
-      palette: { base: "#6f7f8d", glow: "#dce8f0", metallic: "#8a99ab" },
-    },
-    {
-      ...COUNCIL_ADVISORS[1],
-      position: [-1.28, 0.02, -0.92] as [number, number, number],
-      facing: 0.08,
-      palette: { base: "#7a6556", glow: "#f0d8c7", metallic: "#a38b78" },
-    },
-    {
-      ...COUNCIL_ADVISORS[2],
-      position: [1.28, 0.02, -0.92] as [number, number, number],
-      facing: -0.08,
-      palette: { base: "#6c7287", glow: "#dce1ef", metallic: "#8990ab" },
-    },
-    {
-      ...COUNCIL_ADVISORS[3],
-      position: [4.05, 0, -0.22] as [number, number, number],
-      facing: -0.2,
-      palette: { base: "#6d6d5b", glow: "#efe3bf", metallic: "#9e9a7d" },
-    },
+  const councilPalettes = [
+    { base: "#6f7f8d", glow: "#dce8f0", metallic: "#8a99ab" },
+    { base: "#7a6556", glow: "#f0d8c7", metallic: "#a38b78" },
+    { base: "#6c7287", glow: "#dce1ef", metallic: "#8990ab" },
+    { base: "#6d6d5b", glow: "#efe3bf", metallic: "#9e9a7d" },
+    { base: "#72656f", glow: "#e8d6ea", metallic: "#9987a2" },
   ] as const;
+  const councilAdvisors = useMemo(() => {
+    const roster = councilRoster.slice(0, 5);
+    const span = roster.length <= 2 ? 3.7 : roster.length === 3 ? 3.1 : 2.55;
+    return roster.map((advisor, index) => {
+      const centeredIndex = index - (roster.length - 1) / 2;
+      const x = centeredIndex * span;
+      const z = Math.abs(centeredIndex) < 0.6 ? -0.92 : roster.length >= 4 ? -0.22 : -0.58;
+      return {
+        ...advisor,
+        position: [x, Math.abs(centeredIndex) < 0.6 ? 0.02 : 0, z] as [number, number, number],
+        facing: THREE.MathUtils.clamp(-x * 0.05, -0.22, 0.22),
+        palette: councilPalettes[index % councilPalettes.length],
+      };
+    });
+  }, [councilRoster]);
 
   return (
     <>
@@ -1955,9 +2180,9 @@ function SceneWorld({
         : null}
       {advisorCouncilMode
         ? councilAdvisors.map((advisor) => {
-            const leadingSpeaker = councilSpeaker ?? "Leila";
+            const leadingSpeaker = councilSpeaker;
             const advisorActivity =
-              presence.counterpartActivity === "speaking"
+              leadingSpeaker && presence.counterpartActivity === "speaking"
                 ? leadingSpeaker === advisor.name
                   ? "speaking"
                   : "idle"
@@ -1970,19 +2195,15 @@ function SceneWorld({
                   position={advisor.position}
                   facing={advisor.facing}
                   activity={advisorActivity}
-                  scale={advisor.name === "Leila" || advisor.name === "Mateo" ? 0.66 : 0.62}
+                  scale={Math.abs(advisor.position[0]) < 0.9 ? 0.66 : 0.62}
                   palette={advisor.palette}
-                  interactive={Boolean(onPrimaryInteract) && !overlayActive}
+                  interactive={false}
                   highlighted={leadingSpeaker === advisor.name}
-                  onSelect={() => onPrimaryInteract?.()}
                 />
                 <Html position={[advisor.position[0], 1.58, advisor.position[2] + 0.18]} center distanceFactor={11.6}>
                   <div className={`scene-council-label ${leadingSpeaker === advisor.name ? "scene-council-label--active" : ""}`}>
                     <strong>{advisor.name}</strong>
                     <small>{advisor.role}</small>
-                    {typeof councilUrgencies?.[advisor.name] === "number" ? (
-                      <small className="scene-council-urgency">Urgency {councilUrgencies[advisor.name]}</small>
-                    ) : null}
                   </div>
                 </Html>
               </group>
@@ -1998,8 +2219,7 @@ function SceneWorld({
               activity={presence.counterpartActivity}
               scale={room === "debate" ? 0.8 : room === "advisor" ? (advisorCouncilMode ? 0.68 : 0.7) : 0.64}
               palette={palette}
-              interactive={Boolean(onPrimaryInteract) && !overlayActive}
-              onSelect={() => onPrimaryInteract?.()}
+              interactive={false}
             />
           ) : null}
       {room === "citizens" && highlightedStreetPlacement && highlightedStreetDistance < STREET_HIGHLIGHT_DISTANCE ? (
@@ -2120,13 +2340,13 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
     return new THREE.CanvasTexture(canvas);
   }
 
-  const paper = themeMode === "light" ? "#dcc8ae" : "#ddd0bc";
-  const paperEdge = themeMode === "light" ? "#b4895d" : "#c9b393";
-  const border = themeMode === "light" ? "#0b0502" : "#6b513f";
-  const line = themeMode === "light" ? "rgba(28, 16, 8, 0.38)" : "rgba(96, 77, 59, 0.12)";
-  const marker = themeMode === "light" ? "#140b05" : "#251c16";
-  const markerSoft = themeMode === "light" ? "#312013" : "#5b493c";
-  const accent = themeMode === "light" ? "#482b17" : "#735741";
+  const paper = themeMode === "light" ? "#eadbc7" : "#dcc8b0";
+  const paperEdge = themeMode === "light" ? "#c39a72" : "#b6895e";
+  const border = themeMode === "light" ? "#1a1009" : "#27150a";
+  const line = themeMode === "light" ? "rgba(40, 22, 11, 0.36)" : "rgba(69, 42, 18, 0.28)";
+  const marker = themeMode === "light" ? "#140b05" : "#170d05";
+  const markerSoft = themeMode === "light" ? "#563523" : "#6f4728";
+  const accent = themeMode === "light" ? "#7a4720" : "#8f5628";
   const paperGradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
   paperGradient.addColorStop(0, paper);
   paperGradient.addColorStop(1, paperEdge);
@@ -2135,14 +2355,14 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
 
   const vignette = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 640, canvas.width / 2, canvas.height / 2, canvas.width * 0.68);
   vignette.addColorStop(0, "rgba(255,255,255,0)");
-  vignette.addColorStop(1, themeMode === "light" ? "rgba(83, 58, 34, 0.08)" : "rgba(69, 52, 34, 0.05)");
+  vignette.addColorStop(1, themeMode === "light" ? "rgba(83, 58, 34, 0.08)" : "rgba(55, 36, 18, 0.12)");
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.strokeStyle = border;
   ctx.lineWidth = 16;
   ctx.strokeRect(42, 42, canvas.width - 84, canvas.height - 84);
 
-  ctx.fillStyle = themeMode === "light" ? "rgba(104, 79, 57, 0.022)" : "rgba(88, 66, 47, 0.018)";
+  ctx.fillStyle = themeMode === "light" ? "rgba(104, 79, 57, 0.022)" : "rgba(66, 44, 24, 0.03)";
   for (let index = 0; index < 48; index += 1) {
     const width = 52 + (index % 7) * 18;
     const height = 6 + (index % 5) * 2;
@@ -2152,43 +2372,44 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
   }
 
   ctx.fillStyle = accent;
-  ctx.font = `700 102px ${BOARD_SANS_FONT}`;
+  ctx.font = `700 120px ${BOARD_SANS_FONT}`;
   ctx.fillText(panel.kicker.toUpperCase(), 214, 212);
 
   if (panel.variant === "policy") {
+    const policyItems = (panel.list?.slice(0, 3) ?? ["", "", ""]);
     ctx.strokeStyle = line;
     ctx.lineWidth = 2.5;
-    for (let y = 318; y < canvas.height - 152; y += 148) {
+    for (let y = 246; y < canvas.height - 152; y += 118) {
       ctx.beginPath();
       ctx.moveTo(138, y);
       ctx.lineTo(canvas.width - 138, y);
       ctx.stroke();
     }
     ctx.fillStyle = marker;
-    (panel.list?.slice(0, 3) ?? ["", "", ""]).forEach((item, index) => {
-      const rowY = 502 + index * 474;
+    policyItems.forEach((item, index) => {
+      const rowY = 520 + index * 400;
       ctx.strokeStyle = line;
       ctx.lineWidth = 6;
       ctx.beginPath();
-      ctx.moveTo(228, rowY + 120);
-      ctx.lineTo(canvas.width - 228, rowY + 120);
+      ctx.moveTo(228, rowY + 98);
+      ctx.lineTo(canvas.width - 228, rowY + 98);
       ctx.stroke();
       ctx.fillStyle = markerSoft;
-      ctx.font = `700 154px ${BOARD_SANS_FONT}`;
-      ctx.fillText(`${index + 1}.`, 278, rowY);
+      ctx.font = `700 144px ${BOARD_SANS_FONT}`;
+      ctx.fillText(`${index + 1}.`, 340, rowY);
       if (item) {
         ctx.fillStyle = marker;
-        ctx.font = `600 124px ${BOARD_HAND_FONT}`;
-        const lines = boardWrapLines(ctx, item, 3680, 2);
+        ctx.font = `600 132px ${BOARD_HAND_FONT}`;
+        const lines = boardWrapLines(ctx, item, 3380, 3);
         lines.forEach((lineItem, lineIndex) => {
-          ctx.fillText(lineItem, 640, rowY + lineIndex * 108);
+          ctx.fillText(lineItem, 720, rowY + lineIndex * 104);
         });
       } else {
         ctx.strokeStyle = "rgba(108, 88, 67, 0.18)";
         ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(676, rowY + 12);
-        ctx.lineTo(canvas.width - 248, rowY + 8);
+        ctx.moveTo(760, rowY + 6);
+        ctx.lineTo(canvas.width - 248, rowY + 6);
         ctx.stroke();
       }
     });
@@ -2197,16 +2418,16 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
     let cursorY = panel.headline ? 366 : 286;
     if (panel.headline) {
       const headerGradient = ctx.createLinearGradient(statsX, cursorY - 112, canvas.width - statsX, cursorY + 148);
-      headerGradient.addColorStop(0, themeMode === "light" ? "rgba(255, 250, 243, 0.78)" : "rgba(248, 239, 225, 0.66)");
-      headerGradient.addColorStop(1, themeMode === "light" ? "rgba(246, 236, 219, 0.5)" : "rgba(237, 226, 210, 0.42)");
+      headerGradient.addColorStop(0, themeMode === "light" ? "rgba(255, 250, 243, 0.78)" : "rgba(66, 55, 44, 0.92)");
+      headerGradient.addColorStop(1, themeMode === "light" ? "rgba(246, 236, 219, 0.5)" : "rgba(33, 27, 21, 0.9)");
       ctx.fillStyle = headerGradient;
       boardRoundRect(ctx, statsX - 20, cursorY - 126, canvas.width - statsX * 2 + 40, 248, 42);
       ctx.fill();
-      ctx.strokeStyle = themeMode === "light" ? "rgba(72, 50, 32, 0.1)" : "rgba(85, 63, 45, 0.1)";
+      ctx.strokeStyle = themeMode === "light" ? "rgba(72, 50, 32, 0.1)" : "rgba(244, 236, 223, 0.16)";
       ctx.lineWidth = 4;
       ctx.stroke();
       ctx.fillStyle = marker;
-      ctx.font = `700 132px ${BOARD_SANS_FONT}`;
+      ctx.font = `700 150px ${BOARD_SANS_FONT}`;
       const lines = boardWrapLines(ctx, panel.headline, 4480, 2);
       lines.forEach((lineItem, index) => {
         ctx.fillText(lineItem, statsX + 26, cursorY + index * 112);
@@ -2214,192 +2435,200 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
       cursorY += lines.length * 112 + 94;
     }
 
+    const isMoodVariant = panel.variant === "mood";
     const isStatsVariant = panel.variant === "stats";
-    const statRows = (panel.stats ?? []).slice(0, 6);
+    const statRows = (panel.stats ?? []).slice(0, 3);
     const signalRows = (panel.columns ?? []).slice(0, 2);
     const statBandTop = cursorY + 34;
     const statBandWidth = canvas.width - statsX * 2;
 
-    if (isStatsVariant) {
-      const primaryStatRows = statRows.slice(0, 4);
-      const metricColumns = 2;
-      const metricGapX = 24;
-      const metricGapY = 28;
-      const metricCardWidth = (statBandWidth - metricGapX * (metricColumns - 1)) / metricColumns;
-      const metricCardHeight = 336;
-      const fitMetricReadout = (digits: string, suffix = "") => {
-        let digitsFont = 324;
-        let suffixFont = 112;
-        const maxWidth = metricCardWidth - 76;
-        while (digitsFont > 220) {
-          ctx.font = `700 ${digitsFont}px ${BOARD_MONO_FONT}`;
-          const digitsWidth = ctx.measureText(digits).width;
-          ctx.font = `700 ${suffixFont}px ${BOARD_SANS_FONT}`;
-          const suffixWidth = suffix ? ctx.measureText(suffix).width : 0;
-          if (digitsWidth + suffixWidth + (suffix ? 22 : 0) <= maxWidth) {
-            break;
-          }
-          digitsFont -= 12;
-          suffixFont = Math.max(80, suffixFont - 4);
-        }
-        return { digitsFont, suffixFont };
-      };
-      const metricRows = Array.from({ length: Math.ceil(primaryStatRows.length / metricColumns) }, (_, rowIndex) =>
-        primaryStatRows.slice(rowIndex * metricColumns, rowIndex * metricColumns + metricColumns),
-      );
-
-      ctx.fillStyle = markerSoft;
-      ctx.font = `700 78px ${BOARD_SANS_FONT}`;
-      ctx.fillText("NUMERIC READOUT", statsX, statBandTop - 6);
+    if (isMoodVariant) {
+      const primaryStatRows = statRows.slice(0, 3);
+      const visibleSignals = signalRows.slice(0, 3);
       ctx.fillStyle = accent;
-      ctx.fillRect(statsX, statBandTop + 20, 312, 10);
+      ctx.fillRect(statsX, statBandTop - 12, 268, 12);
 
-      metricRows.forEach((rowSet, rowIndex) => {
-        rowSet.forEach((row, colIndex) => {
-          const x = statsX + colIndex * (metricCardWidth + metricGapX);
-          const y = statBandTop + 54 + rowIndex * (metricCardHeight + metricGapY);
-          const cardFill = ctx.createLinearGradient(x, y, x + metricCardWidth, y + metricCardHeight);
-          cardFill.addColorStop(0, themeMode === "light" ? "rgba(250, 242, 231, 0.98)" : "rgba(34, 26, 20, 0.9)");
-          cardFill.addColorStop(1, themeMode === "light" ? "rgba(233, 218, 198, 0.96)" : "rgba(24, 18, 14, 0.94)");
-          ctx.fillStyle = cardFill;
-          boardRoundRect(ctx, x, y, metricCardWidth, metricCardHeight, 30);
-          ctx.fill();
-          ctx.strokeStyle = themeMode === "light" ? "rgba(92, 67, 44, 0.12)" : "rgba(228, 205, 177, 0.08)";
-          ctx.lineWidth = 4;
-          ctx.stroke();
-
-          ctx.fillStyle = markerSoft;
-          ctx.font = `700 82px ${BOARD_SANS_FONT}`;
-          ctx.fillText(row.label.toUpperCase(), x + 30, y + 46);
-          ctx.fillStyle = accent;
-          ctx.fillRect(x + 30, y + 64, 156, 8);
-
-          const valueMatch = row.value.trim().match(/^([0-9]+)(%)$/);
-          if (valueMatch) {
-            const { digitsFont, suffixFont } = fitMetricReadout(valueMatch[1], valueMatch[2]);
-            const digitBaseline = y + 262;
-            ctx.fillStyle = marker;
-            ctx.font = `700 ${digitsFont}px ${BOARD_MONO_FONT}`;
-            ctx.fillText(valueMatch[1], x + 30, digitBaseline);
-            const digitWidth = ctx.measureText(valueMatch[1]).width;
-            ctx.fillStyle = markerSoft;
-            ctx.font = `700 ${suffixFont}px ${BOARD_SANS_FONT}`;
-            const suffixWidth = ctx.measureText(valueMatch[2]).width;
-            const suffixX = Math.min(
-              x + metricCardWidth - 30 - suffixWidth,
-              x + 30 + digitWidth + 20,
-            );
-            ctx.fillText(valueMatch[2], suffixX, y + 176);
-          } else {
-            ctx.fillStyle = marker;
-            ctx.font = `700 268px ${BOARD_MONO_FONT}`;
-            const valueLines = boardWrapLines(ctx, row.value, metricCardWidth - 104, 1);
-            valueLines.forEach((lineItem, lineIndex) => {
-              ctx.fillText(lineItem, x + 30, y + 256 + lineIndex * 68);
-            });
-          }
-
-          if (row.note) {
-            ctx.fillStyle = markerSoft;
-            ctx.font = `600 68px ${BOARD_SANS_FONT}`;
-            ctx.fillText(row.note, x + 30, y + 290);
-          }
-        });
+      const metricColumns = Math.max(1, primaryStatRows.length);
+      const metricGapX = 56;
+      const metricCellWidth = (statBandWidth - metricGapX * Math.max(0, metricColumns - 1)) / metricColumns;
+      const metricBaseY = statBandTop + 74;
+      primaryStatRows.forEach((row, index) => {
+        const x = statsX + index * (metricCellWidth + metricGapX);
+        const y = metricBaseY;
+        const cardHeight = 312;
+        const cardGradient = ctx.createLinearGradient(x, y - 34, x, y + cardHeight);
+        cardGradient.addColorStop(0, themeMode === "light" ? "rgba(248, 239, 224, 0.9)" : "rgba(70, 56, 44, 0.9)");
+        cardGradient.addColorStop(1, themeMode === "light" ? "rgba(234, 220, 200, 0.74)" : "rgba(34, 27, 21, 0.88)");
+        boardRoundRect(ctx, x - 12, y - 54, metricCellWidth, cardHeight, 34);
+        ctx.fillStyle = cardGradient;
+        ctx.fill();
+        ctx.strokeStyle = themeMode === "light" ? "rgba(76, 54, 34, 0.12)" : "rgba(244, 236, 223, 0.14)";
+        ctx.lineWidth = 4;
+        ctx.stroke();
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 84px ${BOARD_SANS_FONT}`;
+        ctx.fillText(row.label.toUpperCase(), x, y);
+        ctx.fillStyle = marker;
+        ctx.font = `700 216px ${BOARD_HAND_FONT}`;
+        ctx.fillText(row.value, x, y + 164);
       });
 
-      const signalTop = statBandTop + 72 + metricRows.length * metricCardHeight + Math.max(0, metricRows.length - 1) * metricGapY + 42;
-      const visibleSignals = signalRows.slice(0, 2);
+      const signalTop = metricBaseY + 356;
       if (visibleSignals.length > 0) {
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 74px ${BOARD_SANS_FONT}`;
-        ctx.fillText("LIVE POLLS", statsX, signalTop - 4);
+        ctx.font = `700 92px ${BOARD_SANS_FONT}`;
+        ctx.fillText("LATEST READS", statsX, signalTop);
+        ctx.fillStyle = accent;
+        ctx.fillRect(statsX, signalTop + 16, 214, 8);
       }
 
-      const signalGapY = 28;
-      const signalColumns = 1;
-      const signalRowsNeeded = Math.max(1, visibleSignals.length);
-      const signalCardWidth = statBandWidth;
-      const signalCardHeight = visibleSignals.length > 1 ? 276 : 334;
       visibleSignals.forEach((column, index) => {
         const lineItem = column.lines[0];
         if (!lineItem) {
           return;
         }
-        const value = typeof lineItem === "string" ? "" : lineItem.answer;
-        const detail = typeof lineItem === "string" ? undefined : lineItem.share;
-        const rowIndex = Math.floor(index / signalColumns);
-        const x = statsX;
-        const y = signalTop + 20 + rowIndex * (signalCardHeight + signalGapY);
-        const bandFill = ctx.createLinearGradient(x, y, x + signalCardWidth, y + signalCardHeight);
-        bandFill.addColorStop(0, themeMode === "light" ? "rgba(251, 246, 238, 0.92)" : "rgba(35, 28, 22, 0.68)");
-        bandFill.addColorStop(1, themeMode === "light" ? "rgba(236, 224, 210, 0.82)" : "rgba(24, 18, 14, 0.6)");
-        ctx.fillStyle = bandFill;
-        boardRoundRect(ctx, x, y, signalCardWidth, signalCardHeight, 30);
+        const label = typeof lineItem === "string" ? column.title : lineItem.label;
+        const value = typeof lineItem === "string" ? lineItem : lineItem.answer;
+        const detail = typeof lineItem === "string" ? "" : lineItem.share ?? "";
+        const y = signalTop + 88 + index * 184;
+        const cardHeight = 190;
+        const cardGradient = ctx.createLinearGradient(statsX, y - 42, statsX, y + cardHeight);
+        cardGradient.addColorStop(0, themeMode === "light" ? "rgba(247, 238, 223, 0.84)" : "rgba(67, 55, 43, 0.86)");
+        cardGradient.addColorStop(1, themeMode === "light" ? "rgba(233, 219, 199, 0.68)" : "rgba(31, 25, 20, 0.82)");
+        boardRoundRect(ctx, statsX - 10, y - 42, statBandWidth + 20, cardHeight, 28);
+        ctx.fillStyle = cardGradient;
         ctx.fill();
-        ctx.strokeStyle = themeMode === "light" ? "rgba(92, 67, 44, 0.12)" : "rgba(228, 205, 177, 0.08)";
+        ctx.strokeStyle = line;
         ctx.lineWidth = 4;
         ctx.stroke();
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 62px ${BOARD_SANS_FONT}`;
-        ctx.fillText(column.title.toUpperCase(), x + 30, y + 42);
-        ctx.fillStyle = accent;
-        ctx.fillRect(x + 30, y + 58, 176, 8);
-
+        ctx.font = `700 64px ${BOARD_SANS_FONT}`;
+        ctx.fillText(column.title.toUpperCase(), statsX, y);
+        ctx.fillStyle = marker;
+        ctx.font = `700 132px ${BOARD_HAND_FONT}`;
+        const answerWidth = detail ? statBandWidth - 540 : statBandWidth - 160;
+        const answerLines = boardWrapLines(ctx, value, answerWidth, 2);
+        answerLines.forEach((lineText, lineIndex) => {
+          ctx.fillText(lineText, statsX, y + 94 + lineIndex * 58);
+        });
         if (detail) {
-          const shareBadgeWidth = 246;
-          const shareBadgeHeight = 124;
-          const shareBadgeX = x + signalCardWidth - shareBadgeWidth - 34;
-          const shareBadgeY = y + 28;
-          ctx.fillStyle = themeMode === "light" ? "rgba(234, 224, 210, 0.92)" : "rgba(43, 33, 27, 0.84)";
-          boardRoundRect(ctx, shareBadgeX, shareBadgeY, shareBadgeWidth, shareBadgeHeight, 24);
-          ctx.fill();
-          ctx.strokeStyle = themeMode === "light" ? "rgba(92, 67, 44, 0.12)" : "rgba(228, 205, 177, 0.08)";
-          ctx.lineWidth = 4;
-          ctx.stroke();
           ctx.textAlign = "right";
-          const detailMatch = detail.trim().match(/^([0-9]+)(%)$/);
-          if (detailMatch) {
-            ctx.fillStyle = marker;
-            ctx.font = `700 126px ${BOARD_MONO_FONT}`;
-            ctx.fillText(detailMatch[1], shareBadgeX + shareBadgeWidth - 28, shareBadgeY + 104);
-            ctx.fillStyle = markerSoft;
-            ctx.font = `700 42px ${BOARD_SANS_FONT}`;
-            ctx.fillText(detailMatch[2], shareBadgeX + shareBadgeWidth - 6, shareBadgeY + 44);
-          } else {
-            ctx.fillStyle = marker;
-            ctx.font = `700 104px ${BOARD_MONO_FONT}`;
-            ctx.fillText(detail, shareBadgeX + shareBadgeWidth - 22, shareBadgeY + 96);
-          }
-          ctx.fillStyle = markerSoft;
-          ctx.font = `700 40px ${BOARD_SANS_FONT}`;
-          ctx.fillText("SHARE", shareBadgeX + shareBadgeWidth - 26, shareBadgeY + 32);
+          ctx.fillStyle = marker;
+          ctx.font = `700 108px ${BOARD_HAND_FONT}`;
+          ctx.fillText(detail, canvas.width - statsX, y + 88);
           ctx.textAlign = "left";
         }
-
-        if (value) {
-          ctx.fillStyle = marker;
-          ctx.font = `700 176px ${BOARD_SANS_FONT}`;
-          const valueLines = boardWrapLines(ctx, value, signalCardWidth - (detail ? 334 : 112), 3);
-          valueLines.forEach((lineText, lineIndex) => {
-            ctx.fillText(lineText, x + 30, y + 184 + lineIndex * 74);
+        if (label && label.toLowerCase() !== column.title.toLowerCase()) {
+          ctx.fillStyle = markerSoft;
+          ctx.font = `600 48px ${BOARD_SANS_FONT}`;
+          const labelLines = boardWrapLines(ctx, boardSnippet(label, 68), statBandWidth - 180, 1);
+          labelLines.forEach((lineText, lineIndex) => {
+            ctx.fillText(lineText, statsX, y + 146 + lineIndex * 30);
           });
         }
       });
+    } else if (isStatsVariant) {
+      const primaryStatRows = statRows.slice(0, 4);
+      const visibleSignals = signalRows.slice(0, 2);
+      ctx.fillStyle = markerSoft;
+      ctx.font = `700 82px ${BOARD_SANS_FONT}`;
+      ctx.fillText("PUBLIC READ", statsX, statBandTop - 6);
+      ctx.fillStyle = accent;
+      ctx.fillRect(statsX, statBandTop + 14, 236, 8);
+
+      let readoutY = statBandTop + 86;
+      primaryStatRows.forEach((row, index) => {
+        const lineY = readoutY + index * 182;
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(statsX, lineY + 92);
+        ctx.lineTo(canvas.width - statsX, lineY + 92);
+        ctx.stroke();
+
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 60px ${BOARD_SANS_FONT}`;
+        ctx.fillText(row.label.toUpperCase(), statsX, lineY + 12);
+        ctx.fillStyle = marker;
+        ctx.textAlign = "right";
+        ctx.font = `700 160px ${BOARD_MONO_FONT}`;
+        ctx.fillText(row.value, canvas.width - statsX, lineY + 78);
+        ctx.textAlign = "left";
+      });
+
+      const signalTop = readoutY + primaryStatRows.length * 182 + 24;
+      if (visibleSignals.length > 0) {
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 84px ${BOARD_SANS_FONT}`;
+        ctx.fillText("LATEST POLLS", statsX, signalTop);
+        ctx.fillStyle = accent;
+        ctx.fillRect(statsX, signalTop + 18, 192, 8);
+      }
+
+      visibleSignals.forEach((column, index) => {
+        const lineItem = column.lines[0];
+        if (!lineItem) {
+          return;
+        }
+        const label = typeof lineItem === "string" ? lineItem : lineItem.label;
+        const value = typeof lineItem === "string" ? "" : lineItem.answer;
+        const detail = typeof lineItem === "string" ? "" : lineItem.share ?? "";
+        const y = signalTop + 82 + index * 210;
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(statsX, y + 156);
+        ctx.lineTo(canvas.width - statsX, y + 156);
+        ctx.stroke();
+
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 56px ${BOARD_SANS_FONT}`;
+        ctx.fillText(column.title.toUpperCase(), statsX, y);
+        ctx.fillStyle = accent;
+        ctx.fillRect(statsX, y + 16, 124, 8);
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
+        const labelLines = boardWrapLines(ctx, boardSnippet(label, 64), statBandWidth - (detail ? 980 : 220), 2);
+        labelLines.forEach((lineText, lineIndex) => {
+          ctx.fillText(lineText, statsX, y + 60 + lineIndex * 36);
+        });
+
+        if (value) {
+          ctx.fillStyle = marker;
+        ctx.font = `700 96px ${BOARD_HAND_FONT}`;
+          const valueLines = boardWrapLines(ctx, value, statBandWidth - (detail ? 860 : 180), 2);
+          valueLines.forEach((lineText, lineIndex) => {
+            ctx.fillText(lineText, statsX, y + 118 + lineIndex * 60);
+          });
+        }
+
+        if (detail) {
+          ctx.textAlign = "right";
+          ctx.fillStyle = markerSoft;
+          ctx.font = `700 38px ${BOARD_SANS_FONT}`;
+          ctx.fillText("TOP SHARE", canvas.width - statsX, y + 2);
+          ctx.fillStyle = marker;
+          ctx.font = `700 110px ${BOARD_MONO_FONT}`;
+          ctx.fillText(detail, canvas.width - statsX, y + 96);
+          ctx.textAlign = "left";
+        }
+      });
+
       if (panel.footerText) {
-        const footerTop = signalTop + signalRowsNeeded * (signalCardHeight + signalGapY) + 38;
+        const footerTop = signalTop + 72 + visibleSignals.length * 210 + 24;
         ctx.fillStyle = markerSoft;
         ctx.font = `700 42px ${BOARD_SANS_FONT}`;
         ctx.fillText((panel.footerLabel ?? "Current read").toUpperCase(), statsX, footerTop);
         ctx.fillStyle = accent;
-        ctx.fillRect(statsX, footerTop + 18, 224, 8);
+        ctx.fillRect(statsX, footerTop + 18, 184, 8);
         ctx.strokeStyle = line;
         ctx.lineWidth = 4;
-        boardRoundRect(ctx, statsX - 8, footerTop + 42, statBandWidth + 16, 174, 28);
+        boardRoundRect(ctx, statsX - 8, footerTop + 42, statBandWidth + 16, 196, 28);
         ctx.stroke();
         ctx.fillStyle = marker;
         ctx.font = `600 44px ${BOARD_SANS_FONT}`;
-        const footerLines = boardWrapLines(ctx, panel.footerText, statBandWidth - 72, 2);
+        const footerLines = boardWrapLines(ctx, panel.footerText, statBandWidth - 72, 3);
         footerLines.forEach((lineText, lineIndex) => {
           ctx.fillText(lineText, statsX + 24, footerTop + 108 + lineIndex * 48);
         });
@@ -2423,19 +2652,19 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         const valueY = statY + 148;
         const noteY = statY + 192;
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 40px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 44px ${BOARD_SANS_FONT}`;
         ctx.fillText(row.label.toUpperCase(), x, labelY);
         ctx.fillStyle = accent;
         ctx.fillRect(x, accentY, 148, 8);
         ctx.fillStyle = marker;
-        ctx.font = `700 132px ${BOARD_MONO_FONT}`;
+        ctx.font = `700 140px ${BOARD_MONO_FONT}`;
         const valueLines = boardWrapLines(ctx, row.value, statCellWidth - 12, 1);
         valueLines.forEach((lineItem, lineIndex) => {
           ctx.fillText(lineItem, x, valueY + lineIndex * 78);
         });
         if (row.note) {
           ctx.fillStyle = markerSoft;
-          ctx.font = `600 30px ${BOARD_SANS_FONT}`;
+          ctx.font = `600 32px ${BOARD_SANS_FONT}`;
           ctx.fillText(row.note, x, noteY);
         }
         ctx.strokeStyle = line;
@@ -2449,7 +2678,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
       const signalTop = statLineY + 108;
       if (signalRows.length > 0) {
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 44px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
         ctx.fillText("POLL PULSE", statsX, signalTop - 20);
       }
 
@@ -2474,18 +2703,18 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         ctx.stroke();
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 44px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
         ctx.fillText(column.title.toUpperCase(), x, y + 28);
         ctx.fillStyle = accent;
         ctx.fillRect(x, y + 50, 132, 8);
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 36px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 38px ${BOARD_SANS_FONT}`;
         ctx.fillText(boardSnippet(label, 28), x, y + 114);
 
         if (value) {
           ctx.fillStyle = marker;
-          ctx.font = `700 86px ${BOARD_HAND_FONT}`;
+          ctx.font = `700 98px ${BOARD_HAND_FONT}`;
           const valueLines = boardWrapLines(ctx, boardSnippet(value, 32), signalWidth - 420, 1);
           valueLines.forEach((lineText) => {
             ctx.fillText(lineText, x, y + 184);
@@ -2495,10 +2724,10 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         if (detail) {
           ctx.textAlign = "right";
           ctx.fillStyle = marker;
-          ctx.font = `700 104px ${BOARD_MONO_FONT}`;
+          ctx.font = `700 120px ${BOARD_MONO_FONT}`;
           ctx.fillText(detail, x + signalWidth, y + 146);
           ctx.fillStyle = markerSoft;
-          ctx.font = `700 24px ${BOARD_SANS_FONT}`;
+          ctx.font = `700 30px ${BOARD_SANS_FONT}`;
           ctx.fillText("TOP SHARE", x + signalWidth, y + 40);
           ctx.textAlign = "left";
         }
@@ -2509,9 +2738,9 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearMipmapLinearFilter;
-  texture.anisotropy = 16;
-  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearFilter;
+  texture.anisotropy = 4;
+  texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return texture;
 }
@@ -2545,13 +2774,13 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
     return new THREE.CanvasTexture(canvas);
   }
 
-  const base = themeMode === "light" ? "#d8d1c8" : "#111318";
-  const inner = themeMode === "light" ? "#f0ece6" : "#171b22";
-  const glow = themeMode === "light" ? "rgba(211, 154, 95, 0.18)" : "rgba(126, 168, 214, 0.12)";
-  const frame = themeMode === "light" ? "#8a705a" : "#3b414c";
-  const text = themeMode === "light" ? "#352d27" : "#e7edf4";
-  const soft = themeMode === "light" ? "#726454" : "#a8b6c5";
-  const accent = themeMode === "light" ? "#8c5f36" : "#d4a66d";
+  const base = themeMode === "light" ? "#d8cdc0" : "#111318";
+  const inner = themeMode === "light" ? "#f5eee2" : "#171b22";
+  const glow = themeMode === "light" ? "rgba(211, 154, 95, 0.16)" : "rgba(126, 168, 214, 0.12)";
+  const frame = themeMode === "light" ? "#7e6249" : "#3b414c";
+  const text = themeMode === "light" ? "#1f130c" : "#e7edf4";
+  const soft = themeMode === "light" ? "#4f3b2a" : "#a8b6c5";
+  const accent = themeMode === "light" ? "#6f421f" : "#d4a66d";
 
   const votePoll = topPollChoice(stage, "election were held today");
   const pressure = topPollChoice(stage, "biggest worry about ai");
@@ -2581,7 +2810,7 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
       })()
     : null;
   const platformNotes = stage.policy_notes
-    .slice(0, 4)
+    .slice(0, 3)
     .map((note) => boardPolicyLabel(note));
 
   ctx.fillStyle = base;
@@ -2607,16 +2836,16 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
   ctx.stroke();
 
   ctx.fillStyle = soft;
-  ctx.font = `700 48px ${BOARD_SANS_FONT}`;
+  ctx.font = `700 58px ${BOARD_SANS_FONT}`;
   ctx.fillText("PUBLIC READ", 170, 164);
   ctx.fillText("PLATFORM", 1720, 164);
 
   ctx.fillStyle = text;
-  ctx.font = `700 88px ${BOARD_SANS_FONT}`;
+  ctx.font = `700 108px ${BOARD_SANS_FONT}`;
   ctx.fillText(votePoll ? boardPollLabel(votePoll.answer, { candidate: true, max: 18 }) : "Open race", 170, 280);
   if (votePoll?.share) {
     ctx.fillStyle = accent;
-    ctx.font = `700 58px ${BOARD_SANS_FONT}`;
+    ctx.font = `700 66px ${BOARD_SANS_FONT}`;
     ctx.fillText(votePoll.share, 170, 350);
   }
 
@@ -2624,35 +2853,32 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
     { label: "Approval", value: stage.tracking.approval.display },
     { label: "Vote today", value: stage.tracking.vote_share_player.display },
     { label: "Better off", value: stage.tracking.better_off.display },
-    { label: "AI comfort", value: stage.tracking.ai_comfort.display },
-    { label: "Job anxiety", value: stage.tracking.unemployment_anxiety.display },
-    { label: "Stability", value: stage.tracking.social_stability.display },
   ];
 
   let statY = 438;
   statRows.forEach((row) => {
     ctx.fillStyle = soft;
-    ctx.font = `700 40px ${BOARD_SANS_FONT}`;
+    ctx.font = `700 54px ${BOARD_SANS_FONT}`;
     ctx.fillText(row.label.toUpperCase(), 170, statY);
     ctx.fillStyle = text;
-    ctx.font = `600 70px ${BOARD_HAND_FONT}`;
+    ctx.font = `600 104px ${BOARD_HAND_FONT}`;
     const lines = boardWrapLines(ctx, row.value, 1120, 2);
     lines.forEach((lineItem, index) => {
-      ctx.fillText(lineItem, 170, statY + 74 + index * 58);
+      ctx.fillText(lineItem, 170, statY + 86 + index * 64);
     });
     if (row.note) {
       ctx.fillStyle = accent;
-      ctx.font = `600 42px ${BOARD_SANS_FONT}`;
+      ctx.font = `600 50px ${BOARD_SANS_FONT}`;
       ctx.fillText(row.note, 1200, statY + 22);
     }
-    statY += 162;
+    statY += 206;
   });
 
   ctx.strokeStyle = themeMode === "light" ? "rgba(116, 98, 80, 0.16)" : "rgba(210, 223, 238, 0.1)";
   ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(170, 1310);
-  ctx.lineTo(1480, 1310);
+  ctx.moveTo(170, 1124);
+  ctx.lineTo(1480, 1124);
   ctx.stroke();
 
   const moodCallouts = [
@@ -2676,30 +2902,30 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
   moodCallouts.forEach((item, index) => {
     const x = 170 + index * 432;
     ctx.fillStyle = soft;
-    ctx.font = `700 34px ${BOARD_SANS_FONT}`;
-    ctx.fillText(item.label.toUpperCase(), x, 1368);
+    ctx.font = `700 46px ${BOARD_SANS_FONT}`;
+    ctx.fillText(item.label.toUpperCase(), x, 1196);
     ctx.fillStyle = text;
-    ctx.font = `600 50px ${BOARD_HAND_FONT}`;
+    ctx.font = `600 72px ${BOARD_HAND_FONT}`;
     const lines = boardWrapLines(ctx, item.value, 360, 2);
     lines.forEach((lineItem, lineIndex) => {
-      ctx.fillText(lineItem, x, 1432 + lineIndex * 46);
+      ctx.fillText(lineItem, x, 1266 + lineIndex * 52);
     });
     if (item.note) {
       ctx.fillStyle = accent;
-      ctx.font = `700 34px ${BOARD_SANS_FONT}`;
-      ctx.fillText(item.note, x, 1530);
+      ctx.font = `700 44px ${BOARD_SANS_FONT}`;
+      ctx.fillText(item.note, x, 1380);
     }
   });
 
   ctx.fillStyle = text;
-  ctx.font = `600 66px ${BOARD_HAND_FONT}`;
+  ctx.font = `600 84px ${BOARD_HAND_FONT}`;
   (platformNotes.length > 0 ? platformNotes : ["No final platform locked", "", "", ""]).forEach((note, index) => {
     const y = 280 + index * 180;
     ctx.fillText(`${index + 1}.`, 1720, y);
     if (note) {
-      const lines = boardWrapLines(ctx, note, 1160, 3);
+      const lines = boardWrapLines(ctx, note, 1220, 3);
       lines.forEach((lineItem, lineIndex) => {
-        ctx.fillText(lineItem, 1875, y + lineIndex * 52);
+        ctx.fillText(lineItem, 1875, y + lineIndex * 56);
       });
     } else {
       ctx.strokeStyle = themeMode === "light" ? "rgba(116, 98, 80, 0.22)" : "rgba(210, 223, 238, 0.12)";
@@ -2718,10 +2944,10 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
   ctx.lineTo(canvas.width - 160, 1040);
   ctx.stroke();
   ctx.fillStyle = soft;
-  ctx.font = `700 42px ${BOARD_SANS_FONT}`;
+  ctx.font = `700 46px ${BOARD_SANS_FONT}`;
   ctx.fillText("LIVE NOTE", 1720, 1118);
   ctx.fillStyle = text;
-  ctx.font = `500 54px ${BOARD_HAND_FONT}`;
+  ctx.font = `500 62px ${BOARD_HAND_FONT}`;
   const closingLines = boardWrapLines(
     ctx,
     boardSnippet(stageRoomBrief(stage) || "Make the case in plain language, then call the election when the room feels settled.", 122),
@@ -2739,10 +2965,10 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
   ctx.lineTo(canvas.width - 160, 1380);
   ctx.stroke();
   ctx.fillStyle = soft;
-  ctx.font = `700 42px ${BOARD_SANS_FONT}`;
+  ctx.font = `700 46px ${BOARD_SANS_FONT}`;
   ctx.fillText(latestCustom ? "LATEST POLL" : "LIVE READ", 1720, 1458);
   ctx.fillStyle = text;
-  ctx.font = `500 50px ${BOARD_HAND_FONT}`;
+  ctx.font = `500 54px ${BOARD_HAND_FONT}`;
   const lowerRead = latestCustom && latestCustomChoice
     ? `${boardSnippet(latestCustom.question.replace(/\?+$/, ""), 64)} ${latestCustomChoice.share} · ${latestCustomChoice.answer}`
     : boardSnippet(stageRoomBrief(stage) || "Keep the platform short enough to defend from the podium.", 110);
@@ -2825,16 +3051,16 @@ function MountedBoard({
     <group position={position} rotation={[pitch, yaw, 0]}>
       <mesh position={[0, 0, -0.18]}>
         <planeGeometry args={[width + 0.42, height + 0.34]} />
-        <meshBasicMaterial color={themeMode === "light" ? "#d6b289" : "#7c5b42"} transparent opacity={themeMode === "light" ? 0.05 : 0.035} />
+        <meshBasicMaterial color={themeMode === "light" ? "#d6b289" : "#d7c1a5"} transparent opacity={themeMode === "light" ? 0.05 : 0.02} />
       </mesh>
       <RoundedBox args={[width + 0.44, height + 0.32, 0.18]} radius={0.06} position={[0, 0, -0.08]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#523b2c" : "#4b392f"} roughness={0.97} />
+        <meshStandardMaterial color={themeMode === "light" ? "#523b2c" : "#2b3441"} roughness={0.97} />
       </RoundedBox>
       <RoundedBox args={[width + 0.08, height + 0.08, 0.08]} radius={0.04} position={[0, 0, -0.02]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#241912" : "#2a1f1a"} roughness={0.99} />
+        <meshStandardMaterial color={themeMode === "light" ? "#241912" : "#121822"} roughness={0.99} />
       </RoundedBox>
       <RoundedBox args={[width + 0.04, height + 0.04, 0.06]} radius={0.03} position={[0, 0, -0.005]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#f4eadb" : "#ddd2c2"} roughness={0.99} />
+        <meshStandardMaterial color={themeMode === "light" ? "#f4eadb" : "#222b36"} roughness={0.99} />
       </RoundedBox>
       <mesh position={[0, -height * 0.53, 0.04]} castShadow receiveShadow>
         <boxGeometry args={[width * 0.94, 0.08, 0.08]} />
@@ -2844,7 +3070,7 @@ function MountedBoard({
         <planeGeometry args={[width - 0.06, height - 0.06]} />
         <meshBasicMaterial
           map={texture}
-          color={themeMode === "light" ? "#f3e7d6" : "#e6dac8"}
+          color={themeMode === "light" ? "#f3e7d6" : "#ffffff"}
           toneMapped={false}
         />
       </mesh>
@@ -2866,17 +3092,17 @@ function WallBoardBay({
   return (
     <group position={position}>
       <RoundedBox args={[width + 0.04, height + 0.04, 0.1]} radius={0.04} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#5a4131" : "#4e3a30"} roughness={0.96} />
+        <meshStandardMaterial color={themeMode === "light" ? "#5a4131" : "#32404f"} roughness={0.96} />
       </RoundedBox>
       <RoundedBox args={[width - 0.08, height - 0.08, 0.05]} radius={0.03} position={[0, 0, -0.02]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#34251c" : "#342720"} roughness={0.99} />
+        <meshStandardMaterial color={themeMode === "light" ? "#34251c" : "#18202a"} roughness={0.99} />
       </RoundedBox>
       <RoundedBox args={[width - 0.16, height - 0.16, 0.03]} radius={0.03} position={[0, 0, -0.06]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#201712" : "#211814"} roughness={0.99} />
+        <meshStandardMaterial color={themeMode === "light" ? "#201712" : "#101720"} roughness={0.99} />
       </RoundedBox>
       <mesh position={[0, 0, -0.13]} receiveShadow>
         <planeGeometry args={[width - 0.2, height - 0.2]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#2d221a" : "#1b140f"} roughness={1} />
+        <meshStandardMaterial color={themeMode === "light" ? "#2d221a" : "#0b1118"} roughness={1} />
       </mesh>
     </group>
   );
@@ -2896,9 +3122,21 @@ function AdvisorBoards({
   layout?: AdvisorMode;
 }) {
   const notesKey = notes.join("|");
+  const fallbackAgendaSource = useMemo(
+    () => (
+      notes.length > 0
+        ? notes
+        : stage.authored_policy_axes.length > 0
+          ? stage.authored_policy_axes
+          : stage.suggested_policy_axes.length > 0
+            ? stage.suggested_policy_axes
+            : stage.tension_points
+    ),
+    [notes, stage],
+  );
   const agendaNotes = useMemo(
-    () => notes.slice(0, 3).map((item) => boardPolicyLabel(item)),
-    [notesKey],
+    () => fallbackAgendaSource.slice(0, 3).map((item) => boardPolicyLabel(item)),
+    [fallbackAgendaSource, notesKey],
   );
   const statsKey = boardMetricsKey(stage);
   const statsRows = useMemo(() => boardMetricRows(stage), [statsKey]);
@@ -2909,7 +3147,7 @@ function AdvisorBoards({
     .map((column) => `${column.id ?? column.title}:${column.title}:${column.lines.map((line) => typeof line === "string" ? line : `${line.label}|${line.answer}|${line.share ?? ""}`).join("~")}`)
     .join("||");
   const statsPanel = useMemo<BoardPanel>(() => ({
-    variant: "stats",
+    variant: "mood",
     kicker: playerInPower ? "Public mood" : "Campaign mood",
     stats: statsRows,
     columns: moodColumns,
@@ -2926,49 +3164,49 @@ function AdvisorBoards({
   const statsBoardLayout =
     layout === "council"
       ? {
-          bayWidth: 9.58,
-          bayHeight: 6.36,
-          x: 4.52,
-          y: 4.02,
+          bayWidth: 9.72,
+          bayHeight: 6.68,
+          x: 4.75,
+          y: 3.72,
           z: -5.38,
-          boardWidth: 8.86,
-          boardHeight: 5.68,
-          boardZ: -5.12,
+          boardWidth: 9.02,
+          boardHeight: 5.98,
+          boardZ: -5.1,
           pitch: -0.001,
         }
       : {
-        bayWidth: 9.92,
-        bayHeight: 6.36,
-          x: 3.9,
-          y: 3.94,
+        bayWidth: 9.72,
+        bayHeight: 6.54,
+          x: 4.95,
+          y: 3.66,
           z: -5.34,
-          boardWidth: 9.66,
-          boardHeight: 5.82,
-          boardZ: -5.16,
+          boardWidth: 9.44,
+          boardHeight: 6.02,
+          boardZ: -5.14,
           pitch: -0.001,
         };
   const policyBoardLayout =
     layout === "council"
       ? {
-          bayWidth: 8.88,
-          bayHeight: 6.08,
-          x: 4.44,
-          y: 4.0,
+          bayWidth: 9.04,
+          bayHeight: 6.34,
+          x: 4.75,
+          y: 3.72,
           z: -5.38,
-          boardWidth: 8.42,
-          boardHeight: 5.44,
-          boardZ: -5.14,
+          boardWidth: 8.58,
+          boardHeight: 5.7,
+          boardZ: -5.12,
           pitch: -0.001,
         }
       : {
-        bayWidth: 9.06,
-        bayHeight: 6.08,
-          x: 4.54,
-          y: 3.94,
+        bayWidth: 8.92,
+        bayHeight: 6.22,
+          x: 4.95,
+          y: 3.66,
           z: -5.34,
-          boardWidth: 8.5,
-          boardHeight: 5.34,
-          boardZ: -5.2,
+          boardWidth: 8.48,
+          boardHeight: 5.58,
+          boardZ: -5.18,
           pitch: -0.001,
         };
   return (
@@ -3006,27 +3244,35 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
     .map((column) => `${column.id ?? column.title}:${column.title}:${column.lines.map((line) => typeof line === "string" ? line : `${line.label}|${line.answer}|${line.share ?? ""}`).join("~")}`)
     .join("||");
   const publicReadPanel = useMemo<BoardPanel>(() => ({
-    variant: "stats",
+    variant: "mood",
     kicker: "Public mood",
     stats: statsRows,
     columns: moodColumns,
   }), [moodKey, statsKey]);
   const platformNotes = useMemo(
     () =>
-      (notes.length > 0 ? notes : stage.policy_notes)
-        .slice(0, 4)
+      (
+        notes.length > 0
+          ? notes
+          : stage.policy_notes.length > 0
+            ? stage.policy_notes
+            : stage.authored_policy_axes.length > 0
+              ? stage.authored_policy_axes
+              : stage.suggested_policy_axes
+      )
+        .slice(0, 3)
         .map((note) => boardPolicyLabel(note)),
     [notes, stage],
   );
   return (
     <>
-      <WallBoardBay position={[-4.56, 4.22, -5.08]} width={8.46} height={6.06} themeMode={themeMode} />
-      <WallBoardBay position={[4.56, 4.22, -5.08]} width={8.46} height={6.06} themeMode={themeMode} />
-      <MountedBoard position={[-4.56, 4.28, -4.92]} width={8.06} height={5.56} yaw={0.002} pitch={-0.004} panel={publicReadPanel} themeMode={themeMode} />
+      <WallBoardBay position={[-4.02, 4.16, -5.08]} width={8.12} height={5.94} themeMode={themeMode} />
+      <WallBoardBay position={[4.02, 4.16, -5.08]} width={8.12} height={5.94} themeMode={themeMode} />
+      <MountedBoard position={[-4.02, 4.2, -4.92]} width={7.72} height={5.4} yaw={0.002} pitch={-0.004} panel={publicReadPanel} themeMode={themeMode} />
       <MountedBoard
-        position={[4.56, 4.28, -4.92]}
-        width={8.06}
-        height={5.56}
+        position={[4.02, 4.2, -4.92]}
+        width={7.72}
+        height={5.4}
         yaw={-0.002}
         pitch={-0.004}
         panel={{
@@ -3062,10 +3308,15 @@ function SceneMarker({
   onHoverChange?: (hovered: boolean) => void;
 }) {
   const distanceFactor = variant === "door" ? 14.4 : variant === "note" ? 10.8 : 11.2;
+  const [hovered, setHovered] = useState(false);
+  const compactLabel = variant === "door" ? compactSceneMarkerLabel(label) : label;
+  const accessibleLabel = hint ? `${label}. ${hint}` : label;
   return (
     <Html position={position} center distanceFactor={distanceFactor}>
       <button
-        className={`scene-hotspot scene-hotspot--${tone} scene-hotspot--${variant} ${active ? "scene-hotspot--active" : ""} ${disabled ? "scene-hotspot--disabled" : ""}`}
+        aria-label={accessibleLabel}
+        title={label}
+        className={`scene-hotspot scene-hotspot--${tone} scene-hotspot--${variant} ${active ? "scene-hotspot--active" : ""} ${disabled ? "scene-hotspot--disabled" : ""} ${hovered ? "scene-hotspot--hovered" : ""}`}
         disabled={disabled}
         onClick={(event) => {
           event.stopPropagation();
@@ -3074,10 +3325,18 @@ function SceneMarker({
           }
           onSelect?.();
         }}
-        onMouseEnter={() => onHoverChange?.(true)}
-        onMouseLeave={() => onHoverChange?.(false)}
+        onMouseEnter={() => {
+          setHovered(true);
+          onHoverChange?.(true);
+        }}
+        onMouseLeave={() => {
+          setHovered(false);
+          onHoverChange?.(false);
+        }}
+        onFocus={() => setHovered(true)}
+        onBlur={() => setHovered(false)}
       >
-        <span>{label}</span>
+        <span>{compactLabel}</span>
         {hint ? <small>{hint}</small> : null}
       </button>
     </Html>

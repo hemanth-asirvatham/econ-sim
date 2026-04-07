@@ -40,17 +40,30 @@ function loadPlaywright() {
   return runtimeRequire("playwright");
 }
 
-async function screenshot(page, outDir, name) {
-  await page.screenshot({ path: path.join(outDir, name) });
+async function screenshot(page, outDir, name, notes) {
+  try {
+    const capture = page.screenshot({ path: path.join(outDir, name), timeout: 10000 });
+    capture.catch(() => undefined);
+    await Promise.race([
+      capture,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("outer screenshot timeout")), 14000)),
+    ]);
+  } catch (error) {
+    notes.push(`[screenshot:${name}] ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function clickIfVisible(page, selectors, notes, message) {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
     if (await locator.count()) {
-      await locator.click();
-      notes.push(message);
-      return true;
+      try {
+        await locator.click({ timeout: 5000, force: true });
+        notes.push(message);
+        return true;
+      } catch (error) {
+        notes.push(`[click:${selector}] ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
   return false;
@@ -79,17 +92,17 @@ async function run() {
       notes.push(`[pageerror] ${error.message}`);
     });
 
-    await page.goto(TARGET_URL, { waitUntil: "networkidle" });
+    await page.goto(TARGET_URL, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1800);
-    await screenshot(page, OUT_DIR, "01-loaded.png");
+    await screenshot(page, OUT_DIR, "01-loaded.png", notes);
 
     await clickIfVisible(page, ['button:has-text("Begin the chapter reel")'], notes, "Clicked Begin the chapter reel.");
     await page.waitForTimeout(2600);
-    await screenshot(page, OUT_DIR, "02-reel.png");
+    await screenshot(page, OUT_DIR, "02-reel.png", notes);
 
     await clickIfVisible(page, ['button:has-text("Skip")'], notes, "Clicked Skip.");
     await page.waitForTimeout(2200);
-    await screenshot(page, OUT_DIR, "03-after-skip.png");
+    await screenshot(page, OUT_DIR, "03-after-skip.png", notes);
 
     await clickIfVisible(
       page,
@@ -98,11 +111,11 @@ async function run() {
       "Moved to Street.",
     );
     await page.waitForTimeout(2400);
-    await screenshot(page, OUT_DIR, "04-street.png");
+    await screenshot(page, OUT_DIR, "04-street.png", notes);
 
     await page.keyboard.press("KeyW");
     await page.waitForTimeout(900);
-    await screenshot(page, OUT_DIR, "05-street-move.png");
+    await screenshot(page, OUT_DIR, "05-street-move.png", notes);
 
     await clickIfVisible(
       page,
@@ -111,7 +124,7 @@ async function run() {
       "Moved to Auditorium.",
     );
     await page.waitForTimeout(2400);
-    await screenshot(page, OUT_DIR, "06-auditorium.png");
+    await screenshot(page, OUT_DIR, "06-auditorium.png", notes);
 
     const summary = {
       url: page.url(),

@@ -92,7 +92,7 @@ async def test_update_personas_prompt_requests_spoken_first_person_updates(
     )
 
     assert "current_update must usually be 1 sentence or 2 clipped first-person sentences" in recorded["prompt"]
-    assert "pick at most 2 of these" in recorded["prompt"]
+    assert "pick one lead arena first" in recorded["prompt"]
     assert "sound like something this person would actually say out loud" in recorded["prompt"]
     assert "avoid policy jargon, consultant phrasing, slogans, or tidy both-sides wrapups" in recorded["prompt"]
     assert "do not mention the incumbent, player, or opponent by name" in recorded["prompt"]
@@ -100,8 +100,9 @@ async def test_update_personas_prompt_requests_spoken_first_person_updates(
     assert "do not let the population collapse into one repeating office-work story" in recorded["prompt"]
     assert "if AI is not the first thing this person would say, let it stay in the background or go unnamed" in recorded["prompt"]
     assert "do not force every update to explain AI directly" in recorded["prompt"]
-    assert "do not lean on paperwork, queue relief, admin hassle, or office cleanup" in recorded["prompt"]
+    assert "do not lean on one recycled helper-app, tutoring, translation, office-cleanup, or paperwork story" in recorded["prompt"]
     assert "let some people first talk about feeling more capable, less dependent on scarce experts" in recorded["prompt"]
+    assert "anchor the update in one concrete macro detail this person would actually notice" in recorded["prompt"]
     assert "if the best update is mostly good news, let it be mostly good news" in recorded["prompt"]
     assert "if the best update is mostly indirect, let it stay indirect" in recorded["prompt"]
     assert "town_hall_question must be the one direct question this person would ask a candidate" in recorded["prompt"]

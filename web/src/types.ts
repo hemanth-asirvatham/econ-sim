@@ -213,6 +213,7 @@ export interface SimulationConfig {
   visual_style: string;
   orchestrator_reasoning_effort: ReasoningEffort;
   realtime_model: string;
+  council_roster: CouncilAdvisorProfile[];
 }
 
 export interface SimulationState {
@@ -273,6 +274,7 @@ export interface SetupDraft {
   visual_style?: string | null;
   orchestrator_reasoning_effort: ReasoningEffort;
   realtime_model: string;
+  council_roster?: CouncilAdvisorProfile[];
 }
 
 export interface SetupTranscriptTurn {
@@ -321,19 +323,31 @@ export interface SimulationCreateRequest {
   visual_style?: string;
   orchestrator_reasoning_effort: ReasoningEffort;
   realtime_model: string;
+  council_roster?: CouncilAdvisorProfile[];
+}
+
+export interface CouncilAdvisorProfile {
+  key: string;
+  name: string;
+  room_role: string;
+  country_role: string;
+  remit: string;
+  voice: string;
+  viewpoint: string;
 }
 
 export interface CouncilTurnResponse {
   simulation: SimulationState;
   thread_key: string;
   lead: string;
-  urgencies: Record<string, number>;
+  next_speaker: string;
   contrast: string[];
   reason?: string | null;
   yield_after_turn: boolean;
-  player_proxy_urgency: number;
   board_notes: string[];
   turns: ConversationTurn[];
+  audio_base64?: string | null;
+  audio_format?: string | null;
 }
 
 export interface TownHallQuestionResponse {
@@ -341,6 +355,12 @@ export interface TownHallQuestionResponse {
   thread_key: string;
   cue: string;
   question_turn: ConversationTurn;
+}
+
+export interface TownHallOpponentReplyResponse {
+  simulation: SimulationState;
+  thread_key: string;
+  reply_turn: ConversationTurn;
 }
 
 export interface ResolveStageRequest {
@@ -384,9 +404,10 @@ export function makeDefaultSetupDraft(): SetupDraft {
     persona_count: 48,
     stage_count: 5,
     visual_style:
-      "Painterly civic documentary in a Cezanne, Monet, and Matisse register: bold color planes, softened edges, lived-in institutions and neighborhoods, atmospheric light, selective abstraction, and never glossy CGI, stock-photo realism, or cartoon exaggeration.",
-    orchestrator_reasoning_effort: "low",
+      "Painterly civic documentary in a Cezanne, Monet, and Matisse register: thicker brushstrokes, bold color planes, softened edges, lived-in institutions and neighborhoods, atmospheric light, selective abstraction, and never glossy CGI, stock-photo realism, or cartoon exaggeration.",
+    orchestrator_reasoning_effort: "medium",
     realtime_model: "gpt-realtime-1.5",
+    council_roster: [],
   };
 }
 
@@ -409,5 +430,6 @@ export function setupDraftToCreateRequest(draft: SetupDraft): SimulationCreateRe
     visual_style: draft.visual_style?.trim() || undefined,
     orchestrator_reasoning_effort: draft.orchestrator_reasoning_effort,
     realtime_model: draft.realtime_model.trim() || "gpt-realtime-1.5",
+    council_roster: draft.council_roster?.length ? draft.council_roster : undefined,
   };
 }
