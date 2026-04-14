@@ -1,6 +1,6 @@
 # Econ Sim Product Checklist
 
-Updated: 2026-04-06
+Updated: 2026-04-10
 
 Legend:
 - `[ ]` not met yet
@@ -10,6 +10,20 @@ Legend:
 This file is the working product contract for `econ-sim`. It turns the full conversation into concrete acceptance criteria, with current status based on live iteration, code inspection, and browser QA.
 
 ## Latest pass notes
+
+- 2026-04-10 current pass: setup, stage, montage, featurette, advisor, citizen, debate, and town-hall prompts were tightened around natural-language flexibility rather than explicit world-mode flags. The same setup conversation now has to carry broad U.S. defaults, country/state/institution nudges, and later/future starts without a separate radical parameter.
+- 2026-04-10 current pass: later-stage and later-start content was pushed harder toward genuinely changed economic settlements: AI as a substrate for cognitive work, new household security systems, altered time use, ownership and access bottlenecks, public-service changes, robotics constraints, and geopolitical or institutional rearrangements. The prompts now explicitly reject present-day admin/wait-time cliches as the default explanation.
+- 2026-04-10 current pass: the council room remains decider-first for latency: a lightweight floor picker chooses one advisor or the player, then only that advisor drafts and speaks. Board-change language now handles natural follow-ups like “write that down” or “put that down,” using the last advisor line when appropriate.
+- 2026-04-10 current pass: the public mood board, scene rail, text-toggle affordance, and fullscreen briefing/featurette reels got another readability and clipping pass. The UI still needs live taste-testing, but the build now compiles after the board/reel/control changes.
+- 2026-04-10 current pass: focused validation is clean after the latest integrated patch: `pytest -q tests/test_prompt_quality.py tests/test_director.py tests/test_gabriel_service.py` passed 103 tests, `npm --prefix web run build` passed, and `git diff --check` passed. Fresh headed GUI QA is the next gate.
+
+- 2026-04-07 current pass: the scene mic is no longer overloaded as the town-hall voter trigger. Town hall now gets its own in-world `Call on voter` action, while the mic button stays the same speak/pause control used in the rest of the 3D GUI.
+- 2026-04-07 current pass: voice street commands now thread through the app instead of getting parsed and dropped. Commands like “talk to someone nearby,” “talk to a student,” or “find an older person” select the best matching citizen, move the scene to the street, and open that citizen’s live voice channel.
+- 2026-04-07 current pass: the council room is now more strictly decider-first. The backend drafts only the selected speaker’s line instead of drafting fallback contrast voices by default, which should reduce latency and make “who has the floor” easier to reason about.
+- 2026-04-07 current pass: live-refresh town-hall questions now use stored citizen questions as seeds rather than early-returning them, so audience questions can reflect the current debate while still sounding like the actual citizen.
+- 2026-04-07 current pass: natural-language future starts now recognize “four/five/six/seven/nine/eleven/thirteen/fourteen years from now” as well as numeric forms. This keeps setup guidance natural without adding any explicit world-mode or radical parameter.
+- 2026-04-07 current pass: featurette prompts now receive the setup-direction block directly, and remaining “a few years ago / a couple of years ago” standard poll anchors were rewritten as “before the latest AI shift” so future-start scenarios do not sound accidentally present-anchored.
+- 2026-04-07 current pass: focused validation is clean after these changes: `pytest tests/test_director.py tests/test_prompt_quality.py tests/test_gabriel_service.py -q` passed 101 tests, `npm --prefix web run build` passed, `git diff --check` passed, and headed Chrome-for-Testing smoke checks covered council, reels, town hall, and solo/multi speak buttons on an existing stage-ready run.
 
 - 2026-04-06 current pass: council floor routing now has a deterministic direct-address fallback. If the player follows an advisor with “you, what do you think?”, “your take?”, “same question,” or similar pronoun language, the floor picker prefers the advisor who just spoke instead of rotating away by reflex.
 - 2026-04-06 current pass: council board updates now have a backend fallback for literal “put/add/update this on the board” language, so the policy board can still update even if the selected advisor fails to emit the formal board action.
@@ -388,3 +402,47 @@ This file is the working product contract for `econ-sim`. It turns the full conv
 - [ ] A few turns of debate reveal a genuine rival platform and an intellectually serious clash of ideas.
 - [ ] Nothing in the visible experience feels like debug cruft, duplicate transcripts, dead buttons, raw model artifacts, or stitched-together app modes.
 - [ ] A full run can be completed from setup chamber through next-stage handoff without relying on drawers, hidden admin controls, or fallback UI paths.
+
+## 18. Latest QA Notes
+
+- [x] Process hygiene pass completed. Acceptance: only one backend and one Vite server remain; stale Chrome-for-Testing/playwright helpers and abandoned fresh-run folders were removed.
+- [x] Council loop is now decider-first. Acceptance: the lightweight floor arbiter picks a single advisor before drafting, rather than waiting on every advisor to draft and score urgency.
+- [~] Council continuation avoids yielding too quickly. Acceptance: after an advisor speaks, the table keeps a short advisor-to-advisor exchange unless the last line directly hands the floor back to the player or the loop limit is reached.
+- [~] Council direct-address routing is improved. Acceptance: “you, what do you think,” “can you put that on the board,” and named-advisor prompts bias the floor toward the last or named advisor instead of rotating blindly.
+- [~] Council action path improved but needs live verification. Acceptance: board updates and poll actions can be executed by the selected lead advisor, with policy board lines allowed up to 5 concise items.
+- [~] Scene voice commands now cover more of the game shell. Acceptance: voice commands can open reels, call the election, request a town-hall voter question, focus the nearest or queried citizen, switch rooms, open the in-scene text composer, run queued or immediate polls, and add/clear concise policy-board notes.
+- [~] Public mood board has a simpler metric/readout layout. Acceptance: the board shows core tracking plus recent poll reads with larger handwritten figures, but still needs another visual pass in both light and dark mode.
+- [x] Later-settlement phase ladder no longer repeats the same settlement label. Acceptance: later starts progress through `Settlement Opening`, `Settlement Strain`, `Post-Work Bargain`, `Machine Income Fight`, and `Compute Bloc Reckoning`.
+- [~] Opponent contrast is less pro-regulation by default. Acceptance: against broad brakes, heavy taxes, licensing, caps, or pauses, the opponent now preferentially surfaces diffusion, access, competition, and narrower remedies when the stage evidence supports it.
+- [~] Documentary and featurette prompts lean harder into the Cezanne/Monet/Matisse family. Acceptance: default image prompts push thicker brushstrokes, painterly abstraction, and no readable text or numbers, while allowing coherent stylistic variation.
+- [~] Headed Chrome-for-Testing smoke checks passed for live speak buttons, council voice, town hall question, and reel cinema on an existing stage-ready run. Acceptance: UI surfaces are reachable without headless or managed-Chrome CDP.
+- [x] Setup prompt/control cleanup landed. Acceptance: natural-language future cues like “ten/fifteen years from now with most computer work automated” keep their later starting anchor without a `world_mode` parameter, setup chamber replies no longer expose `field -> value` fragments out loud, and the council roster prompt uses a natural starting-point note instead of a numeric phase anchor.
+- [~] Hybrid-room interrupt handling improved. Acceptance: capture-only Realtime in council/town-hall rooms no longer drops `speech_started` and transcripts just because external playback is active; echo filtering still protects against obvious playback transcripts.
+- [ ] Fresh live initialization still needs a clean successful pass. Acceptance: two true fresh live runs reached stagewriting and stalled; they were cleaned up and the backend was restarted. Do not count content quality as verified from scratch until this is diagnosed or a fresh run completes.
+
+### Latest Pass Notes
+
+- [x] Focused backend / prompt / Gabriel test suite is green. Acceptance: `102 passed` for `tests/test_director.py tests/test_prompt_quality.py tests/test_gabriel_service.py`, and `git diff --check` passes.
+- [x] Production web build is green after the 3D board / voice patches. Acceptance: `npm --prefix web run build` passed with the existing large `three` chunk warning only.
+- [x] Live orchestrator content probe reached a later computer-work economy without an explicit mode parameter. Acceptance: GPT-5.4 medium produced a 2036 chapter where near-AGI runs most screen work, household security mixes citizen dividends / cheap digital essentials / intermittent human work, and the conflict is compute / power / utility access rather than admin wait times.
+- [~] Documentary narration got a grammar guardrail. Acceptance: montage prompt and narration normalizer now reject / repair period-plus-lowercase example fragments such as `screen. research...` and lowercase connector starts such as `management. and people...`; a regression test covers the probe failure.
+- [~] Later-start setup recognition broadened. Acceptance: natural-language setup cues such as “all of what remote workers do,” “remote work is broadly automated,” and “tasks that happen on a laptop” now anchor at `AGI Power Contest` or later without a `world_mode` / `radical` parameter.
+- [~] Blueprint has more concrete settlement pressure. Acceptance: blueprint schema / prompts now ask for `ordinary_day_now`, `primary_security_baseline`, and `legacy_metric_that_now_misleads`, and these are fed forward to the stage / montage passes as locked new-normal facts.
+- [~] Persona update prompt now honors changed settlements. Acceptance: stage persona updates are told to alter household, daily routine, recent AI moment, and current update when the stage capsule names a changed income / access / firm / ownership / public-service baseline.
+- [~] Council backend now demonstrated floor-loop continuation through the direct API. Acceptance: a live API smoke selected Rosa for the first answer and Grant for a continuation beat after being asked to disagree; remaining work is polishing client audio / caption timing under actual mic use.
+- [~] Council board discipline tightened. Acceptance: ordinary strategy questions no longer automatically commit draft `board_notes`; explicit `board:` / `whiteboard:` / policy-board requests are parsed through punctuation and still commit to the board path.
+- [~] Council prepared-audio caption race was reduced. Acceptance: the client uses prepared full-turn audio only when there is a single spoken council turn; multi-turn responses fall back to line-by-line playback so subtitles do not race ahead of the actual voice.
+- [~] Backboard texture pressure was reduced. Acceptance: policy / public-mood board canvas dropped from an unsafe 5120px-wide texture to a 3200px-wide texture; the newest headed smoke no longer shows random browser-memory text in the whiteboard texture, though board composition still needs a human design pass.
+- [~] Global voice commands expanded. Acceptance: commands can open / close reels, start or skip the chapter reel, enter the war room, open details / intel, close panels, toggle theme / fullscreen, run polls, and set / add / replace / remove policy-board lines by voice/text transcript routing.
+- [x] Bottom-scene tutorial chrome was removed from the primary GUI. Acceptance: the 3D scene no longer renders the command-shortcut strip, the street-guide instruction card, or the small helper copy beside the mic; the bottom bar stays to mic + inline keyboard/text entry + true stage actions.
+- [~] Council speech now has an objection-repair path. Acceptance: selected-advisor speech that stops at “I’d push back” or stays silent after an explicit concrete-move request is repaired into a plain-English narrower move; direct live probe produced a 38-word line with posted access, schools/small firms/agencies, and licensing only for money/benefits/infrastructure uses.
+- [~] Council prompt language is stricter against consultant fog. Acceptance: council spoken / candidate prompts tell advisors not to say the forbidden MBA words, not to speak “push back” as a turn, and to name the replacement move in the same line.
+- [ ] Browser screenshot QA is still flaky with the 3D scene. Acceptance: headed Chrome-for-Testing flow reaches advisor -> street -> auditorium, but `page.screenshot()` can timeout on WebGL ReadPixels / font waits; rely on live headed inspection for final visual polish until screenshot capture is made reliable.
+- [x] Live sim processes were explicitly shut down for this patch. Acceptance: backend, Vite, Chrome-for-Testing, remote-debugging Chrome, and playtest helper process sweep returned empty after cleanup.
+- [x] Active council floor decider now parses only the next speaker. Acceptance: the live council turn path uses `CouncilFloorPick`, 16 output tokens, no parsed reason / yield / contrast payload, and the frontend no longer feeds stale contrast names into the continuation loop.
+- [~] Selected council advisor drafting now spends its quality budget on one richer beat. Acceptance: the selected advisor uses full `gpt-5.4`, a 35-80 word spoken target, and a 200-token response cap; live voice QA still needs to judge whether latency remains acceptable.
+- [~] Council floor ownership is represented inside the 3D table. Acceptance: the floor owner now glows / breathes while selected or about-to-speak, and the old center-bottom `has the floor` pill has been removed from the primary scene.
+- [x] Direct live council smoke passed after the floor-pick refactor. Acceptance: real API path produced a first advisor turn in 6.56s and a continuation advisor turn in 4.46s, with two different advisors selected by the decider-first loop and no clipped `anyone using AI to...` sentence reaching the transcript.
+- [~] The primary mic/text shell is one notch quieter. Acceptance: the keyboard affordance is now icon-only with an accessible label, keeping the bottom HUD closer to “speak first, type if needed” instead of another web-button cluster.
+- [~] Documentary prompt now names the changed settlement directly. Acceptance: the montage writer is told to answer who gets income, who gets access, who owns the systems, and what routine replaced the old job week when the world is already strange.
+- [~] Council selected-speaker prompt now pushes against prepared-statement rhythm. Acceptance: the chosen advisor is explicitly told to answer the last live question/claim, add one mechanism, and stop.

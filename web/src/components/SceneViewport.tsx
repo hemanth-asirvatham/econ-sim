@@ -3,7 +3,7 @@ import { ContactShadows, Float, Html, PerspectiveCamera, RoundedBox, Sparkles } 
 import { type FormEvent, type MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { normalizeCouncilRoster, parseCouncilCaption, splitCouncilLines } from "../lib/council";
-import { stageRoomBrief } from "../lib/stageText";
+import { stageConstraint, stageGain, stagePolicyAxes, stageRoomBrief, stageSplit, stageWorldOpening } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
 import type { AdvisorMode, AuditoriumMode, CitizenSnapshot, CouncilAdvisorProfile, RoomName, SceneHotspot, ScenePresence, StagePackage } from "../types";
 
@@ -54,6 +54,7 @@ interface SceneViewportProps {
   stageAdvanceLabel?: string;
   stageAdvanceHint?: string;
   stageAdvanceDisabled?: boolean;
+  onTownHallQuestion?: () => void;
   onTogglePanels?: () => void;
   detailsOpen?: boolean;
   onOpenReels?: () => void;
@@ -144,6 +145,9 @@ const STREET_READY_DISTANCE = 5.8;
 const STREET_HIGHLIGHT_DISTANCE = 8.2;
 const STREET_FEATURE_DISTANCE = 15.8;
 const STREET_EXTRA_MIN_DISTANCE = 9.6;
+const STREET_POSE_PUBLISH_INTERVAL_MS = 90;
+const STREET_POSE_PUBLISH_DELTA = 0.42;
+const STREET_HEADING_PUBLISH_DELTA = 0.12;
 
 const ROOM_CONFIGS: Record<
   RoomName,
@@ -158,20 +162,20 @@ const ROOM_CONFIGS: Record<
   }
 > = {
   briefing: {
-    camera: [0, 2.4, 8.6],
-    focus: [0, 1.45, 0],
-    background: "#130d0a",
+    camera: [0, 2.72, 10.35],
+    focus: [0, 1.6, -1.2],
+    background: "#17100d",
     fogNear: 9,
-    fogFar: 20,
+    fogFar: 23,
     accent: "#d1a15d",
     fill: "#6ea8b8",
   },
   advisor: {
-    camera: [0.02, 2.56, 14.82],
-    focus: [0.02, 1.7, -2.18],
+    camera: [0.08, 2.58, 13.7],
+    focus: [0.04, 1.72, -2.48],
     background: "#251c16",
     fogNear: 12,
-    fogFar: 25,
+    fogFar: 27,
     accent: "#c99052",
     fill: "#88b2c0",
   },
@@ -185,8 +189,8 @@ const ROOM_CONFIGS: Record<
     fill: "#8fa9c6",
   },
   debate: {
-    camera: [-0.24, 3.04, 13.55],
-    focus: [0, 2.3, -4.72],
+    camera: [-0.08, 3.42, 15.4],
+    focus: [0, 2.42, -3.4],
     background: "#1a1210",
     fogNear: 13,
     fogFar: 28,
@@ -206,10 +210,10 @@ function themedRoomConfig(room: RoomName, themeMode: "light" | "dark", themeProf
   const advisorView =
     room === "advisor" && advisorMode === "council"
       ? {
-          camera: [0, 3.04, 14.92] as [number, number, number],
-          focus: [0, 1.84, -1.18] as [number, number, number],
+          camera: [0, 3.08, 15.35] as [number, number, number],
+          focus: [0, 1.82, -2.35] as [number, number, number],
           fogNear: 13,
-          fogFar: 27,
+          fogFar: 29,
         }
       : null;
   const accent = themeProfile?.accent ?? base.accent;
@@ -394,7 +398,7 @@ function boardPolicyLabel(text: string) {
     cleaned.length > 98
       ? cleaned.replace(/\s+(?:while|so that|without|but)\s+.+$/i, "")
       : cleaned;
-  return boardSnippet(primaryClause.length > 42 ? primaryClause : cleaned, 92);
+  return boardSnippet(primaryClause.length > 38 ? primaryClause : cleaned, 76);
 }
 
 function compactCitizenLabel(name: string, max = 22) {
@@ -453,11 +457,6 @@ function citizenSuggestedQuestions(citizen: CitizenSnapshot) {
   );
 
   return [...new Set(prompts)].slice(0, 3);
-}
-
-function citizenCardMoment(citizen: CitizenSnapshot) {
-  const detail = citizen.recent_ai_moment || citizen.current_update || citizen.daily_routine || citizen.summary;
-  return boardSnippet(detail, 104);
 }
 
 function citizenCardDisposition(citizen: CitizenSnapshot) {
@@ -812,109 +811,139 @@ function boardSummaryLabel(summary?: StagePackage["poll_summaries"][number] | nu
   return boardSnippet(summary.board_label || boardPollQuestionLabel(summary.question), 54);
 }
 
+function stageMacroStats(stage: StagePackage) {
+  const stats = Object.entries(stage.macro_stats ?? {})
+    .flatMap(([key, stat]) => {
+      const label = String(stat?.label ?? "").replace(/\s+/g, " ").trim();
+      const value = String(stat?.value ?? "").replace(/\s+/g, " ").trim();
+      const detail = String(stat?.detail ?? "").replace(/\s+/g, " ").trim();
+      if (!label || !value) {
+        return [];
+      }
+      return [{ key, label, value, detail }];
+    });
+  const priority = (entry: { key: string; label: string }) => {
+    const text = `${entry.key} ${entry.label}`.toLowerCase();
+    if (text.includes("unemployment")) return 0;
+    if (text.includes("labor") || text.includes("participation")) return 1;
+    if (text.includes("gdp") || text.includes("growth") || text.includes("output")) return 2;
+    if (text.includes("inflation") || text.includes("prices")) return 3;
+    if (text.includes("compute") || text.includes("power") || text.includes("energy")) return 4;
+    if (text.includes("defense") || text.includes("military") || text.includes("security")) return 5;
+    return 10;
+  };
+  return stats.sort((left, right) => priority(left) - priority(right));
+}
+
 function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
-  const capabilitySummary = preferredPollSummaryByKey(stage, ["capability_read", "daily_role", "life_touchpoint"]);
-  const gainSummary = preferredPollSummaryByKey(stage, ["expertise_access", "keep_change", "ai_gain", "new_capability"]);
-  const stillHumanSummary = preferredPollSummaryByKey(stage, ["still_human"]);
-  const worrySummary = preferredPollSummaryByKey(stage, ["biggest_worry", "main_pressure", "job_worry"]);
-  const householdSummary = preferredPollSummaryByKey(stage, ["household_security", "better_off"]);
-  const serviceSummary = preferredPollSummaryByKey(stage, ["public_stability", "service_reliability", "ai_comfort"]);
-  const newlyNormalSummary = preferredPollSummaryByKey(stage, ["newly_normal"]);
-  const fairnessSummary = preferredPollSummaryByKey(stage, ["fairness"]);
-  const nationalSummary = preferredPollSummaryByKey(stage, ["national_effect", "econ_read", "gov_trust"]);
-  const latestCustom = latestCustomPollSummary(stage);
   const columns: BoardPanel["columns"] = [];
+  const rankedSummaries = [...stage.poll_summaries]
+    .filter((summary) => !summary.question.toLowerCase().includes("election were held today"))
+    .sort((left, right) => {
+      const leftCustom = (left.source ?? "standard") !== "standard" || left.board_slot === "custom" ? 0 : 1;
+      const rightCustom = (right.source ?? "standard") !== "standard" || right.board_slot === "custom" ? 0 : 1;
+      return leftCustom - rightCustom;
+    });
 
-  for (const summary of [
-    capabilitySummary ?? gainSummary ?? nationalSummary ?? serviceSummary,
-    gainSummary ?? householdSummary ?? serviceSummary ?? stillHumanSummary,
-    serviceSummary ?? stillHumanSummary ?? newlyNormalSummary ?? fairnessSummary,
-    latestCustom ?? householdSummary ?? nationalSummary ?? worrySummary,
-  ]) {
-    if (!summary) {
-      continue;
-    }
+  rankedSummaries.slice(0, 2).forEach((summary) => {
     const choice = boardSummaryChoice(summary);
-    if (!choice || !choice.answer) {
-      continue;
+    if (choice?.answer) {
+      columns.push({
+        id: summary.key ?? summary.question,
+        title: boardSummaryTitle(summary, "Public poll"),
+        lines: [
+          {
+            label: boardSummaryLabel(summary) || "Top response",
+            answer: boardPollLabel(choice.answer, { max: choice.share ? 32 : 66 }),
+            share: choice.share,
+          },
+        ],
+      });
     }
-    const id = summary.key ?? summary.question;
-    if (columns.some((column) => (column.id ?? column.title) === id)) {
-      continue;
-    }
-    columns.push({
-      id,
-      title: boardSummaryTitle(summary),
-      lines: [
-        {
-          label: "",
-          answer: boardPollLabel(choice.answer, { max: choice.share ? 32 : 54 }),
-          share: choice.share,
-        },
-      ],
-    });
-  }
+  });
 
-  if (columns.length === 0 && stage.capability_frontier_now) {
+  if (columns.length === 0) {
     columns.push({
-      id: "fallback_capability",
-      title: "Capability read",
+      id: "polling_pending",
+      title: "Public poll",
       lines: [
         {
-          label: "Frontier",
-          answer: boardSnippet(stage.capability_frontier_now, 32),
+          label: "Status",
+          answer: "Polling pending",
         },
       ],
     });
-  }
-  if (columns.length < 2 && (stage.main_split || stage.dominant_upside)) {
-    columns.push({
-      id: "fallback_split",
-      title: stage.main_split ? "Top pressure" : "Visible gain",
-      lines: [
-        {
-          label: stage.main_split ? "Main split" : "Gain worth keeping",
-          answer: boardSnippet(stage.main_split || stage.dominant_upside || "", 32),
-        },
-      ],
-    });
+    const worldCue = stageWorldOpening(stage, 84);
+    if (worldCue) {
+      columns.push({
+        id: "world_cue",
+        title: "State cue",
+        lines: [{ label: "Opening read", answer: boardSnippet(worldCue, 84) }],
+      });
+    }
   }
 
   return columns.slice(0, 2);
 }
 
+function boardMacroRead(stage: StagePackage) {
+  const roomBrief = stage.room_briefing?.replace(/\s+/g, " ").trim();
+  if (roomBrief) {
+    return roomBrief;
+  }
+  const synthesized = [stageGain(stage, 140), stageSplit(stage, 140)].filter(Boolean);
+  if (synthesized.length > 0) {
+    return synthesized.join(" ");
+  }
+  return stageWorldOpening(stage, 180);
+}
+
 function boardMetricRows(stage: StagePackage): Array<{ label: string; value: string; note?: string }> {
-  const comfortSummary = latestPollSummaryByKey(stage, ["ai_comfort", "public_stability", "service_reliability"]) ?? null;
-  const [, comfortShareValue] =
-    comfortSummary
-      ? Object.entries(comfortSummary.shares).sort((left, right) => right[1] - left[1])[0] ?? ["", 0]
-      : ["", 0];
-  const comfortShare = comfortShareValue > 0 ? `${Math.round(comfortShareValue * 100)}%` : "";
-  const comfortLabel =
-    comfortSummary?.key === "public_stability"
-      ? "Daily life"
-      : comfortSummary?.key === "service_reliability"
-        ? "Services"
-        : "AI comfort";
-  return [
+  const pollingReady = stage.poll_summaries.length > 0;
+  const macroRows = stageMacroStats(stage).slice(0, 3).map((entry) => ({
+    label: entry.label,
+    value: boardSnippet(entry.value, 18),
+    note: entry.detail ? boardSnippet(entry.detail, 34) : undefined,
+  }));
+  const formatDelta = (metric: { delta: number }) => {
+    if (!Number.isFinite(metric.delta) || metric.delta === 0) {
+      return "";
+    }
+    const amount = Math.abs(metric.delta) >= 10 ? Math.round(Math.abs(metric.delta)) : Number(Math.abs(metric.delta).toFixed(1));
+    return `${metric.delta > 0 ? "+" : "−"}${amount} vs last round`;
+  };
+  if (!pollingReady && macroRows.length > 0) {
+    return macroRows.slice(0, 3);
+  }
+
+  const rows = [
     {
       label: "Approval",
-      value: stage.tracking.approval.display,
+      value: pollingReady ? stage.tracking.approval.display : "—",
+      note: pollingReady ? (formatDelta(stage.tracking.approval) || "latest voter read") : "Polling in background",
     },
+  ];
+  if (macroRows.length > 0) {
+    return [...rows, ...macroRows.slice(0, 2)].slice(0, 3);
+  }
+  return [
+    ...rows,
     {
       label: "Better off",
-      value: stage.tracking.better_off.display,
+      value: pollingReady ? stage.tracking.better_off.display : "—",
+      note: pollingReady ? formatDelta(stage.tracking.better_off) : "Lived read still settling",
     },
     {
-      label: comfortShare ? comfortLabel : "Work worry",
-      value: comfortShare || stage.tracking.unemployment_anxiety.display || "n/a",
+      label: "AI comfort",
+      value: pollingReady ? stage.tracking.ai_comfort.display : "—",
+      note: pollingReady ? formatDelta(stage.tracking.ai_comfort) : "Need public read first",
     },
   ];
 }
 
 function boardMetricsKey(stage: StagePackage) {
   return boardMetricRows(stage)
-    .map((row) => `${row.label}:${row.value}`)
+    .map((row) => `${row.label}:${row.value}:${row.note ?? ""}`)
     .join("|");
 }
 
@@ -1004,9 +1033,9 @@ function streetSurfaceTexture(themeMode: "light" | "dark") {
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.repeat.set(1, 1);
   texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearMipmapLinearFilter;
-  texture.anisotropy = 12;
-  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearFilter;
+  texture.anisotropy = 4;
+  texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return texture;
 }
@@ -1059,6 +1088,7 @@ export default function SceneViewport({
   stageAdvanceLabel,
   stageAdvanceHint,
   stageAdvanceDisabled = false,
+  onTownHallQuestion,
   onTogglePanels,
   detailsOpen = false,
   onOpenReels,
@@ -1108,10 +1138,6 @@ export default function SceneViewport({
     room === "advisor" && advisorMode === "council"
       ? councilFloorOwner ?? activeCouncilLeadRaw
       : undefined;
-  const councilCaptionVisible =
-    room === "advisor" && advisorMode === "council"
-      ? presence.counterpartActivity === "speaking" || presence.voicePhase === "responding"
-      : true;
   const playerHasCouncilFloor =
     room === "advisor" &&
     advisorMode === "council" &&
@@ -1120,39 +1146,59 @@ export default function SceneViewport({
       Boolean(playerName) &&
       activeCouncilOwner?.trim().toLowerCase() === playerName?.trim().toLowerCase()
     ));
-  const activeCouncilLead = playerHasCouncilFloor ? undefined : activeCouncilLeadRaw;
-  const visibleCaptionText = room === "advisor" && advisorMode === "council" ? councilCaption.text : captionText;
-  const councilFloorText =
+  const councilCaptionVisible =
     room === "advisor" && advisorMode === "council"
-      ? activeCouncilOwner
-        ? playerHasCouncilFloor
-          ? "You have the floor"
-          : councilFloorContrast && councilFloorContrast.length > 0
-            ? `${activeCouncilOwner} has the floor · ${councilFloorContrast.join(" / ")} close behind`
-            : `${activeCouncilOwner} has the floor`
-        : presence.counterpartActivity === "speaking"
-          ? "The table has the floor"
-          : undefined
-      : undefined;
+      ? playerHasCouncilFloor ||
+        Boolean(activeCouncilLeadRaw) ||
+        presence.counterpartActivity === "speaking" ||
+        presence.voicePhase === "responding"
+      : true;
+  const activeCouncilLead = playerHasCouncilFloor ? "You" : activeCouncilLeadRaw;
+  const visibleCaptionText = room === "advisor" && advisorMode === "council" ? councilCaption.text : captionText;
   const textComposerAvailable = Boolean(onTextComposerToggle && onTextComposerChange && onTextComposerSend);
   const showStageAdvance =
     !overlayActive &&
-    !panelsOpen &&
     room === "debate" &&
     Boolean(onStageAdvance) &&
     Boolean(stageAdvanceLabel);
+  const townHallQuestionBusy =
+    townHallState?.phase === "generating" ||
+    townHallState?.phase === "voter_speaking" ||
+    townHallState?.phase === "opponent_turn";
+  const showTownHallQuestionAction =
+    !overlayActive &&
+    room === "debate" &&
+    auditoriumMode === "town_hall" &&
+    Boolean(onTownHallQuestion);
+  const townHallQuestionDisabled = resolvingStage || townHallQuestionBusy || townHallState?.readyForNextQuestion === false;
+  const townHallQuestionLabel =
+    townHallState?.phase === "generating"
+      ? "Finding voter..."
+      : townHallState?.phase === "voter_speaking"
+      ? "Voter speaking..."
+      : townHallState?.phase === "opponent_turn"
+        ? "Opponent answering..."
+        : townHallState?.phase === "player_turn" && townHallState?.readyForNextQuestion === false
+          ? "Answer the voter"
+          : townHallState?.question
+            ? "Next audience question"
+            : "Audience question";
   const showSceneUtilities =
     !overlayActive &&
     Boolean(onTogglePanels || onOpenReels || onToggleTheme || onToggleFullscreen || onRestart);
   const playerStateRef = useRef<StreetPlayerState>({ ...STREET_PLAYER_START });
   const streetAutoTargetRef = useRef<StreetAutoTarget | null>(null);
   const streetBootedRef = useRef(false);
-  const [playerPose, setPlayerPose] = useState<StreetPlayerState>({ ...STREET_PLAYER_START });
+  const [playerPoseSnapshot, setPlayerPoseSnapshot] = useState<StreetPlayerState>({ ...STREET_PLAYER_START });
   const [hoveredCitizenId, setHoveredCitizenId] = useState<string | null>(null);
   const lastPoseCommitRef = useRef(0);
   const lastPublishedPoseRef = useRef<StreetPlayerState>({ ...STREET_PLAYER_START });
   const presenceStatusRef = useRef(presence.status);
   const streetPlacements = useMemo(() => buildStreetPlacements(citizens), [citizens]);
+  const streetPlacementMap = useMemo(
+    () => new Map(streetPlacements.map((entry) => [entry.citizen.citizen_id, entry])),
+    [streetPlacements],
+  );
   const streetExtras = useMemo(
     () => buildStreetExtras(citizens, 14),
     [citizens],
@@ -1178,7 +1224,7 @@ export default function SceneViewport({
       streetBootedRef.current = false;
       lastPublishedPoseRef.current = { ...STREET_PLAYER_START };
       lastPoseCommitRef.current = 0;
-      setPlayerPose((current) =>
+      setPlayerPoseSnapshot((current) =>
         Math.abs(current.x - STREET_PLAYER_START.x) < 0.001 &&
         Math.abs(current.z - STREET_PLAYER_START.z) < 0.001 &&
         Math.abs(current.heading - STREET_PLAYER_START.heading) < 0.001
@@ -1186,6 +1232,9 @@ export default function SceneViewport({
           : { ...STREET_PLAYER_START },
       );
       setHoveredCitizenId((current) => (current === null ? current : null));
+      return;
+    }
+    if (overlayActive || panelsOpen || textComposerOpen) {
       return;
     }
     const pressed = new Set<string>();
@@ -1198,16 +1247,16 @@ export default function SceneViewport({
       const published = lastPublishedPoseRef.current;
       if (
         !force &&
-        now - lastPoseCommitRef.current < 16 &&
-        Math.abs(published.x - nextState.x) < 0.025 &&
-        Math.abs(published.z - nextState.z) < 0.03 &&
-        Math.abs(published.heading - nextState.heading) < 0.02
+        now - lastPoseCommitRef.current < STREET_POSE_PUBLISH_INTERVAL_MS &&
+        Math.abs(published.x - nextState.x) < STREET_POSE_PUBLISH_DELTA &&
+        Math.abs(published.z - nextState.z) < STREET_POSE_PUBLISH_DELTA &&
+        Math.abs(published.heading - nextState.heading) < STREET_HEADING_PUBLISH_DELTA
       ) {
         return;
       }
       lastPublishedPoseRef.current = nextState;
       lastPoseCommitRef.current = now;
-      setPlayerPose((current) => {
+      setPlayerPoseSnapshot((current) => {
         if (
           Math.abs(current.x - nextState.x) < 0.001 &&
           Math.abs(current.z - nextState.z) < 0.001 &&
@@ -1333,7 +1382,7 @@ export default function SceneViewport({
           manualHeading = autoTarget.heading ?? Math.atan2(moveX, -moveZ);
         }
       }
-      if (citizenConversationLocked || (presence.liveMode === "voice" && presence.status === "connected" && !presence.muted)) {
+      if (citizenConversationLocked) {
         velocityX = THREE.MathUtils.lerp(velocityX, 0, Math.min(0.34 * elapsed, 1));
         velocityZ = THREE.MathUtils.lerp(velocityZ, 0, Math.min(0.34 * elapsed, 1));
         if (Math.abs(velocityX) > 0.0005 || Math.abs(velocityZ) > 0.0005) {
@@ -1388,7 +1437,7 @@ export default function SceneViewport({
       window.removeEventListener("keyup", handleKeyUp);
       window.cancelAnimationFrame(animationFrame);
     };
-  }, [citizenConversationLocked, onStartVoice, onStreetFocusChange, onStreetPreviewChange, presence.liveMode, presence.status, room]);
+  }, [citizenConversationLocked, onStartVoice, onStreetFocusChange, onStreetPreviewChange, overlayActive, panelsOpen, room, textComposerOpen]);
 
   useEffect(() => {
     if (room !== "citizens") {
@@ -1397,14 +1446,15 @@ export default function SceneViewport({
     if (!streetBootedRef.current) {
       streetBootedRef.current = true;
     }
-    if (citizenConversationLocked || (presence.liveMode === "voice" && presence.status === "connected" && !presence.muted)) {
+    if (citizenConversationLocked) {
       streetAutoTargetRef.current = null;
     }
-  }, [citizenConversationLocked, presence.liveMode, presence.muted, presence.status, room]);
+  }, [citizenConversationLocked, room]);
 
   const voiceChannelOpen = presence.liveMode === "voice" && presence.status === "connected";
   const conversationMicLive = voiceChannelOpen && !presence.muted;
-  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || conversationMicLive);
+  const stagePollingReady = stage.poll_summaries.length > 0;
+  const streetSelectionLocked = room === "citizens" && citizenConversationLocked;
   const lockedStreetCitizen = streetSelectionLocked ? activeCitizen : undefined;
   const hoveredCitizen =
     room === "citizens" && hoveredCitizenId
@@ -1428,23 +1478,23 @@ export default function SceneViewport({
   const currentCitizenDistance =
     room === "citizens" && currentCitizen
       ? Math.hypot(
-          (streetPlacements.find((entry) => entry.citizen.citizen_id === currentCitizen.citizen_id)?.position[0] ?? playerPose.x) - playerPose.x,
-          (streetPlacements.find((entry) => entry.citizen.citizen_id === currentCitizen.citizen_id)?.position[2] ?? playerPose.z) - playerPose.z,
+          (streetPlacementMap.get(currentCitizen.citizen_id)?.position[0] ?? playerPoseSnapshot.x) - playerPoseSnapshot.x,
+          (streetPlacementMap.get(currentCitizen.citizen_id)?.position[2] ?? playerPoseSnapshot.z) - playerPoseSnapshot.z,
         )
       : Infinity;
   const citizenCardDistance =
     room === "citizens" && citizenCardCitizen
       ? Math.hypot(
-          (streetPlacements.find((entry) => entry.citizen.citizen_id === citizenCardCitizen.citizen_id)?.position[0] ?? playerPose.x) - playerPose.x,
-          (streetPlacements.find((entry) => entry.citizen.citizen_id === citizenCardCitizen.citizen_id)?.position[2] ?? playerPose.z) - playerPose.z,
+          (streetPlacementMap.get(citizenCardCitizen.citizen_id)?.position[0] ?? playerPoseSnapshot.x) - playerPoseSnapshot.x,
+          (streetPlacementMap.get(citizenCardCitizen.citizen_id)?.position[2] ?? playerPoseSnapshot.z) - playerPoseSnapshot.z,
         )
       : Infinity;
   const currentCitizenPlacement = useMemo(() => {
     if (room !== "citizens" || !currentCitizen) {
       return undefined;
     }
-    return streetPlacements.find((entry) => entry.citizen.citizen_id === currentCitizen.citizen_id);
-  }, [currentCitizen, room, streetPlacements]);
+    return streetPlacementMap.get(currentCitizen.citizen_id);
+  }, [currentCitizen, room, streetPlacementMap]);
   const citizenInteractionReady = room === "citizens" && currentCitizenDistance < STREET_READY_DISTANCE;
   const citizenCardReady = room === "citizens" && citizenCardDistance < STREET_READY_DISTANCE;
   const voiceChannelConnecting = presence.status === "connecting" && presence.liveMode === "voice";
@@ -1453,17 +1503,13 @@ export default function SceneViewport({
     room === "citizens" && streetAutoTargetRef.current?.kind === "approach" ? streetAutoTargetRef.current.citizenId : undefined;
   const voiceButtonLabel =
     voiceChannelConnecting
-      ? "Cancel joining"
+      ? "Joining..."
       : presence.status === "error"
         ? "Retry"
       : voiceChannelOpen
         ? presence.muted
-          ? "Resume"
-          : "Pause"
-        : room === "debate" && auditoriumMode === "town_hall" && (townHallState?.readyForNextQuestion ?? true)
-          ? "Call on voter"
-        : room === "debate" && auditoriumMode === "town_hall" && Boolean(townHallState?.active && townHallState?.question)
-          ? "Answer voter"
+          ? "Resume mic"
+          : "Pause mic"
         : room === "citizens"
           ? currentCitizen
             ? citizenInteractionReady
@@ -1474,36 +1520,12 @@ export default function SceneViewport({
             : "Pick someone"
           : "Speak";
   const voiceButtonHint =
-    room === "citizens"
-      ? voiceChannelConnecting
-        ? "Opening street line"
-        : presence.status === "error" || textChannelPreparing
-          ? ""
-          : currentCitizen
-            ? presence.voicePhase === "responding"
-              ? `${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)} live`
-              : voiceChannelOpen
-                ? presence.muted
-                  ? `Resume ${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)}`
-                  : `Pause ${boardSnippet((liveCitizen ?? currentCitizen).display_name, 18)}`
-                : citizenInteractionReady
-                  ? boardSnippet(currentCitizen.role, 20)
-                  : approachingCitizenId === currentCitizen.citizen_id
-                    ? "Moving in"
-                    : "Move closer"
-            : "Choose a person"
-      : room === "debate" && auditoriumMode === "town_hall" && (townHallState?.readyForNextQuestion ?? true)
-        ? "Bring one voter to the mic"
+    voiceChannelConnecting
+      ? "Opening"
+      : presence.status === "error"
+        ? "Retry connection"
         : "";
   const voiceTriggerCompact = !voiceButtonHint;
-  const streetGuide =
-    room === "citizens"
-      ? currentCitizen
-        ? citizenInteractionReady
-          ? [`Press Speak to talk with ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "You can still move rooms with a simple voice command."]
-          : [`Click a person, then move closer to ${compactCitizenLabel(currentCitizen.display_name, 18)}.`, "If you want help picking, just say talk to someone nearby."]
-        : ["Click a person to focus them, or say talk to someone nearby.", "You can jump rooms with plain voice commands like debate or single advisor."]
-      : [];
   const showSceneCaption =
     Boolean(captionText) &&
     councilCaptionVisible &&
@@ -1513,7 +1535,22 @@ export default function SceneViewport({
       !currentCitizen ||
       currentCitizen.citizen_id === activeCitizen?.citizen_id
     );
-  const showTownHallBanner = room === "debate" && auditoriumMode === "town_hall" && Boolean(townHallState);
+  const townHallBannerActive =
+    townHallState?.phase === "generating" ||
+    townHallState?.phase === "voter_speaking" ||
+    townHallState?.phase === "player_turn" ||
+    townHallState?.phase === "opponent_turn" ||
+    Boolean(townHallState?.error);
+  const showTownHallBanner =
+    room === "debate" &&
+    auditoriumMode === "town_hall" &&
+    Boolean(townHallState) &&
+    townHallBannerActive;
+  const denseBottomChrome =
+    textComposerOpen ||
+    showStageAdvance ||
+    showTownHallQuestionAction ||
+    showTownHallBanner;
   const textComposerInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -1556,7 +1593,11 @@ export default function SceneViewport({
   const enableSceneShadows = room !== "citizens";
 
   return (
-    <section className={`scene scene--${room} scene--theme-${themeMode} ${panelsOpen ? "scene--panels-open" : ""}`}>
+    <section
+      className={`scene scene--${room} scene--theme-${themeMode} ${panelsOpen ? "scene--panels-open" : ""} ${
+        denseBottomChrome ? "scene--dense-bottom" : ""
+      }`}
+    >
       <div className="scene__canvas">
         <Canvas
           dpr={canvasDpr}
@@ -1583,7 +1624,7 @@ export default function SceneViewport({
             streetExtras={streetExtras}
             streetAutoTargetRef={streetAutoTargetRef}
             playerStateRef={playerStateRef}
-            playerPose={playerPose}
+            playerPose={playerPoseSnapshot}
             hoveredCitizenId={hoveredCitizenId}
             panelsOpen={panelsOpen}
             overlayActive={overlayActive}
@@ -1612,7 +1653,7 @@ export default function SceneViewport({
           <div className="scene__chips">
             <span>{stage.phase_label}</span>
             <span>{stage.year_label}</span>
-            <span>{stage.tracking.approval.display} approval</span>
+            <span>{stagePollingReady ? `${stage.tracking.approval.display} approval` : "Approval pending"}</span>
             {presence.liveMode === "voice" && presence.status === "connected"
               ? <span>{presence.muted ? "mic paused" : "live mic"}</span>
               : null}
@@ -1627,24 +1668,39 @@ export default function SceneViewport({
               {detailsOpen ? "Hide details" : "Details"}
             </button>
           ) : null}
+          {showTownHallQuestionAction ? (
+            <button
+              className={`scene-control scene-control--action ${townHallQuestionDisabled ? "scene-control--disabled" : ""}`}
+              onClick={() => onTownHallQuestion?.()}
+              disabled={townHallQuestionDisabled}
+              title="Open the floor for the next audience question."
+            >
+              Q&A
+            </button>
+          ) : null}
+          {showStageAdvance ? (
+            <button
+              className={`scene-control scene-control--action ${stageAdvanceDisabled ? "scene-control--disabled" : ""}`}
+              onClick={() => onStageAdvance?.()}
+              disabled={stageAdvanceDisabled}
+              title={stageAdvanceHint}
+            >
+              Next stage
+            </button>
+          ) : null}
           {onOpenReels ? (
             <button className="scene-control" onClick={onOpenReels}>
               {reelsLabel}
             </button>
           ) : null}
-          {onToggleTheme ? (
+          {panelsOpen && onToggleTheme ? (
             <button className="scene-control" onClick={onToggleTheme}>
               {themeLabel}
             </button>
           ) : null}
-          {onToggleFullscreen ? (
+          {panelsOpen && onToggleFullscreen ? (
             <button className="scene-control" onClick={onToggleFullscreen}>
               {fullscreenLabel}
-            </button>
-          ) : null}
-          {onRestart ? (
-            <button className="scene-control" onClick={() => void onRestart()}>
-              New setup
             </button>
           ) : null}
         </div>
@@ -1653,20 +1709,9 @@ export default function SceneViewport({
       {!overlayActive ? (
         <>
           <div className="scene__channel-stack">
-            {showStageAdvance ? (
-              <button
-                className={`scene__stage-action ${stageAdvanceDisabled ? "scene__stage-action--disabled" : ""}`}
-                onClick={() => onStageAdvance?.()}
-                disabled={stageAdvanceDisabled}
-                title={stageAdvanceHint}
-              >
-                <span>{stageAdvanceLabel}</span>
-                {stageAdvanceHint ? <small>{stageAdvanceHint}</small> : null}
-              </button>
-            ) : null}
             <div className={`scene__channel-bar ${textComposerOpen ? "scene__channel-bar--text-open" : ""}`}>
               <button
-                className={`scene__voice-trigger scene__voice-trigger--scene ${
+                className={`scene__voice-trigger scene__voice-trigger--scene ${ 
                   conversationMicLive
                     ? "scene__voice-trigger--live"
                     : voiceChannelOpen && (presence.voicePhase === "waiting" || presence.voicePhase === "responding" || presence.muted)
@@ -1688,7 +1733,6 @@ export default function SceneViewport({
                 </span>
                 <span className="scene__voice-trigger-copy">
                   <strong>{voiceButtonLabel}</strong>
-                  {voiceButtonHint ? <small>{voiceButtonHint}</small> : null}
                 </span>
               </button>
               {textComposerAvailable && textComposerOpen ? (
@@ -1707,15 +1751,16 @@ export default function SceneViewport({
                 </form>
               ) : null}
               {textComposerAvailable ? (
-                <button
-                  type="button"
-                  className={`scene__text-trigger ${textComposerOpen ? "scene__text-trigger--active" : ""}`}
-                  onClick={onTextComposerToggle}
-                  aria-label={textComposerOpen ? "Hide text input" : "Open text input"}
-                  title={textComposerOpen ? "Hide text input" : "Type instead"}
-                >
+              <button
+                type="button"
+                className={`scene__text-trigger ${textComposerOpen ? "scene__text-trigger--active" : ""}`}
+                onClick={onTextComposerToggle}
+                aria-label={textComposerOpen ? "Hide text input" : "Open text input"}
+                aria-pressed={textComposerOpen}
+                title={textComposerOpen ? "Hide text input" : "Type instead"}
+              >
                   <span aria-hidden="true">⌨</span>
-                  <strong>{textComposerOpen ? "Hide" : "Type"}</strong>
+                  <span className="sr-only">{textComposerOpen ? "Hide text input" : "Open text input"}</span>
                 </button>
               ) : null}
             </div>
@@ -1731,7 +1776,6 @@ export default function SceneViewport({
 
           {!panelsOpen && showSceneCaption && !showTownHallBanner && !citizenCardCitizen ? (
             <>
-              {councilFloorText ? <div className="scene-council-floor">{councilFloorText}</div> : null}
               <div className={`scene__caption scene__caption--${captionSpeaker ?? "assistant"} scene__caption--centered`}>
                 <span>
                   {captionSpeaker === "user"
@@ -1767,17 +1811,9 @@ export default function SceneViewport({
               <small className="scene__citizen-chip-meta">
                 {boardSnippet(`${citizenCardCitizen.role} · ${citizenCardCitizen.region}`, 72)}
               </small>
-              <small>{citizenCardMoment(citizenCardCitizen)}</small>
               <small className="scene__citizen-chip-status">
                 {citizenCardReady ? "ready to talk" : "move closer to talk"}
               </small>
-            </div>
-          ) : null}
-          {!panelsOpen && room === "citizens" && streetGuide.length > 0 && !citizenConversationLocked && !voiceChannelOpen ? (
-            <div className="scene__street-guide">
-              {streetGuide.map((hint) => (
-                <span key={hint}>{hint}</span>
-              ))}
             </div>
           ) : null}
         </>
@@ -1852,6 +1888,10 @@ function SceneWorld({
 }: SceneWorldProps) {
   const advisorDaylight = room === "advisor" && themeMode === "light";
   const citizenDaylight = room === "citizens" && themeMode === "light";
+  const streetPlacementMap = useMemo(
+    () => new Map(streetPlacements.map((entry) => [entry.citizen.citizen_id, entry])),
+    [streetPlacements],
+  );
   const citizenConversationLocked =
     room === "citizens" &&
     Boolean(activeCitizen?.citizen_id) &&
@@ -1863,10 +1903,10 @@ function SceneWorld({
     );
   const voiceChannelOpen = presence.liveMode === "voice" && presence.status === "connected";
   const advisorCouncilMode = room === "advisor" && advisorMode === "council";
-  const streetSelectionLocked = room === "citizens" && (citizenConversationLocked || (voiceChannelOpen && !presence.muted));
+  const streetSelectionLocked = room === "citizens" && citizenConversationLocked;
   const targetPosition =
     room === "citizens"
-      ? streetPlacements.find((entry) => entry.citizen.citizen_id === activeCitizen?.citizen_id)?.position ?? counterpartPosition(room, advisorMode)
+      ? streetPlacementMap.get(activeCitizen?.citizen_id ?? "")?.position ?? counterpartPosition(room, advisorMode)
       : counterpartPosition(room, advisorMode);
   const rankedStreetPlacements = useMemo(
     () =>
@@ -2036,7 +2076,7 @@ function SceneWorld({
       <PerspectiveCamera
         makeDefault
         position={config.camera}
-        fov={room === "citizens" ? 30 : room === "advisor" ? (advisorCouncilMode ? 36 : 37) : room === "debate" ? 34 : 34}
+        fov={room === "citizens" ? 30 : room === "advisor" ? (advisorCouncilMode ? 40 : 37) : room === "debate" ? 34 : 34}
       />
       <color attach="background" args={[config.background]} />
       <fog attach="fog" args={[config.background, config.fogNear, config.fogFar]} />
@@ -2136,12 +2176,17 @@ function SceneWorld({
               scale={appearance.scale}
               palette={appearance.palette}
               silhouette={appearance.silhouette}
-              interactive={!overlayActive}
+              interactive={!overlayActive && !streetSelectionLocked}
               highlighted={
                 citizen.citizen_id === streetSelectionCitizenId ||
                 citizen.citizen_id === activeCitizen?.citizen_id
               }
-              onHoverChange={(hovered) => onHoveredCitizenChange?.(hovered ? citizen.citizen_id : null)}
+              onHoverChange={(hovered) => {
+                if (streetSelectionLocked) {
+                  return;
+                }
+                onHoveredCitizenChange?.(hovered ? citizen.citizen_id : null);
+              }}
               onSelect={() => handleStreetCitizenSelect({ citizen, position, appearance })}
             />
           ))
@@ -2158,6 +2203,7 @@ function SceneWorld({
               silhouette={appearance.silhouette}
               animate={false}
               interactive={false}
+              shadows={false}
               opacity={0.72}
             />
           ))
@@ -2174,6 +2220,7 @@ function SceneWorld({
               silhouette={appearance.silhouette}
               animate={false}
               interactive={false}
+              shadows={false}
               opacity={0.3}
             />
           ))
@@ -2181,11 +2228,12 @@ function SceneWorld({
       {advisorCouncilMode
         ? councilAdvisors.map((advisor) => {
             const leadingSpeaker = councilSpeaker;
+            const advisorOwnsFloor = leadingSpeaker === advisor.name;
             const advisorActivity =
-              leadingSpeaker && presence.counterpartActivity === "speaking"
-                ? leadingSpeaker === advisor.name
+              advisorOwnsFloor
+                ? presence.counterpartActivity === "speaking"
                   ? "speaking"
-                  : "idle"
+                  : "listening"
                 : presence.counterpartActivity === "listening" || presence.playerActivity === "speaking"
                   ? "listening"
                   : "idle";
@@ -2198,7 +2246,8 @@ function SceneWorld({
                   scale={Math.abs(advisor.position[0]) < 0.9 ? 0.66 : 0.62}
                   palette={advisor.palette}
                   interactive={false}
-                  highlighted={leadingSpeaker === advisor.name}
+                  highlighted={advisorOwnsFloor}
+                  floorActive={advisorOwnsFloor}
                 />
                 <Html position={[advisor.position[0], 1.58, advisor.position[2] + 0.18]} center distanceFactor={11.6}>
                   <div className={`scene-council-label ${leadingSpeaker === advisor.name ? "scene-council-label--active" : ""}`}>
@@ -2288,6 +2337,26 @@ function SceneWorld({
 const BOARD_HAND_FONT = "'Segoe Print', 'Bradley Hand', 'Chalkboard SE', 'Marker Felt', 'Noteworthy', cursive";
 const BOARD_SANS_FONT = "'Avenir Next Condensed', 'DIN Condensed', 'IBM Plex Sans', 'Avenir Next', 'Segoe UI', sans-serif";
 const BOARD_MONO_FONT = "'SFMono-Regular', 'IBM Plex Mono', 'Menlo', 'Consolas', monospace";
+const BOARD_TEXTURE_CACHE_LIMIT = 18;
+const VENUE_TEXTURE_CACHE_LIMIT = 10;
+const BOARD_TEXTURE_CACHE = new Map<string, THREE.CanvasTexture>();
+const VENUE_TEXTURE_CACHE = new Map<string, THREE.CanvasTexture>();
+
+function rememberTexture(cache: Map<string, THREE.CanvasTexture>, key: string, texture: THREE.CanvasTexture, limit: number) {
+  if (cache.has(key)) {
+    return cache.get(key)!;
+  }
+  if (cache.size >= limit) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey) {
+      const staleTexture = cache.get(oldestKey);
+      staleTexture?.dispose();
+      cache.delete(oldestKey);
+    }
+  }
+  cache.set(key, texture);
+  return texture;
+}
 
 function boardRoundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   const insetRadius = Math.min(radius, width / 2, height / 2);
@@ -2331,22 +2400,26 @@ function boardWrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: n
   return lines.slice(0, maxLines);
 }
 
-function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
+function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature: string) {
+  const cachedTexture = BOARD_TEXTURE_CACHE.get(signature);
+  if (cachedTexture) {
+    return cachedTexture;
+  }
   const canvas = document.createElement("canvas");
-  canvas.width = 5120;
-  canvas.height = 2816;
+  canvas.width = 2560;
+  canvas.height = 1440;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return new THREE.CanvasTexture(canvas);
   }
 
-  const paper = themeMode === "light" ? "#eadbc7" : "#dcc8b0";
-  const paperEdge = themeMode === "light" ? "#c39a72" : "#b6895e";
-  const border = themeMode === "light" ? "#1a1009" : "#27150a";
-  const line = themeMode === "light" ? "rgba(40, 22, 11, 0.36)" : "rgba(69, 42, 18, 0.28)";
-  const marker = themeMode === "light" ? "#140b05" : "#170d05";
-  const markerSoft = themeMode === "light" ? "#563523" : "#6f4728";
-  const accent = themeMode === "light" ? "#7a4720" : "#8f5628";
+  const paper = "#e7d8c3";
+  const paperEdge = "#c89d71";
+  const border = "#21130a";
+  const line = "rgba(50, 31, 16, 0.28)";
+  const marker = "#140b05";
+  const markerSoft = "#573726";
+  const accent = "#7b4820";
   const paperGradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
   paperGradient.addColorStop(0, paper);
   paperGradient.addColorStop(1, paperEdge);
@@ -2355,14 +2428,14 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
 
   const vignette = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 640, canvas.width / 2, canvas.height / 2, canvas.width * 0.68);
   vignette.addColorStop(0, "rgba(255,255,255,0)");
-  vignette.addColorStop(1, themeMode === "light" ? "rgba(83, 58, 34, 0.08)" : "rgba(55, 36, 18, 0.12)");
+  vignette.addColorStop(1, "rgba(78, 54, 32, 0.09)");
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.strokeStyle = border;
   ctx.lineWidth = 16;
   ctx.strokeRect(42, 42, canvas.width - 84, canvas.height - 84);
 
-  ctx.fillStyle = themeMode === "light" ? "rgba(104, 79, 57, 0.022)" : "rgba(66, 44, 24, 0.03)";
+  ctx.fillStyle = "rgba(94, 68, 45, 0.024)";
   for (let index = 0; index < 48; index += 1) {
     const width = 52 + (index % 7) * 18;
     const height = 6 + (index % 5) * 2;
@@ -2377,9 +2450,15 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
 
   if (panel.variant === "policy") {
     const policyItems = (panel.list?.slice(0, 3) ?? ["", "", ""]);
+    const rowGap = 430;
+    const rowStartY = 416;
+    const itemFontSize = 92;
+    const numberFontSize = 112;
+    const lineStep = 72;
+    const maxPolicyLines = 3;
     ctx.strokeStyle = line;
     ctx.lineWidth = 2.5;
-    for (let y = 246; y < canvas.height - 152; y += 118) {
+    for (let y = 246; y < canvas.height - 152; y += 116) {
       ctx.beginPath();
       ctx.moveTo(138, y);
       ctx.lineTo(canvas.width - 138, y);
@@ -2387,29 +2466,29 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
     }
     ctx.fillStyle = marker;
     policyItems.forEach((item, index) => {
-      const rowY = 520 + index * 400;
+      const rowY = rowStartY + index * rowGap;
       ctx.strokeStyle = line;
-      ctx.lineWidth = 6;
+      ctx.lineWidth = 5;
       ctx.beginPath();
-      ctx.moveTo(228, rowY + 98);
-      ctx.lineTo(canvas.width - 228, rowY + 98);
+      ctx.moveTo(228, rowY + lineStep - 10);
+      ctx.lineTo(canvas.width - 228, rowY + lineStep - 10);
       ctx.stroke();
       ctx.fillStyle = markerSoft;
-      ctx.font = `700 144px ${BOARD_SANS_FONT}`;
-      ctx.fillText(`${index + 1}.`, 340, rowY);
+      ctx.font = `700 ${numberFontSize}px ${BOARD_SANS_FONT}`;
+      ctx.fillText(`${index + 1}.`, 332, rowY);
       if (item) {
         ctx.fillStyle = marker;
-        ctx.font = `600 132px ${BOARD_HAND_FONT}`;
-        const lines = boardWrapLines(ctx, item, 3380, 3);
+        ctx.font = `600 ${itemFontSize}px ${BOARD_HAND_FONT}`;
+        const lines = boardWrapLines(ctx, boardSnippet(item, 94), canvas.width - 960, maxPolicyLines);
         lines.forEach((lineItem, lineIndex) => {
-          ctx.fillText(lineItem, 720, rowY + lineIndex * 104);
+          ctx.fillText(lineItem, 700, rowY + lineIndex * lineStep);
         });
       } else {
         ctx.strokeStyle = "rgba(108, 88, 67, 0.18)";
         ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(760, rowY + 6);
-        ctx.lineTo(canvas.width - 248, rowY + 6);
+        ctx.moveTo(740, rowY + 4);
+        ctx.lineTo(canvas.width - 248, rowY + 2);
         ctx.stroke();
       }
     });
@@ -2437,8 +2516,8 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
 
     const isMoodVariant = panel.variant === "mood";
     const isStatsVariant = panel.variant === "stats";
-    const statRows = (panel.stats ?? []).slice(0, 3);
-    const signalRows = (panel.columns ?? []).slice(0, 2);
+      const statRows = (panel.stats ?? []).slice(0, 3);
+    const signalRows = (panel.columns ?? []).slice(0, 3);
     const statBandTop = cursorY + 34;
     const statBandWidth = canvas.width - statsX * 2;
 
@@ -2446,40 +2525,40 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
       const primaryStatRows = statRows.slice(0, 3);
       const visibleSignals = signalRows.slice(0, 3);
       ctx.fillStyle = accent;
-      ctx.fillRect(statsX, statBandTop - 12, 268, 12);
+      ctx.fillRect(statsX, statBandTop - 12, 286, 12);
 
-      const metricColumns = Math.max(1, primaryStatRows.length);
-      const metricGapX = 56;
-      const metricCellWidth = (statBandWidth - metricGapX * Math.max(0, metricColumns - 1)) / metricColumns;
-      const metricBaseY = statBandTop + 74;
+      const metricBaseY = statBandTop + 98;
+      const metricGap = 48;
+      const metricCardWidth = (statBandWidth - metricGap * (primaryStatRows.length - 1)) / Math.max(primaryStatRows.length, 1);
       primaryStatRows.forEach((row, index) => {
-        const x = statsX + index * (metricCellWidth + metricGapX);
+        const x = statsX + index * (metricCardWidth + metricGap);
         const y = metricBaseY;
-        const cardHeight = 312;
-        const cardGradient = ctx.createLinearGradient(x, y - 34, x, y + cardHeight);
-        cardGradient.addColorStop(0, themeMode === "light" ? "rgba(248, 239, 224, 0.9)" : "rgba(70, 56, 44, 0.9)");
-        cardGradient.addColorStop(1, themeMode === "light" ? "rgba(234, 220, 200, 0.74)" : "rgba(34, 27, 21, 0.88)");
-        boardRoundRect(ctx, x - 12, y - 54, metricCellWidth, cardHeight, 34);
-        ctx.fillStyle = cardGradient;
-        ctx.fill();
-        ctx.strokeStyle = themeMode === "light" ? "rgba(76, 54, 34, 0.12)" : "rgba(244, 236, 223, 0.14)";
-        ctx.lineWidth = 4;
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(x, y + 150);
+        ctx.lineTo(x + metricCardWidth, y + 150);
         ctx.stroke();
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 84px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 60px ${BOARD_SANS_FONT}`;
         ctx.fillText(row.label.toUpperCase(), x, y);
         ctx.fillStyle = marker;
-        ctx.font = `700 216px ${BOARD_HAND_FONT}`;
-        ctx.fillText(row.value, x, y + 164);
+        ctx.font = `700 154px ${BOARD_HAND_FONT}`;
+        ctx.fillText(row.value, x, y + 118);
+        if (row.note) {
+          ctx.fillStyle = markerSoft;
+          ctx.font = `600 40px ${BOARD_SANS_FONT}`;
+          ctx.fillText(boardSnippet(row.note, 28), x, y + 200);
+        }
       });
 
-      const signalTop = metricBaseY + 356;
+      const signalTop = metricBaseY + 292;
       if (visibleSignals.length > 0) {
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 92px ${BOARD_SANS_FONT}`;
-        ctx.fillText("LATEST READS", statsX, signalTop);
+        ctx.font = `700 72px ${BOARD_SANS_FONT}`;
+        ctx.fillText("STATE OF PLAY", statsX, signalTop);
         ctx.fillStyle = accent;
-        ctx.fillRect(statsX, signalTop + 16, 214, 8);
+        ctx.fillRect(statsX, signalTop + 20, 218, 8);
       }
 
       visibleSignals.forEach((column, index) => {
@@ -2490,44 +2569,59 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         const label = typeof lineItem === "string" ? column.title : lineItem.label;
         const value = typeof lineItem === "string" ? lineItem : lineItem.answer;
         const detail = typeof lineItem === "string" ? "" : lineItem.share ?? "";
-        const y = signalTop + 88 + index * 184;
-        const cardHeight = 190;
-        const cardGradient = ctx.createLinearGradient(statsX, y - 42, statsX, y + cardHeight);
-        cardGradient.addColorStop(0, themeMode === "light" ? "rgba(247, 238, 223, 0.84)" : "rgba(67, 55, 43, 0.86)");
-        cardGradient.addColorStop(1, themeMode === "light" ? "rgba(233, 219, 199, 0.68)" : "rgba(31, 25, 20, 0.82)");
-        boardRoundRect(ctx, statsX - 10, y - 42, statBandWidth + 20, cardHeight, 28);
-        ctx.fillStyle = cardGradient;
-        ctx.fill();
+        const y = signalTop + 96 + index * 186;
         ctx.strokeStyle = line;
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(statsX, y + 148);
+        ctx.lineTo(canvas.width - statsX, y + 148);
         ctx.stroke();
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 64px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 52px ${BOARD_SANS_FONT}`;
         ctx.fillText(column.title.toUpperCase(), statsX, y);
         ctx.fillStyle = marker;
-        ctx.font = `700 132px ${BOARD_HAND_FONT}`;
-        const answerWidth = detail ? statBandWidth - 540 : statBandWidth - 160;
+        ctx.font = `700 96px ${BOARD_HAND_FONT}`;
+        const answerWidth = detail ? statBandWidth - 600 : statBandWidth - 140;
         const answerLines = boardWrapLines(ctx, value, answerWidth, 2);
         answerLines.forEach((lineText, lineIndex) => {
-          ctx.fillText(lineText, statsX, y + 94 + lineIndex * 58);
+          ctx.fillText(lineText, statsX, y + 76 + lineIndex * 56);
         });
         if (detail) {
           ctx.textAlign = "right";
           ctx.fillStyle = marker;
-          ctx.font = `700 108px ${BOARD_HAND_FONT}`;
+          ctx.font = `700 116px ${BOARD_HAND_FONT}`;
           ctx.fillText(detail, canvas.width - statsX, y + 88);
           ctx.textAlign = "left";
         }
         if (label && label.toLowerCase() !== column.title.toLowerCase()) {
           ctx.fillStyle = markerSoft;
-          ctx.font = `600 48px ${BOARD_SANS_FONT}`;
+          ctx.font = `600 38px ${BOARD_SANS_FONT}`;
           const labelLines = boardWrapLines(ctx, boardSnippet(label, 68), statBandWidth - 180, 1);
           labelLines.forEach((lineText, lineIndex) => {
-            ctx.fillText(lineText, statsX, y + 146 + lineIndex * 30);
+            ctx.fillText(lineText, statsX, y + 138 + lineIndex * 30);
           });
         }
       });
+
+      if (panel.footerText) {
+        const footerTop = signalTop + 104 + visibleSignals.length * 186 + 10;
+        ctx.fillStyle = markerSoft;
+        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
+        ctx.fillText((panel.footerLabel ?? "Macro read").toUpperCase(), statsX, footerTop);
+        ctx.fillStyle = accent;
+        ctx.fillRect(statsX, footerTop + 17, 152, 7);
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 4;
+        boardRoundRect(ctx, statsX - 8, footerTop + 42, statBandWidth + 16, 162, 24);
+        ctx.stroke();
+        ctx.fillStyle = marker;
+        ctx.font = `600 48px ${BOARD_SANS_FONT}`;
+        const footerLines = boardWrapLines(ctx, panel.footerText, statBandWidth - 82, 2);
+        footerLines.forEach((lineText, lineIndex) => {
+          ctx.fillText(lineText, statsX + 24, footerTop + 100 + lineIndex * 48);
+        });
+      }
     } else if (isStatsVariant) {
       const primaryStatRows = statRows.slice(0, 4);
       const visibleSignals = signalRows.slice(0, 2);
@@ -2554,6 +2648,11 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         ctx.textAlign = "right";
         ctx.font = `700 160px ${BOARD_MONO_FONT}`;
         ctx.fillText(row.value, canvas.width - statsX, lineY + 78);
+        if (row.note) {
+          ctx.fillStyle = accent;
+          ctx.font = `700 42px ${BOARD_SANS_FONT}`;
+          ctx.fillText(boardSnippet(row.note, 32).toUpperCase(), statsX, lineY + 154);
+        }
         ctx.textAlign = "left";
       });
 
@@ -2678,7 +2777,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
       const signalTop = statLineY + 108;
       if (signalRows.length > 0) {
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 44px ${BOARD_SANS_FONT}`;
         ctx.fillText("POLL PULSE", statsX, signalTop - 20);
       }
 
@@ -2692,7 +2791,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         const detail = typeof lineItem === "string" ? undefined : lineItem.share;
         const signalWidth = (statBandWidth - 28) / signalRows.length;
         const x = statsX + index * (signalWidth + 28);
-        const y = signalTop + index * 328;
+        const y = signalTop + index * 320;
         const rowHeight = 246;
 
         ctx.strokeStyle = line;
@@ -2703,18 +2802,18 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         ctx.stroke();
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 44px ${BOARD_SANS_FONT}`;
         ctx.fillText(column.title.toUpperCase(), x, y + 28);
         ctx.fillStyle = accent;
         ctx.fillRect(x, y + 50, 132, 8);
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 38px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 36px ${BOARD_SANS_FONT}`;
         ctx.fillText(boardSnippet(label, 28), x, y + 114);
 
         if (value) {
           ctx.fillStyle = marker;
-          ctx.font = `700 98px ${BOARD_HAND_FONT}`;
+          ctx.font = `700 92px ${BOARD_HAND_FONT}`;
           const valueLines = boardWrapLines(ctx, boardSnippet(value, 32), signalWidth - 420, 1);
           valueLines.forEach((lineText) => {
             ctx.fillText(lineText, x, y + 184);
@@ -2724,10 +2823,10 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
         if (detail) {
           ctx.textAlign = "right";
           ctx.fillStyle = marker;
-          ctx.font = `700 120px ${BOARD_MONO_FONT}`;
+          ctx.font = `700 112px ${BOARD_MONO_FONT}`;
           ctx.fillText(detail, x + signalWidth, y + 146);
           ctx.fillStyle = markerSoft;
-          ctx.font = `700 30px ${BOARD_SANS_FONT}`;
+          ctx.font = `700 28px ${BOARD_SANS_FONT}`;
           ctx.fillText("TOP SHARE", x + signalWidth, y + 40);
           ctx.textAlign = "left";
         }
@@ -2742,7 +2841,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark") {
   texture.anisotropy = 4;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
-  return texture;
+  return rememberTexture(BOARD_TEXTURE_CACHE, signature, texture, BOARD_TEXTURE_CACHE_LIMIT);
 }
 
 function boardPanelSignature(panel: BoardPanel, themeMode: "light" | "dark") {
@@ -2765,10 +2864,28 @@ function boardPanelSignature(panel: BoardPanel, themeMode: "light" | "dark") {
   });
 }
 
-function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
+function venueScreenSignature(stage: StagePackage, themeMode: "light" | "dark") {
+  return JSON.stringify({
+    themeMode,
+    title: stage.title,
+    year: stage.year_label,
+    phase: stage.phase_label,
+    metrics: boardMetricsKey(stage),
+    polls: boardPollsKey(stage),
+    roomBrief: stageRoomBrief(stage),
+    macroRead: boardMacroRead(stage),
+    policyNotes: stage.policy_notes.slice(0, 5),
+  });
+}
+
+function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark", signature: string) {
+  const cachedTexture = VENUE_TEXTURE_CACHE.get(signature);
+  if (cachedTexture) {
+    return cachedTexture;
+  }
   const canvas = document.createElement("canvas");
-  canvas.width = 3200;
-  canvas.height = 1400;
+  canvas.width = 2560;
+  canvas.height = 1180;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return new THREE.CanvasTexture(canvas);
@@ -2810,7 +2927,7 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
       })()
     : null;
   const platformNotes = stage.policy_notes
-    .slice(0, 3)
+    .slice(0, 5)
     .map((note) => boardPolicyLabel(note));
 
   ctx.fillStyle = base;
@@ -2849,11 +2966,7 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
     ctx.fillText(votePoll.share, 170, 350);
   }
 
-  const statRows: Array<{ label: string; value: string; note?: string }> = [
-    { label: "Approval", value: stage.tracking.approval.display },
-    { label: "Vote today", value: stage.tracking.vote_share_player.display },
-    { label: "Better off", value: stage.tracking.better_off.display },
-  ];
+  const statRows = boardMetricRows(stage).slice(0, 4);
 
   let statY = 438;
   statRows.forEach((row) => {
@@ -2983,7 +3096,7 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark") {
   texture.anisotropy = 16;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
-  return texture;
+  return rememberTexture(VENUE_TEXTURE_CACHE, signature, texture, VENUE_TEXTURE_CACHE_LIMIT);
 }
 
 function VenueScreen({
@@ -2999,8 +3112,8 @@ function VenueScreen({
   stage: StagePackage;
   themeMode: "light" | "dark";
 }) {
-  const texture = useMemo(() => venueScreenTexture(stage, themeMode), [stage, themeMode]);
-  useEffect(() => () => texture.dispose(), [texture]);
+  const textureSignature = useMemo(() => venueScreenSignature(stage, themeMode), [stage, themeMode]);
+  const texture = useMemo(() => venueScreenTexture(stage, themeMode, textureSignature), [textureSignature]);
 
   return (
     <group position={position}>
@@ -3040,11 +3153,10 @@ function MountedBoard({
 }) {
   const { gl } = useThree();
   const panelSignature = boardPanelSignature(panel, themeMode);
-  const texture = useMemo(() => boardTexture(panel, themeMode), [panelSignature, themeMode]);
+  const texture = useMemo(() => boardTexture(panel, themeMode, panelSignature), [panelSignature, themeMode]);
   useEffect(() => {
     texture.anisotropy = Math.min(16, gl.capabilities.getMaxAnisotropy());
     texture.needsUpdate = true;
-    return () => texture.dispose();
   }, [gl, texture]);
 
   return (
@@ -3066,12 +3178,16 @@ function MountedBoard({
         <boxGeometry args={[width * 0.94, 0.08, 0.08]} />
         <meshStandardMaterial color={themeMode === "light" ? "#735845" : "#3a2b22"} roughness={0.94} />
       </mesh>
-      <mesh position={[0, 0.008, 0.11]}>
+      <mesh position={[0, 0.008, 0.16]} renderOrder={8}>
         <planeGeometry args={[width - 0.06, height - 0.06]} />
         <meshBasicMaterial
           map={texture}
           color={themeMode === "light" ? "#f3e7d6" : "#ffffff"}
           toneMapped={false}
+          depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-2}
+          polygonOffsetUnits={-2}
         />
       </mesh>
     </group>
@@ -3126,40 +3242,39 @@ function AdvisorBoards({
     () => (
       notes.length > 0
         ? notes
-        : stage.authored_policy_axes.length > 0
-          ? stage.authored_policy_axes
-          : stage.suggested_policy_axes.length > 0
-            ? stage.suggested_policy_axes
-            : stage.tension_points
+        : stagePolicyAxes(stage, 5)
     ),
     [notes, stage],
   );
   const agendaNotes = useMemo(
-    () => fallbackAgendaSource.slice(0, 3).map((item) => boardPolicyLabel(item)),
+    () => fallbackAgendaSource.slice(0, 5).map((item) => boardPolicyLabel(item)),
     [fallbackAgendaSource, notesKey],
   );
   const statsKey = boardMetricsKey(stage);
   const statsRows = useMemo(() => boardMetricRows(stage), [statsKey]);
   const agendaKey = agendaNotes.join("|");
   const pollsKey = boardPollsKey(stage);
-  const moodColumns = useMemo(() => boardPublicMoodColumns(stage) ?? [], [pollsKey]);
+  const moodColumns = useMemo(() => boardPublicMoodColumns(stage) ?? [], [stage, pollsKey]);
   const moodKey = moodColumns
     .map((column) => `${column.id ?? column.title}:${column.title}:${column.lines.map((line) => typeof line === "string" ? line : `${line.label}|${line.answer}|${line.share ?? ""}`).join("~")}`)
     .join("||");
   const statsPanel = useMemo<BoardPanel>(() => ({
     variant: "mood",
     kicker: playerInPower ? "Public mood" : "Campaign mood",
-    stats: statsRows,
+    stats: statsRows.slice(0, 3),
     columns: moodColumns,
+    footerLabel: "World read",
+    footerText: boardSnippet(boardMacroRead(stage), 156),
   }), [
     moodKey,
     playerInPower,
+    stage,
     statsKey,
   ]);
   const policyPanel = useMemo<BoardPanel>(() => ({
     variant: "policy",
     kicker: playerInPower ? "Policy ideas" : "Campaign ideas",
-    list: (agendaNotes.length > 0 ? agendaNotes : ["", "", ""]).slice(0, 3),
+    list: (agendaNotes.length > 0 ? agendaNotes : ["", "", "", "", ""]).slice(0, 5),
   }), [agendaKey, playerInPower]);
   const statsBoardLayout =
     layout === "council"
@@ -3237,7 +3352,7 @@ function AdvisorBoards({
 
 function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes: string[]; themeMode: "light" | "dark" }) {
   const pollsKey = boardPollsKey(stage);
-  const moodColumns = useMemo(() => boardPublicMoodColumns(stage) ?? [], [pollsKey]);
+  const moodColumns = useMemo(() => boardPublicMoodColumns(stage) ?? [], [stage, pollsKey]);
   const statsKey = boardMetricsKey(stage);
   const statsRows = useMemo(() => boardMetricRows(stage), [statsKey]);
   const moodKey = moodColumns
@@ -3246,9 +3361,11 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
   const publicReadPanel = useMemo<BoardPanel>(() => ({
     variant: "mood",
     kicker: "Public mood",
-    stats: statsRows,
+    stats: statsRows.slice(0, 3),
     columns: moodColumns,
-  }), [moodKey, statsKey]);
+    footerLabel: "World read",
+    footerText: boardSnippet(boardMacroRead(stage), 156),
+  }), [moodKey, stage, statsKey]);
   const platformNotes = useMemo(
     () =>
       (
@@ -3256,11 +3373,9 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
           ? notes
           : stage.policy_notes.length > 0
             ? stage.policy_notes
-            : stage.authored_policy_axes.length > 0
-              ? stage.authored_policy_axes
-              : stage.suggested_policy_axes
+            : stagePolicyAxes(stage, 5)
       )
-        .slice(0, 3)
+        .slice(0, 5)
         .map((note) => boardPolicyLabel(note)),
     [notes, stage],
   );
@@ -3278,7 +3393,7 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
         panel={{
           variant: "policy",
           kicker: "Platform today",
-          list: (platformNotes.length > 0 ? platformNotes : ["", "", ""]).slice(0, 3),
+          list: (platformNotes.length > 0 ? platformNotes : ["", "", "", "", ""]).slice(0, 5),
         }}
         themeMode={themeMode}
       />
@@ -3418,10 +3533,10 @@ function SceneRig({
       const behindZ = -forwardZ * behindDistance;
       const desiredX = player.x + behindX + shoulderX * 0.3;
       const targetX = THREE.MathUtils.clamp(desiredX, STREET_BOUNDS.minX + cameraXMargin, STREET_BOUNDS.maxX - cameraXMargin);
-      const targetY = THREE.MathUtils.lerp(1.54, 1.44, encounterBlend);
+      const targetY = THREE.MathUtils.lerp(1.38, 1.3, encounterBlend);
       const targetZ = THREE.MathUtils.clamp(player.z + behindZ + shoulderZ * 0.32 + 0.04, STREET_BOUNDS.minZ + 4.4, STREET_BOUNDS.maxZ - 1.05);
       const baseLookX = THREE.MathUtils.clamp(player.x + forwardX * 3.6, STREET_BOUNDS.minX + lookXMargin, STREET_BOUNDS.maxX - lookXMargin);
-      const baseLookZ = player.z + forwardZ * 3.85;
+      const baseLookZ = player.z + forwardZ * 4.05;
       const focusBlend =
         streetFocus
           ? THREE.MathUtils.clamp(
@@ -3440,7 +3555,7 @@ function SceneRig({
       camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, follow);
       camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, follow);
       camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, follow);
-      camera.lookAt(smoothedFocusRef.current[0], 1.02, smoothedFocusRef.current[1]);
+      camera.lookAt(smoothedFocusRef.current[0], 0.9, smoothedFocusRef.current[1]);
       return;
     }
     const driftedTarget = target;
@@ -3484,43 +3599,73 @@ function AdvisorShell({ accent, fill, themeMode }: { accent: string; fill: strin
   return (
     <group>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[25.8, 25.8]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#ddd4c7" : "#5b4332"} roughness={0.95} metalness={0.04} />
+        <planeGeometry args={[27.8, 27.8]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#dcd1c2" : "#5a4232"} roughness={0.95} metalness={0.04} />
       </mesh>
-      <mesh position={[0, 3.9, -5.56]} receiveShadow>
-        <boxGeometry args={[13, 4.92, 0.32]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#efe4d7" : "#352822"} roughness={0.98} />
-      </mesh>
-      <mesh position={[0, 0.02, -0.15]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <circleGeometry args={[4.05, 80]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#86abc4" : "#27445e"} roughness={0.82} />
-      </mesh>
-      <mesh position={[0, 6.8, -0.4]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[23.4, 23.4]} />
+      <mesh position={[0, 6.86, -0.72]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[25.8, 24.8]} />
         <meshStandardMaterial color={themeMode === "light" ? "#fbf5eb" : "#221713"} roughness={0.98} />
       </mesh>
-      <RoundedBox args={[24.2, 7.48, 0.34]} radius={0.08} position={[0, 3.38, -5.42]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#f5ecdf" : "#403025"} roughness={0.95} />
+      <RoundedBox args={[25.4, 7.62, 0.34]} radius={0.08} position={[0, 3.42, -5.54]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#f4e9da" : "#403024"} roughness={0.95} />
       </RoundedBox>
-      <RoundedBox args={[23.12, 6.06, 0.16]} radius={0.06} position={[0, 3.12, -5.28]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#e6d9c8" : "#4c392d"} roughness={0.98} />
+      <RoundedBox args={[24.18, 6.08, 0.16]} radius={0.06} position={[0, 3.16, -5.28]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#e2d4c2" : "#4d392d"} roughness={0.98} />
       </RoundedBox>
-      <RoundedBox args={[23.24, 0.18, 0.18]} radius={0.04} position={[0, 6.76, -4.9]} castShadow receiveShadow>
+      <RoundedBox args={[0.36, 7.12, 14.2]} radius={0.12} position={[-12.96, 3.32, 0.14]} receiveShadow castShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#ebdece" : "#352923"} roughness={0.98} />
+      </RoundedBox>
+      <RoundedBox args={[0.36, 7.12, 14.2]} radius={0.12} position={[12.96, 3.32, 0.14]} receiveShadow castShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#ebdece" : "#352923"} roughness={0.98} />
+      </RoundedBox>
+      {[-10.2, 10.2].map((x) => (
+        <RoundedBox key={`advisor-fore-column-${x}`} args={[1.02, 6.02, 1.06]} radius={0.08} position={[x, 3.0, 6.42]} receiveShadow castShadow>
+          <meshStandardMaterial color={themeMode === "light" ? "#ddcfbe" : "#31241f"} roughness={0.98} />
+        </RoundedBox>
+      ))}
+      <mesh position={[0, 0.02, 0.12]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <circleGeometry args={[4.6, 88]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#87acc4" : "#28445d"} roughness={0.82} />
+      </mesh>
+      <mesh position={[0, 0.03, 0.12]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <ringGeometry args={[3.52, 4.4, 88]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#dfccb0" : "#c7ad88"} roughness={0.52} metalness={0.18} />
+      </mesh>
+      <RoundedBox args={[9.3, 5.42, 0.18]} radius={0.08} position={[0, 3.2, -5.16]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#e8dbc8" : "#453328"} roughness={0.98} />
+      </RoundedBox>
+      <RoundedBox args={[5.18, 3.48, 0.08]} radius={0.06} position={[0, 3.0, -5.02]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#c7b29c" : "#2a201b"} emissive={themeMode === "light" ? "#bcd0db" : "#1f3342"} emissiveIntensity={themeMode === "light" ? 0.08 : 0.16} roughness={0.74} />
+      </RoundedBox>
+      <RoundedBox args={[4.84, 0.2, 0.5]} radius={0.05} position={[0, 1.12, -4.94]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#b38b69" : "#5a4234"} roughness={0.82} />
+      </RoundedBox>
+      {[-7.9, 7.9].map((x, index) => (
+        <group key={`advisor-window-${x}`} position={[x, 3.34, -5.1]}>
+          <RoundedBox args={[3.52, 5.14, 0.14]} radius={0.08} castShadow receiveShadow>
+            <meshStandardMaterial color={themeMode === "light" ? "#e4d4c1" : "#46362c"} roughness={0.98} />
+          </RoundedBox>
+          <RoundedBox args={[2.82, 4.34, 0.06]} radius={0.05} position={[0, 0.02, 0.08]} receiveShadow>
+            <meshStandardMaterial color={themeMode === "light" ? "#adc0ca" : "#223743"} emissive={index === 0 ? accent : fill} emissiveIntensity={0.08} roughness={0.3} metalness={0.08} />
+          </RoundedBox>
+          <RoundedBox args={[0.12, 4.02, 0.08]} radius={0.04} position={[0, 0.02, 0.12]} receiveShadow>
+            <meshStandardMaterial color={themeMode === "light" ? "#d5c2aa" : "#5b4437"} roughness={0.86} />
+          </RoundedBox>
+          <RoundedBox args={[2.6, 0.12, 0.08]} radius={0.04} position={[0, 0.04, 0.12]} receiveShadow>
+            <meshStandardMaterial color={themeMode === "light" ? "#d5c2aa" : "#5b4437"} roughness={0.86} />
+          </RoundedBox>
+        </group>
+      ))}
+      <RoundedBox args={[24.1, 0.24, 0.22]} radius={0.04} position={[0, 6.76, -4.92]} castShadow receiveShadow>
         <meshStandardMaterial color={themeMode === "light" ? "#b89271" : "#5c4537"} roughness={0.9} />
       </RoundedBox>
-      <RoundedBox args={[22.1, 0.56, 0.28]} radius={0.05} position={[0, 0.28, -4.78]} castShadow receiveShadow>
+      <RoundedBox args={[22.8, 0.42, 0.24]} radius={0.05} position={[0, 0.24, -4.82]} castShadow receiveShadow>
         <meshStandardMaterial color={themeMode === "light" ? "#d1c0ae" : "#6d5039"} roughness={0.72} />
       </RoundedBox>
-      <RoundedBox args={[0.78, 0.16, 2.4]} radius={0.05} position={[-5.78, 0.22, -1.18]} receiveShadow>
-        <meshStandardMaterial color="#6a4935" roughness={0.72} />
-      </RoundedBox>
-      <RoundedBox args={[0.78, 0.16, 2.4]} radius={0.05} position={[5.78, 0.22, -1.18]} receiveShadow>
-        <meshStandardMaterial color="#6a4935" roughness={0.72} />
-      </RoundedBox>
-      {[-7.6, 7.6].map((x, index) => (
-        <mesh key={`advisor-lamp-${x}`} position={[x, 6.42, -0.42]} castShadow>
+      {[-6.6, 0, 6.6].map((x, index) => (
+        <mesh key={`advisor-ring-light-${x}`} position={[x, 6.2, -0.64]} castShadow>
           <sphereGeometry args={[0.12, 20, 20]} />
-          <meshStandardMaterial color={index === 0 ? accent : fill} emissive={index === 0 ? accent : fill} emissiveIntensity={0.45} />
+          <meshStandardMaterial color={index === 1 ? accent : fill} emissive={index === 1 ? accent : fill} emissiveIntensity={0.42} />
         </mesh>
       ))}
     </group>
@@ -3743,49 +3888,63 @@ function DebateShell({ accent, fill, themeMode }: { accent: string; fill: string
   return (
     <group>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[23.4, 28]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#bda492" : "#32231e"} roughness={0.98} />
+        <planeGeometry args={[25.8, 33.4]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#b5957c" : "#281d19"} roughness={0.98} />
       </mesh>
-      <mesh position={[0, 6.9, -1]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[23.4, 24]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#eee4d7" : "#201512"} roughness={0.98} />
+      <mesh position={[0, 7.15, -1.6]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[25.8, 27.8]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#f1e6d8" : "#1d1412"} roughness={0.98} />
       </mesh>
-      <mesh position={[0, 3.78, -5.22]} receiveShadow>
-        <boxGeometry args={[22.8, 7.8, 0.48]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#e1d2c2" : "#352723"} roughness={0.98} />
+      <mesh position={[0, 3.96, -8.6]} receiveShadow>
+        <boxGeometry args={[24.8, 8.2, 0.62]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#e1d3c4" : "#342724"} roughness={0.98} />
       </mesh>
-      <mesh position={[-11.58, 3.4, -0.2]} receiveShadow>
-        <boxGeometry args={[0.46, 7.2, 14.6]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#d4c0a8" : "#231a18"} roughness={0.98} />
+      <mesh position={[-12.42, 3.5, -1.1]} receiveShadow>
+        <boxGeometry args={[0.64, 7.4, 17.8]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#d4c0a8" : "#211917"} roughness={0.98} />
       </mesh>
-      <mesh position={[11.58, 3.4, -0.2]} receiveShadow>
-        <boxGeometry args={[0.46, 7.2, 14.6]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#d4c0a8" : "#231a18"} roughness={0.98} />
+      <mesh position={[12.42, 3.5, -1.1]} receiveShadow>
+        <boxGeometry args={[0.64, 7.4, 17.8]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#d4c0a8" : "#211917"} roughness={0.98} />
       </mesh>
-      <RoundedBox args={[10.8, 0.18, 0.24]} radius={0.08} position={[0, 6.76, -4.9]} castShadow receiveShadow>
-        <meshStandardMaterial color={themeMode === "light" ? "#876750" : "#261c19"} roughness={0.88} />
+      <RoundedBox args={[13.1, 0.26, 0.34]} radius={0.08} position={[0, 6.88, -8.28]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#86644c" : "#261c19"} roughness={0.88} />
       </RoundedBox>
-      {[-8.9, 8.9].map((x) => (
-        <RoundedBox key={`debate-balcony-${x}`} args={[1.65, 1.05, 3.8]} radius={0.08} position={[x, 4.2, -0.8]} castShadow receiveShadow>
+      {[-7.35, 7.35].map((x) => (
+        <RoundedBox key={`debate-proscenium-${x}`} args={[1.2, 6.4, 0.72]} radius={0.08} position={[x, 3.1, -7.7]} castShadow receiveShadow>
+          <meshStandardMaterial color={themeMode === "light" ? "#b68f72" : "#31231e"} roughness={0.9} />
+        </RoundedBox>
+      ))}
+      <RoundedBox args={[15.2, 0.42, 0.72]} radius={0.08} position={[0, 6.1, -7.78]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#b58d71" : "#2b201c"} roughness={0.92} />
+      </RoundedBox>
+      {[-9.3, 9.3].map((x) => (
+        <RoundedBox key={`debate-balcony-${x}`} args={[2.25, 1.18, 4.9]} radius={0.08} position={[x, 4.45, -2.7]} castShadow receiveShadow>
           <meshStandardMaterial color={themeMode === "light" ? "#bca490" : "#2b201c"} roughness={0.95} />
         </RoundedBox>
       ))}
-      {[-8.9, -8.15, 8.15, 8.9].map((x) => (
-        <Drape key={`debate-drape-${x}`} position={[x, 2.82, -4.18]} color={x < 0 ? "#7d342b" : "#31465f"} scale={[0.74, 1.55, 1]} />
+      {[-10.55, -9.7, 9.7, 10.55].map((x) => (
+        <Drape key={`debate-drape-${x}`} position={[x, 2.92, -7.04]} color={x < 0 ? "#7d342b" : "#31465f"} scale={[0.92, 1.92, 1]} />
       ))}
-      <mesh position={[0, 6.28, -5.08]}>
-        <planeGeometry args={[7.8, 0.28]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#9a7a62" : "#271e1c"} roughness={0.96} />
+      <mesh position={[0, 0.56, 0.94]} receiveShadow>
+        <boxGeometry args={[12.8, 0.86, 7.9]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#53392c" : "#241915"} roughness={0.9} />
       </mesh>
-      {[-2.5, 2.5].map((x, index) => (
-        <LightCone key={`auditorium-cone-${x}`} position={[x, 5.75, 3.2]} color={index === 0 ? accent : fill} />
+      <RoundedBox args={[12.1, 0.18, 0.38]} radius={0.08} position={[0, 0.94, -0.66]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#a68165" : "#382822"} roughness={0.82} />
+      </RoundedBox>
+      {[-2.6, 2.6].map((x, index) => (
+        <LightCone key={`auditorium-cone-${x}`} position={[x, 5.85, 2.6]} color={index === 0 ? accent : fill} />
       ))}
-      {[-5.2, -2.6, 0, 2.6, 5.2].map((x) => (
-        <mesh key={`auditorium-lamp-${x}`} position={[x, 6.05, 1.8]} castShadow>
+      {[-5.4, -2.7, 0, 2.7, 5.4].map((x) => (
+        <mesh key={`auditorium-lamp-${x}`} position={[x, 6.14, 1.24]} castShadow>
           <sphereGeometry args={[0.12, 20, 20]} />
           <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.44} />
         </mesh>
       ))}
+      <RoundedBox args={[9.6, 0.2, 0.44]} radius={0.06} position={[0, 2.16, -6.12]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#b89d86" : "#302622"} roughness={0.9} />
+      </RoundedBox>
     </group>
   );
 }
@@ -3794,47 +3953,57 @@ function BriefingShell({ accent, fill, themeMode }: { accent: string; fill: stri
   return (
     <group>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[20, 20]} />
-        <meshStandardMaterial color={themeMode === "light" ? "#d0c0b0" : "#32241c"} roughness={0.95} metalness={0.04} />
+        <planeGeometry args={[23.5, 23.5]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#cfc0b1" : "#2d221d"} roughness={0.95} metalness={0.04} />
       </mesh>
-      <mesh position={[0, 6.9, 0]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[20, 20]} />
-        <meshStandardMaterial color="#120d0a" roughness={0.98} />
+      <mesh position={[0, 6.94, -0.4]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[23.2, 21.2]} />
+        <meshStandardMaterial color={themeMode === "light" ? "#f1e8da" : "#120d0a"} roughness={0.98} />
       </mesh>
-      <mesh position={[0, 4.5, -4.8]} receiveShadow>
-        <boxGeometry args={[17.5, 9, 0.3]} />
-        <meshStandardMaterial color="#221812" roughness={0.98} />
-      </mesh>
-      <mesh position={[0, 0.28, -4.58]} receiveShadow>
-        <boxGeometry args={[17.1, 0.22, 0.34]} />
-        <meshStandardMaterial color="#5d412c" roughness={0.72} />
-      </mesh>
-      <mesh position={[-6.95, 3.4, 0]} receiveShadow>
-        <boxGeometry args={[0.42, 6.8, 9.5]} />
-        <meshStandardMaterial color="#1c1410" roughness={0.98} />
-      </mesh>
-      <mesh position={[6.95, 3.4, 0]} receiveShadow>
-        <boxGeometry args={[0.42, 6.8, 9.5]} />
-        <meshStandardMaterial color="#1c1410" roughness={0.98} />
-      </mesh>
-      {[-4.2, 0, 4.2].map((x) => (
-        <mesh key={`ceiling-lamp-${x}`} position={[x, 6.3, -0.8]} castShadow>
-          <sphereGeometry args={[0.11, 20, 20]} />
-          <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.5} />
+      <RoundedBox args={[19.4, 8.4, 0.36]} radius={0.08} position={[0, 4.14, -5.12]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#e8dacb" : "#241a14"} roughness={0.98} />
+      </RoundedBox>
+      <RoundedBox args={[16.4, 5.96, 0.14]} radius={0.08} position={[0, 3.74, -4.94]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#2d2623" : "#15100d"} roughness={0.96} />
+      </RoundedBox>
+      <RoundedBox args={[12.3, 4.46, 0.06]} radius={0.06} position={[0, 3.62, -4.72]} castShadow>
+        <meshStandardMaterial color={fill} emissive={fill} emissiveIntensity={0.2} roughness={0.24} metalness={0.16} />
+      </RoundedBox>
+      {[-8.2, 8.2].map((x) => (
+        <mesh key={`briefing-side-wall-${x}`} position={[x, 3.3, -0.2]} receiveShadow>
+          <boxGeometry args={[0.52, 6.8, 11.6]} />
+          <meshStandardMaterial color={themeMode === "light" ? "#ddd1c2" : "#1d1511"} roughness={0.98} />
         </mesh>
       ))}
-      <Float speed={1.2} rotationIntensity={0.08} floatIntensity={0.08}>
-        <mesh position={[-4.6, 4.3, -3.7]}>
-          <sphereGeometry args={[0.14, 24, 24]} />
-          <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.5} />
+      {[-6.4, -2.1, 2.1, 6.4].map((x) => (
+        <RoundedBox key={`briefing-rib-${x}`} args={[0.22, 5.5, 0.34]} radius={0.05} position={[x, 4.1, -4.7]} castShadow receiveShadow>
+          <meshStandardMaterial color={x < 0 ? accent : fill} emissive={x < 0 ? accent : fill} emissiveIntensity={0.14} roughness={0.3} metalness={0.16} />
+        </RoundedBox>
+      ))}
+      <RoundedBox args={[17.8, 0.26, 0.46]} radius={0.08} position={[0, 0.34, -4.76]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#8d6649" : "#5e402c"} roughness={0.7} />
+      </RoundedBox>
+      <RoundedBox args={[9.2, 0.26, 6.8]} radius={0.08} position={[0, 0.14, 1.12]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#4c382d" : "#211915"} roughness={0.92} />
+      </RoundedBox>
+      <RoundedBox args={[11.2, 0.16, 8.6]} radius={0.08} position={[0, 0.3, 0.36]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#7d5e47" : "#382821"} roughness={0.84} />
+      </RoundedBox>
+      <RoundedBox args={[14.8, 0.16, 10.2]} radius={0.08} position={[0, 0.08, -0.4]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#5a4438" : "#271d18"} roughness={0.94} />
+      </RoundedBox>
+      {[-4.4, 0, 4.4].map((x) => (
+        <mesh key={`ceiling-lamp-${x}`} position={[x, 6.24, -1.1]} castShadow>
+          <sphereGeometry args={[0.11, 20, 20]} />
+          <meshStandardMaterial color={x === 0 ? accent : fill} emissive={x === 0 ? accent : fill} emissiveIntensity={0.5} />
         </mesh>
-      </Float>
-      <Float speed={1.1} rotationIntensity={0.08} floatIntensity={0.06}>
-        <mesh position={[4.7, 3.9, -3.4]}>
-          <sphereGeometry args={[0.12, 24, 24]} />
-          <meshStandardMaterial color={fill} emissive={fill} emissiveIntensity={0.42} />
-        </mesh>
-      </Float>
+      ))}
+      <RoundedBox args={[2.4, 0.14, 0.24]} radius={0.05} position={[-6.05, 5.66, -4.72]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#ceb89d" : "#4d392f"} roughness={0.88} />
+      </RoundedBox>
+      <RoundedBox args={[2.4, 0.14, 0.24]} radius={0.05} position={[6.05, 5.66, -4.72]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#ceb89d" : "#4d392f"} roughness={0.88} />
+      </RoundedBox>
     </group>
   );
 }
@@ -4139,26 +4308,46 @@ function CitizenDecor({ accent, fill, themeMode }: { accent: string; fill: strin
 function DebateDecor({ accent, fill, themeMode }: { accent: string; fill: string; themeMode: "light" | "dark" }) {
   const seats = useMemo(() => {
     const output: Array<[number, number, number]> = [];
-    for (let row = 0; row < 5; row += 1) {
+    for (let row = 0; row < 6; row += 1) {
       for (let seat = -5; seat <= 5; seat += 1) {
-        const fan = row * 0.08;
-        output.push([seat * (0.92 + fan), 0.1 + row * 0.22, -0.62 - row * 1.46]);
+        const fan = row * 0.09;
+        output.push([seat * (0.92 + fan), 0.18 + row * 0.32, -0.9 - row * 1.62]);
       }
     }
     return output;
   }, []);
   const audience = useMemo(() => {
     const output: Array<[number, number, number]> = [];
-    for (let row = 0; row < 5; row += 1) {
+    for (let row = 0; row < 6; row += 1) {
       for (let seat = -5; seat <= 5; seat += 1) {
         if ((row + seat) % 2 === 0) {
-          const fan = row * 0.08;
-          output.push([seat * (0.92 + fan), 0.26 + row * 0.22, -0.44 - row * 1.46]);
+          const fan = row * 0.09;
+          output.push([seat * (0.92 + fan), 0.36 + row * 0.32, -0.74 - row * 1.62]);
         }
       }
     }
     return output;
   }, []);
+  const balconyAudience = useMemo(() => {
+    const output: Array<[number, number, number]> = [];
+    for (let row = 0; row < 2; row += 1) {
+      for (let seat = -4; seat <= 4; seat += 1) {
+        if ((seat + row) % 2 === 0) {
+          output.push([seat * 0.92, 2.12 + row * 0.3, -7.0 - row * 0.9]);
+        }
+      }
+    }
+    return output;
+  }, []);
+  const tiers = useMemo(
+    () => Array.from({ length: 6 }, (_, row) => ({
+      width: 13.6 + row * 1.05,
+      depth: 1.24,
+      y: 0.05 + row * 0.28,
+      z: -0.92 - row * 1.62,
+    })),
+    [],
+  );
 
   return (
     <group>
@@ -4166,9 +4355,14 @@ function DebateDecor({ accent, fill, themeMode }: { accent: string; fill: string
         <circleGeometry args={[6.6, 72]} />
         <meshStandardMaterial color={themeMode === "light" ? "#8f715d" : "#5a3d2b"} roughness={0.85} />
       </mesh>
-      <RoundedBox args={[11.6, 0.26, 7.8]} radius={0.08} position={[0, 0.13, 1.1]} receiveShadow>
+      <RoundedBox args={[12.4, 0.24, 8.6]} radius={0.08} position={[0, 0.14, 1.18]} receiveShadow>
         <meshStandardMaterial color="#473127" roughness={0.92} />
       </RoundedBox>
+      {tiers.map((tier, index) => (
+        <RoundedBox key={`auditorium-tier-${index}`} args={[tier.width, 0.22, tier.depth]} radius={0.06} position={[0, tier.y, tier.z]} receiveShadow>
+          <meshStandardMaterial color={index % 2 === 0 ? "#3b2a22" : "#31231d"} roughness={0.94} />
+        </RoundedBox>
+      ))}
 
       <RoundedBox args={[0.92, 1.05, 0.72]} radius={0.06} position={[-2.8, 0.52, 3.12]} castShadow receiveShadow>
         <meshStandardMaterial color="#69462c" roughness={0.54} metalness={0.07} />
@@ -4190,6 +4384,9 @@ function DebateDecor({ accent, fill, themeMode }: { accent: string; fill: string
       {audience.map(([x, y, z], index) => (
         <AudienceFigure key={`audience-${x}-${y}-${z}-${index}`} position={[x, y, z]} tone={index % 3 === 0 ? "#7d6b57" : index % 2 === 0 ? "#677587" : "#5f4a3e"} />
       ))}
+      {balconyAudience.map(([x, y, z], index) => (
+        <AudienceFigure key={`balcony-audience-${x}-${y}-${z}-${index}`} position={[x, y, z]} tone={index % 2 === 0 ? "#6d7886" : "#735646"} />
+      ))}
       {[-4.8, -2.4, 0, 2.4, 4.8].map((x) => (
         <Lamp key={`aisle-${x}`} position={[x, 0.42, 5.0]} color={accent} />
       ))}
@@ -4197,9 +4394,17 @@ function DebateDecor({ accent, fill, themeMode }: { accent: string; fill: string
       <RoundedBox args={[2.1, 0.42, 1.55]} radius={0.06} position={[0, 0.28, 5.35]} castShadow receiveShadow>
         <meshStandardMaterial color="#2a1f1a" roughness={0.9} />
       </RoundedBox>
-      <RoundedBox args={[12.4, 0.36, 0.58]} radius={0.08} position={[0, 0.16, -1.1]} receiveShadow>
+      <RoundedBox args={[12.4, 0.36, 0.58]} radius={0.08} position={[0, 0.16, -0.98]} receiveShadow>
         <meshStandardMaterial color="#2b1f1b" roughness={0.92} />
       </RoundedBox>
+      <RoundedBox args={[10.1, 0.16, 0.32]} radius={0.05} position={[0, 2.08, -6.12]} receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#d2bca6" : "#45352e"} roughness={0.84} />
+      </RoundedBox>
+      {[-8.8, 8.8].map((x) => (
+        <RoundedBox key={`debate-box-rail-${x}`} args={[2.26, 0.14, 0.26]} radius={0.04} position={[x, 4.98, -1.1]} receiveShadow>
+          <meshStandardMaterial color={themeMode === "light" ? "#d4c0aa" : "#46352d"} roughness={0.84} />
+        </RoundedBox>
+      ))}
 
       <LightCone position={[-2.2, 5.3, 2.9]} color={accent} />
       <LightCone position={[2.2, 5.1, 2.7]} color={fill} />
@@ -4210,43 +4415,42 @@ function DebateDecor({ accent, fill, themeMode }: { accent: string; fill: string
 function BriefingDecor({ accent, fill, themeMode }: { accent: string; fill: string; themeMode: "light" | "dark" }) {
   return (
     <group>
-      <RoundedBox args={[1.8, 1.2, 0.08]} radius={0.05} position={[-4.15, 2.65, -4.32]} castShadow>
+      <RoundedBox args={[2.4, 1.44, 0.08]} radius={0.05} position={[-5.6, 2.42, -4.2]} castShadow>
         <meshStandardMaterial color={themeMode === "light" ? "#90a5b1" : "#44515b"} emissive={themeMode === "light" ? "#90a5b1" : "#44515b"} emissiveIntensity={0.18} roughness={0.26} />
       </RoundedBox>
-      <RoundedBox args={[1.8, 1.2, 0.08]} radius={0.05} position={[4.15, 2.65, -4.32]} castShadow>
+      <RoundedBox args={[2.4, 1.44, 0.08]} radius={0.05} position={[5.6, 2.42, -4.2]} castShadow>
         <meshStandardMaterial color={themeMode === "light" ? "#b29885" : "#5b4d44"} emissive={themeMode === "light" ? "#b29885" : "#5b4d44"} emissiveIntensity={0.16} roughness={0.26} />
       </RoundedBox>
-      <RoundedBox args={[6.7, 3.1, 0.18]} radius={0.08} position={[0, 2.6, -4.45]} receiveShadow>
-        <meshStandardMaterial color="#2e2320" roughness={0.92} />
+      <RoundedBox args={[6.6, 0.38, 2.65]} radius={0.12} position={[0, 0.34, 0.78]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#5c4130" : "#2a1e18"} roughness={0.82} />
       </RoundedBox>
-      <RoundedBox args={[5.9, 2.45, 0.06]} radius={0.06} position={[0, 2.6, -4.26]} castShadow>
-        <meshStandardMaterial color={fill} emissive={fill} emissiveIntensity={0.22} roughness={0.24} metalness={0.15} />
+      <RoundedBox args={[5.76, 0.14, 1.92]} radius={0.1} position={[0, 0.58, 0.82]} castShadow receiveShadow>
+        <meshStandardMaterial color={themeMode === "light" ? "#b79172" : "#6b4d3b"} roughness={0.52} metalness={0.1} />
       </RoundedBox>
-      <RoundedBox args={[1.2, 0.22, 1.2]} radius={0.08} position={[0, 0.14, 0.6]} receiveShadow>
+      <RoundedBox args={[1.42, 0.26, 1.28]} radius={0.1} position={[0, 0.16, 1.48]} receiveShadow>
         <meshStandardMaterial color="#513a2a" roughness={0.82} />
       </RoundedBox>
-      <RoundedBox args={[4.6, 0.32, 2.2]} radius={0.08} position={[0, 0.18, -1.9]} receiveShadow>
+      <RoundedBox args={[6.2, 0.28, 2.65]} radius={0.12} position={[0, 0.22, -1.78]} receiveShadow>
         <meshStandardMaterial color="#2d221c" roughness={0.9} />
       </RoundedBox>
-      {[-2.4, -0.8, 0.8, 2.4].map((x) => (
-        <RoundedBox key={`console-${x}`} args={[0.8, 0.18, 0.65]} radius={0.04} position={[x, 0.4, -0.85]} castShadow receiveShadow>
-          <meshStandardMaterial color="#5a4130" roughness={0.6} />
+      {[-2.8, -0.95, 0.95, 2.8].map((x, index) => (
+        <RoundedBox key={`console-${x}`} args={[1.02, 0.22, 0.78]} radius={0.04} position={[x, 0.44, -0.72]} castShadow receiveShadow>
+          <meshStandardMaterial color={index % 2 === 0 ? "#5c4331" : "#4f382b"} roughness={0.6} />
         </RoundedBox>
       ))}
-      <Float speed={1.4} rotationIntensity={0.2} floatIntensity={0.2}>
-        <RoundedBox args={[1.1, 0.7, 0.05]} radius={0.04} position={[-2.5, 2.1, -3.7]}>
-          <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.2} roughness={0.35} />
-        </RoundedBox>
-      </Float>
-      <Float speed={1.35} rotationIntensity={0.2} floatIntensity={0.2}>
-        <RoundedBox args={[1.3, 0.86, 0.05]} radius={0.04} position={[2.7, 2.35, -3.6]}>
-          <meshStandardMaterial color={fill} emissive={fill} emissiveIntensity={0.18} roughness={0.35} />
-        </RoundedBox>
-      </Float>
-      <Lamp position={[-3.8, 1.45, -1.4]} color={accent} />
-      <Lamp position={[3.8, 1.45, -1.4]} color={fill} />
-      <Drape position={[-5.2, 2.4, -4.2]} color="#5d4132" scale={[1.1, 1.2, 1]} />
-      <Drape position={[5.2, 2.4, -4.2]} color="#425566" scale={[1.1, 1.2, 1]} />
+      <RoundedBox args={[1.3, 0.74, 0.06]} radius={0.04} position={[-5.6, 2.46, -3.9]} castShadow>
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.18} roughness={0.35} />
+      </RoundedBox>
+      <RoundedBox args={[1.42, 0.84, 0.06]} radius={0.04} position={[5.7, 2.3, -3.86]} castShadow>
+        <meshStandardMaterial color={fill} emissive={fill} emissiveIntensity={0.18} roughness={0.35} />
+      </RoundedBox>
+      <Lamp position={[-4.1, 1.52, -1.18]} color={accent} />
+      <Lamp position={[4.1, 1.52, -1.18]} color={fill} />
+      <Drape position={[-6.95, 2.54, -4.2]} color="#5d4132" scale={[1.2, 1.24, 1]} />
+      <Drape position={[6.95, 2.54, -4.2]} color="#425566" scale={[1.2, 1.24, 1]} />
+      {[-5.8, 5.8].map((x) => (
+        <Plant key={`briefing-plant-${x}`} position={[x, 0.16, -1.82]} tone={x < 0 ? "#5f7962" : "#6b845c"} />
+      ))}
     </group>
   );
 }
@@ -4260,8 +4464,10 @@ function CharacterFigure({
   silhouette,
   interactive = false,
   highlighted = false,
+  floorActive = false,
   followRef,
   animate = true,
+  shadows = true,
   opacity = 1,
   onHoverChange,
   onSelect,
@@ -4281,8 +4487,10 @@ function CharacterFigure({
   };
   interactive?: boolean;
   highlighted?: boolean;
+  floorActive?: boolean;
   followRef?: MutableRefObject<StreetPlayerState>;
   animate?: boolean;
+  shadows?: boolean;
   opacity?: number;
   onHoverChange?: (hovered: boolean) => void;
   onSelect?: () => void;
@@ -4299,7 +4507,7 @@ function CharacterFigure({
     armLength: 0.62,
     legLength: 0.82,
   };
-  const emphasis = hovered || highlighted;
+  const emphasis = hovered || highlighted || floorActive;
   const handleHoverStart = interactive
     ? (event: ThreeEvent<PointerEvent>) => {
         event.stopPropagation();
@@ -4334,8 +4542,8 @@ function CharacterFigure({
       return;
     }
     const time = state.clock.elapsedTime;
-    const amplitude = activity === "speaking" ? 0.14 : activity === "listening" ? 0.05 : 0.02;
-    const speed = activity === "speaking" ? 5.5 : activity === "listening" ? 2.4 : 1.4;
+    const amplitude = activity === "speaking" ? 0.14 : floorActive ? 0.075 : activity === "listening" ? 0.05 : 0.02;
+    const speed = activity === "speaking" ? 5.5 : floorActive ? 3.4 : activity === "listening" ? 2.4 : 1.4;
     const anchor = followRef?.current;
     const translatedX = anchor ? anchor.x : position[0];
     const translatedZ = anchor ? anchor.z : position[2];
@@ -4366,11 +4574,20 @@ function CharacterFigure({
       {(interactive || emphasis) ? (
         <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.68, 0.9, 28]} />
-          <meshBasicMaterial color={palette.glow} transparent opacity={(emphasis ? 0.42 : 0.18) * opacity} />
+          <meshBasicMaterial color={palette.glow} transparent opacity={(floorActive ? 0.58 : emphasis ? 0.42 : 0.18) * opacity} />
         </mesh>
       ) : null}
+      {floorActive ? (
+        <>
+          <pointLight position={[0, 2.25, 0.55]} color={palette.glow} intensity={1.25} distance={3.4} />
+          <mesh position={[0, 2.52, 0]}>
+            <sphereGeometry args={[0.2, 16, 16]} />
+            <meshBasicMaterial color={palette.glow} transparent opacity={0.22 * opacity} />
+          </mesh>
+        </>
+      ) : null}
 
-      <mesh ref={headRef} position={[0, 1.82, 0]} castShadow>
+      <mesh ref={headRef} position={[0, 1.82, 0]} castShadow={shadows}>
         <sphereGeometry args={[form.head, 18, 18]} />
         <meshStandardMaterial transparent opacity={opacity} color={palette.glow} emissive={palette.glow} emissiveIntensity={emphasis ? 0.18 : 0.06} roughness={0.32} metalness={0.08} />
       </mesh>
@@ -4379,33 +4596,33 @@ function CharacterFigure({
         args={[form.torsoWidth, form.torsoHeight, form.torsoDepth]}
         radius={0.16}
         position={[0, 0.98, 0]}
-        castShadow
-        receiveShadow
+        castShadow={shadows}
+        receiveShadow={shadows}
       >
         <meshStandardMaterial transparent opacity={opacity} color={palette.base} roughness={0.48} metalness={0.12} />
       </RoundedBox>
 
       <group ref={armRef} position={[0, 1.05, 0]}>
-        <mesh position={[-0.68, 0.08, 0]} castShadow>
+        <mesh position={[-0.68, 0.08, 0]} castShadow={shadows}>
           <capsuleGeometry args={[0.11, form.armLength, 4, 8]} />
           <meshStandardMaterial transparent opacity={opacity} color={palette.base} roughness={0.5} metalness={0.12} />
         </mesh>
-        <mesh position={[0.68, 0.08, 0]} castShadow>
+        <mesh position={[0.68, 0.08, 0]} castShadow={shadows}>
           <capsuleGeometry args={[0.11, form.armLength, 4, 8]} />
           <meshStandardMaterial transparent opacity={opacity} color={palette.base} roughness={0.5} metalness={0.12} />
         </mesh>
       </group>
 
-      <mesh position={[-0.24, 0.08, 0]} castShadow>
+      <mesh position={[-0.24, 0.08, 0]} castShadow={shadows}>
         <capsuleGeometry args={[0.11, form.legLength, 4, 8]} />
         <meshStandardMaterial transparent opacity={opacity} color={palette.metallic} roughness={0.56} metalness={0.08} />
       </mesh>
-      <mesh position={[0.24, 0.08, 0]} castShadow>
+      <mesh position={[0.24, 0.08, 0]} castShadow={shadows}>
         <capsuleGeometry args={[0.11, form.legLength, 4, 8]} />
         <meshStandardMaterial transparent opacity={opacity} color={palette.metallic} roughness={0.56} metalness={0.08} />
       </mesh>
 
-      <mesh position={[0, 2.5, 0]} castShadow>
+      <mesh position={[0, 2.5, 0]} castShadow={shadows}>
         <sphereGeometry args={[0.11, 12, 12]} />
         <meshStandardMaterial transparent opacity={opacity} color={palette.glow} emissive={palette.glow} emissiveIntensity={activity === "speaking" ? 1.2 : emphasis ? 0.65 : 0.35} />
       </mesh>
@@ -4478,11 +4695,11 @@ function StreetLamp({ position, glow }: { position: [number, number, number]; gl
   return (
     <group position={position}>
       <mesh castShadow receiveShadow>
-        <cylinderGeometry args={[0.06, 0.08, 2.1, 18]} />
+        <cylinderGeometry args={[0.06, 0.08, 2.7, 18]} />
         <meshStandardMaterial color="#674a36" roughness={0.45} metalness={0.36} />
       </mesh>
-      <mesh position={[0, 1.18, 0]} castShadow>
-        <sphereGeometry args={[0.18, 20, 20]} />
+      <mesh position={[0, 1.48, 0]} castShadow>
+        <sphereGeometry args={[0.2, 20, 20]} />
         <meshStandardMaterial color={glow} emissive={glow} emissiveIntensity={0.6} />
       </mesh>
     </group>
@@ -4517,25 +4734,25 @@ function PortraitFrame({ position, tint }: { position: [number, number, number];
 function Townhouse({ position, tone }: { position: [number, number, number]; tone: string }) {
   return (
     <group position={position}>
-      <RoundedBox args={[1.9, 3.2, 0.75]} radius={0.08} castShadow receiveShadow>
+      <RoundedBox args={[2.08, 4.08, 0.82]} radius={0.08} castShadow receiveShadow>
         <meshStandardMaterial color={tone} roughness={0.84} />
       </RoundedBox>
-      <mesh position={[0, 1.64, 0.39]}>
-        <boxGeometry args={[1.48, 0.12, 0.09]} />
+      <mesh position={[0, 2.02, 0.42]}>
+        <boxGeometry args={[1.62, 0.14, 0.1]} />
         <meshStandardMaterial color="#d6c8b2" roughness={0.68} />
       </mesh>
-      <mesh position={[0, -0.9, 0.39]}>
-        <planeGeometry args={[0.56, 1.05]} />
+      <mesh position={[0, -1.1, 0.42]}>
+        <planeGeometry args={[0.6, 1.28]} />
         <meshStandardMaterial color="#33251c" roughness={0.88} />
       </mesh>
       {[-0.45, 0.45].map((x) => (
-        <mesh key={x} position={[x, 0.2, 0.39]}>
-          <planeGeometry args={[0.34, 0.62]} />
+        <mesh key={x} position={[x, 0.34, 0.42]}>
+          <planeGeometry args={[0.38, 0.78]} />
           <meshStandardMaterial color="#86a2b2" emissive="#5d7482" emissiveIntensity={0.18} transparent opacity={0.82} />
         </mesh>
       ))}
-      <mesh position={[0, 1.24, 0.39]}>
-        <planeGeometry args={[1.05, 0.42]} />
+      <mesh position={[0, 1.48, 0.42]}>
+        <planeGeometry args={[1.18, 0.52]} />
         <meshStandardMaterial color="#86a2b2" emissive="#5d7482" emissiveIntensity={0.14} transparent opacity={0.8} />
       </mesh>
     </group>
@@ -4553,23 +4770,23 @@ function Storefront({
 }) {
   return (
     <group position={position} rotation={[0, rotationY, 0]}>
-      <RoundedBox args={[2.15, 2.45, 0.72]} radius={0.08} castShadow receiveShadow>
+      <RoundedBox args={[2.35, 3.08, 0.78]} radius={0.08} castShadow receiveShadow>
         <meshStandardMaterial color="#4c3a30" roughness={0.86} />
       </RoundedBox>
-      <mesh position={[0, 1.28, 0.38]}>
-        <boxGeometry args={[1.95, 0.12, 0.1]} />
+      <mesh position={[0, 1.66, 0.42]}>
+        <boxGeometry args={[2.14, 0.14, 0.1]} />
         <meshStandardMaterial color="#d9ccb7" roughness={0.7} />
       </mesh>
-      <mesh position={[0, 0.5, 0.39]}>
-        <boxGeometry args={[1.88, 0.16, 0.14]} />
+      <mesh position={[0, 0.64, 0.42]}>
+        <boxGeometry args={[2.0, 0.18, 0.14]} />
         <meshStandardMaterial color={accent} roughness={0.6} />
       </mesh>
-      <mesh position={[0, 0.85, 0.38]}>
-        <planeGeometry args={[1.8, 0.42]} />
+      <mesh position={[0, 1.04, 0.42]}>
+        <planeGeometry args={[1.98, 0.54]} />
         <meshStandardMaterial color={accent} roughness={0.58} />
       </mesh>
-      <mesh position={[0, -0.2, 0.39]}>
-        <planeGeometry args={[1.65, 1.18]} />
+      <mesh position={[0, -0.32, 0.42]}>
+        <planeGeometry args={[1.82, 1.44]} />
         <meshStandardMaterial color="#89a3b0" emissive="#607989" emissiveIntensity={0.16} transparent opacity={0.76} />
       </mesh>
     </group>

@@ -8,7 +8,7 @@ import { VoiceDock, type VoiceDockHandle } from "./components/VoiceDock";
 import { useSetupRealtimeSession } from "./hooks/useSetupRealtimeSession";
 import type { CouncilTurnContext } from "./lib/council";
 import { featuretteQuestionLabel } from "./lib/featurettes";
-import { stagePolicyAxes, stageRoomBrief } from "./lib/stageText";
+import { stageConstraint, stageGain, stagePolicyAxes, stageRoomBrief, stageSplit, stageWorldOpening } from "./lib/stageText";
 import { countryThemeProfile } from "./lib/themeProfiles";
 import {
   buildCompatibilitySetupSession,
@@ -37,6 +37,10 @@ import {
 const SceneViewport = lazy(() => import("./components/SceneViewport"));
 type ThemeMode = "light" | "dark";
 type StageGate = "loading" | "ready" | "intro" | "live";
+type StreetVoiceCommand = {
+  kind: "nearest" | "query";
+  query?: string;
+};
 const PREPARATION_PHASE_SEQUENCE = [
   "queued",
   "seeding",
@@ -100,7 +104,7 @@ function focusableElements(container: HTMLElement | null) {
   ).filter((element) => !element.hasAttribute("aria-hidden") && element.offsetParent !== null);
 }
 
-function sanitizeLoadingQuote(text: string, maxChars = 132) {
+function sanitizeLoadingQuote(text: string, maxChars = 164) {
   const cleaned = text
     .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
     .replace(/^[A-Z][A-Za-z .'-]{0,36}:\s*/, "")
@@ -111,12 +115,6 @@ function sanitizeLoadingQuote(text: string, maxChars = 132) {
     return cleaned;
   }
   const sentences = cleaned.split(/(?<=[.!?])\s+/).filter(Boolean);
-  if (sentences[0]) {
-    const firstSentence = sentences[0].trim();
-    if (firstSentence.length <= maxChars) {
-      return firstSentence;
-    }
-  }
   let assembled = "";
   for (const sentence of sentences) {
     const probe = assembled ? `${assembled} ${sentence}` : sentence;
@@ -124,7 +122,7 @@ function sanitizeLoadingQuote(text: string, maxChars = 132) {
       break;
     }
     assembled = probe;
-    if (assembled.length >= 106) {
+    if (assembled.length >= Math.max(124, maxChars - 26)) {
       break;
     }
   }
@@ -189,12 +187,12 @@ function splitNamedLoadingQuote(
   const match = raw.match(/^([A-Z][A-Za-z .'-]{0,36}):\s*["“]?(.+?)["”]?\s*$/);
   if (!match) {
     return {
-      text: sanitizeLoadingQuote(raw, 92),
+      text: sanitizeLoadingQuote(raw, 190),
       attribution: fallbackAttribution,
     };
   }
   const name = match[1].trim();
-  const text = sanitizeLoadingQuote(match[2], 92);
+  const text = sanitizeLoadingQuote(match[2], 190);
   return {
     text,
     attribution: formatLoadingAttribution(name, fallbackAttribution),
@@ -283,6 +281,74 @@ const POLICY_DIRECTIONAL_PREFIXES = [
 ];
 const ROOM_DOCK_RETRY_LIMIT = 60;
 
+function citizenSearchText(citizen: {
+  display_name: string;
+  role: string;
+  region: string;
+  support_label: string;
+  mood: string;
+  ai_exposure: string;
+  household: string;
+  daily_routine: string;
+  recent_ai_moment: string;
+  current_worries: string;
+  current_hopes: string;
+  speech_habits: string;
+  town_hall_question: string;
+  summary: string;
+  current_update: string;
+  approval_band: string;
+}) {
+  return [
+    citizen.display_name,
+    citizen.role,
+    citizen.region,
+    citizen.support_label,
+    citizen.mood,
+    citizen.ai_exposure,
+    citizen.household,
+    citizen.daily_routine,
+    citizen.recent_ai_moment,
+    citizen.current_worries,
+    citizen.current_hopes,
+    citizen.speech_habits,
+    citizen.town_hall_question,
+    citizen.summary,
+    citizen.current_update,
+    citizen.approval_band,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function citizenQueryTerms(query: string) {
+  const normalized = query.trim().toLowerCase();
+  const synonymSets: Record<string, string[]> = {
+    kid: ["kid", "child", "teen", "student", "school", "pupil", "youth"],
+    child: ["kid", "child", "teen", "student", "school", "pupil", "youth"],
+    student: ["student", "school", "college", "university", "class", "pupil"],
+    teacher: ["teacher", "school", "classroom", "educator", "professor"],
+    parent: ["parent", "child", "kids", "family", "household"],
+    "older person": ["retired", "retiree", "senior", "older", "elder"],
+    retiree: ["retired", "retiree", "senior", "older", "elder"],
+    worker: ["worker", "labor", "employee", "job", "shift", "factory", "driver"],
+    "small business owner": ["small business", "business owner", "owner", "shop", "restaurant", "contractor"],
+    "business owner": ["business owner", "owner", "shop", "restaurant", "contractor", "founder"],
+    doctor: ["doctor", "physician", "clinic", "hospital", "medical", "health"],
+    nurse: ["nurse", "clinic", "hospital", "medical", "health"],
+    farmer: ["farmer", "farm", "ranch", "crop", "agriculture"],
+    engineer: ["engineer", "software", "technical", "systems", "developer"],
+    artist: ["artist", "creative", "designer", "writer", "musician", "film"],
+    "someone optimistic": ["hopeful", "optimistic", "excited", "approve", "support", "better", "opportunity"],
+    "someone positive": ["hopeful", "optimistic", "excited", "approve", "support", "better", "opportunity"],
+    "someone worried": ["worried", "wary", "anxious", "fear", "disapprove", "concern", "pressure"],
+    "someone skeptical": ["skeptical", "wary", "doubt", "disapprove", "concern", "unconvinced"],
+    supporter: ["approve", "support", "hopeful", "positive", "backing"],
+    opponent: ["disapprove", "opponent", "skeptical", "wary", "against", "angry"],
+  };
+  return [normalized, ...(synonymSets[normalized] ?? [])].filter(Boolean);
+}
+
 function clipInlineCopy(text: string, maxChars = 44) {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (cleaned.length <= maxChars) {
@@ -369,11 +435,34 @@ function loadingPhaseMeta(progress: SimulationState["progress"]) {
   };
 }
 
-function simulationUrl(simulationId: string, advisorMode: AdvisorMode, auditoriumMode: AuditoriumMode) {
+const LOADING_TIPS = [
+  "Speak like you would to a chief of staff. Ask for the council's disagreement, voters worried about jobs, a poll on access, a cleaner board line, or the debate.",
+  "Name the thing you care about, not a rigid command. Try asking for parents, nurses, founders, students, or retirees who would see this future differently.",
+  "Each chapter starts from one shared world brief. Advisors, citizens, polls, debates, and reels should all feel like they live in the same country.",
+  "Policies matter most when they change access, prices, ownership, legitimacy, or physical bottlenecks. Small gestures should not magically steer the whole economy.",
+  "In later chapters, ask what pays the bills now, what people would hate to lose, and who controls access to the new productive floor.",
+  "Use the policy board like a scratchpad. Keep a few clear lines you can defend in the auditorium, then let voters react.",
+  "The simulation is not trying to punish action or inaction by default. It is watching what actually changes people's lives.",
+  "If a future feels strange, ask one citizen for a normal week: income, care, school, errands, work, and what AI quietly does in the background.",
+];
+
+function simulationUrl(
+  simulationId: string,
+  advisorMode: AdvisorMode,
+  auditoriumMode: AuditoriumMode,
+  room?: RoomName,
+  view?: "live",
+) {
   const params = new URLSearchParams();
   params.set("sim", simulationId);
   params.set("advisor", advisorModeSlug(advisorMode));
   params.set("auditorium", auditoriumMode);
+  if (room) {
+    params.set("room", room);
+  }
+  if (view) {
+    params.set("view", view);
+  }
   return `?${params.toString()}`;
 }
 
@@ -574,9 +663,9 @@ export default function App() {
     () =>
       stage
         ? {
-            dominantMechanism: stage.dominant_mechanism,
-            dominantUpside: stage.dominant_upside,
-            mainSplit: stage.main_split,
+            dominantMechanism: stageWorldOpening(stage, 180),
+            dominantUpside: stageGain(stage, 160),
+            mainSplit: stageSplit(stage, 160),
             policyNotes: advisorPolicyNotes,
             pollTakeaways: stage.poll_summaries.slice(0, 4).map((summary) => summarizePollTakeaway(summary)),
           }
@@ -660,10 +749,49 @@ export default function App() {
         created_at: new Date().toISOString(),
       };
     }
+    if (room === "advisor" && advisorMode === "council") {
+      const floorOwner = councilFloor?.owner?.trim().toLowerCase();
+      const playerName = simulation?.config.player_name?.trim().toLowerCase();
+      const playerHasFloor =
+        floorOwner === "player" ||
+        (Boolean(floorOwner) && Boolean(playerName) && floorOwner === playerName);
+      if (playerHasFloor) {
+        return {
+          id: "council-player-floor",
+          speaker: "user" as const,
+          speaker_name: simulation?.config.player_name ?? "You",
+          text: councilFloor?.reason ? `You have the floor. ${councilFloor.reason}` : "You have the floor.",
+          mode: "voice" as const,
+          created_at: new Date().toISOString(),
+        };
+      }
+      const councilIsActivelySpeaking =
+        scenePresence.advisor.counterpartActivity === "speaking" ||
+        scenePresence.advisor.voicePhase === "responding";
+      if (!councilIsActivelySpeaking) {
+        return undefined;
+      }
+    }
     const visibleTurns = currentSceneTurns.filter((turn) => turn.speaker !== "system");
     return visibleTurns.at(-1);
-  }, [auditoriumMode, currentSceneTurns, liveSceneCaption, room, townHallSceneState]);
+  }, [
+    advisorMode,
+    auditoriumMode,
+    councilFloor,
+    currentSceneTurns,
+    liveSceneCaption,
+    room,
+    scenePresence.advisor,
+    simulation?.config.player_name,
+    townHallSceneState,
+  ]);
   const isBusy = simulation?.status === "initializing" || simulation?.status === "resolving";
+  const stageHasPublicRead = Boolean(stage?.poll_summaries?.length || simulation?.current_polls.length);
+  const approvalBadge = simulation
+    ? stageHasPublicRead
+      ? `${simulation.approval_rating.toFixed(0)}% approval`
+      : "Approval pending"
+    : "Approval pending";
   const previousResolvedStage = useMemo(() => {
     if (!simulation || simulation.active_stage_index === 0) {
       return undefined;
@@ -692,8 +820,8 @@ export default function App() {
       },
       {
         label: "Public mood",
-        value: `${simulation.approval_rating.toFixed(0)}% approval`,
-        detail: pollDetail,
+        value: stageHasPublicRead ? `${simulation.approval_rating.toFixed(0)}% approval` : "Approval pending",
+        detail: stageHasPublicRead ? pollDetail : "Fresh polling will appear once the stage locks in.",
       },
       {
         label: "Electorate",
@@ -709,7 +837,7 @@ export default function App() {
             : "The orchestrator is resolving how capability, policy, and public reaction carry forward.",
       },
     ];
-  }, [previousResolvedStage, simulation, stage]);
+  }, [previousResolvedStage, simulation, stage, stageHasPublicRead]);
   const loadingVoiceStrips = useMemo<Array<{ text: string; attribution?: string }>>(() => {
     const sourceStage = previousResolvedStage ?? stage;
     if (!sourceStage) {
@@ -721,7 +849,7 @@ export default function App() {
     );
     const citizenQuotes = (sourceStage.sample_citizens ?? [])
       .map((citizen) => {
-        const text = sanitizeLoadingQuote(citizen.current_update || citizen.summary, 104);
+        const text = sanitizeLoadingQuote(citizen.current_update || citizen.summary, 190);
         if (!text) {
           return null;
         }
@@ -774,7 +902,7 @@ export default function App() {
     const seenQuotes = new Set<string>();
     const seenNotes = new Set<string>();
     const pushQuote = (label: string, rawText?: string, attribution?: string) => {
-      const trimmed = sanitizeLoadingQuote(rawText ?? "", 132);
+      const trimmed = sanitizeLoadingQuote(rawText ?? "", 220);
       if (!trimmed || seenQuotes.has(`${label}:${trimmed}:${attribution ?? ""}`)) {
         return;
       }
@@ -782,7 +910,7 @@ export default function App() {
       quoteEntries.push({ kind: "quote", label, text: trimmed, attribution });
     };
     const pushNote = (label: string, rawText?: string) => {
-      const trimmed = sanitizeLoadingQuote(rawText ?? "", 132);
+      const trimmed = sanitizeLoadingQuote(rawText ?? "", 180);
       if (!trimmed || seenNotes.has(`${label}:${trimmed}`)) {
         return;
       }
@@ -791,15 +919,10 @@ export default function App() {
     };
     pushNote("Documentary reel", sourceStage?.montage_logline);
     pushNote("War room brief", stageRoomBrief(sourceStage));
-    pushNote("State of world", sourceStage?.state_of_world);
-    pushNote("Capability now", sourceStage?.capability_frontier_now);
-    for (const indicator of sourceStage?.economic_indicators.slice(0, 2) ?? []) {
-      pushNote("Economic read", indicator);
-    }
-    pushNote("Visible gain", sourceStage?.dominant_upside);
-    pushNote("Still hard", sourceStage?.still_hard_now);
-    pushNote("Physical bottleneck", sourceStage?.physical_world_status);
-    pushNote("Main split", sourceStage?.main_split);
+    pushNote("World opening", stageWorldOpening(sourceStage));
+    pushNote("Visible gain", stageGain(sourceStage));
+    pushNote("Constraint", stageConstraint(sourceStage));
+    pushNote("Main split", stageSplit(sourceStage));
     for (const beat of sourceStage?.narrative_beats.slice(0, 3) ?? []) {
       pushNote("Documentary line", beat.line);
     }
@@ -808,7 +931,14 @@ export default function App() {
         pushQuote("Voice from the country", quote.text, quote.attribution);
       }
     }
+    if (!previousResolvedStage && simulation?.active_stage_index === 0) {
+      LOADING_TIPS.forEach((tip, index) => pushNote(index === 0 ? "Voice tip" : "Simulation tip", tip));
+    }
     if (quoteEntries.length === 0 && noteEntries.length === 0 && simulation) {
+      if (!sourceStage) {
+        LOADING_TIPS.forEach((tip, index) => pushNote(index === 0 ? "Voice tip" : "Simulation tip", tip));
+        pushNote("Setup", "Talk to the Orchestrator in plain language if you want to steer the country, institution, electorate, or future horizon.");
+      }
       pushNote("Country", simulation.config.country);
       pushNote(
         "Lens",
@@ -823,7 +953,7 @@ export default function App() {
       pushNote("Status", simulation?.progress.label ?? "Writing the world.");
     }
     const entries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> = [];
-    const maxLength = 12;
+    const maxLength = 6;
     const effectiveQuotes = quoteEntries;
     const effectiveNotes = noteEntries;
     if (effectiveQuotes.length > 0) {
@@ -860,16 +990,16 @@ export default function App() {
     debatePlatform.trim()
     || advisorPolicyNotes.join("\n").trim()
     || currentStageAxes.join("\n").trim()
-    || stage?.state_of_world.trim()
+    || stageWorldOpening(stage)
     || "Carry the current platform into the vote.";
   const debateAdvanceDisabled = resolvingStage;
-  const debateAdvanceLabel = resolvingStage ? "Counting vote..." : "Call election and advance";
+  const debateAdvanceLabel = resolvingStage ? "Counting vote..." : "Next stage";
   const debateAdvanceHint = debateAdvanceDisabled
     ? "The election is being counted and folded into the next stage."
-    : "Lock the vote and move the simulation into the next chapter.";
+    : "Call the vote and move the simulation into the next chapter.";
   const visibleLoadingHighlights = useMemo(
-    () => loadingHighlights.slice(0, 2),
-    [loadingHighlights],
+    () => loadingHighlights.slice(0, readyForNextEra ? 1 : 2),
+    [loadingHighlights, readyForNextEra],
   );
   const introducedStageRef = useRef<string | null>(null);
 
@@ -948,6 +1078,7 @@ export default function App() {
     setSceneTextOpen(false);
     setSceneTextDraft("");
     setRoom(requestedRoom ?? defaultLiveRoom);
+    honorQueryRequestedRoomRef.current = false;
   }, [simulation, stage, stageKey]);
 
   useEffect(() => {
@@ -1032,6 +1163,16 @@ export default function App() {
   }, [featurettesPending, simulation, stage]);
 
   useEffect(() => {
+    if (!simulation || simulation.status !== "stage_ready" || simulation.progress.phase !== "polling") {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      refreshSimulationSnapshot(0);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [simulation]);
+
+  useEffect(() => {
     if (!stage || showLoadingStage || showCinematicIntro) {
       setReelsOpen(false);
       setReelsRequestedFeaturetteId(null);
@@ -1106,7 +1247,7 @@ export default function App() {
     }
     const timer = window.setInterval(() => {
       setLoadingQuoteIndex((current) => (current + 1) % loadingDeck.length);
-    }, readyForNextEra ? 12000 : 10000);
+    }, readyForNextEra ? 12000 : 6500);
     return () => window.clearInterval(timer);
   }, [loadingDeck, readyForNextEra, showLoadingStage]);
 
@@ -1319,7 +1460,7 @@ export default function App() {
     startTransition(() => {
       setSimulation(updated);
       setRoom(nextRoom);
-      setShowCinematicIntro(false);
+      setShowCinematicIntro((current) => (nextRoom === "briefing" ? current : false));
       setStageGate((current) => {
         if (updated.status !== "stage_ready") {
           return "loading";
@@ -1343,7 +1484,17 @@ export default function App() {
         setStreetCandidateCitizenId(undefined);
       }
     });
-    window.history.replaceState(null, "", simulationUrl(updated.simulation_id, advisorMode, auditoriumMode));
+    window.history.replaceState(
+      null,
+      "",
+      simulationUrl(
+        updated.simulation_id,
+        advisorMode,
+        auditoriumMode,
+        nextRoom,
+        updated.status === "stage_ready" ? "live" : undefined,
+      ),
+    );
   }
 
   function refreshSimulationSnapshot(delayMs = 1200) {
@@ -1417,18 +1568,27 @@ export default function App() {
     citizenId?: string,
     options?: {
       nextAuditoriumMode?: AuditoriumMode;
+      resumeVoice?: boolean;
     },
   ) {
     if (!simulation) {
       return;
     }
+    const anyVoiceLive =
+      setupVoiceConnected
+      || [scenePresence.advisor, scenePresence.citizens, scenePresence.debate].some(
+        (presence) => presence.status === "connected" && presence.liveMode === "voice" && !presence.muted,
+      );
+    const keepVoiceLive =
+      options?.resumeVoice !== false &&
+      anyVoiceLive &&
+      nextRoom !== "briefing";
     honorQueryRequestedRoomRef.current = false;
     const effectiveAuditoriumMode = options?.nextAuditoriumMode ?? auditoriumMode;
     const focusedCitizenId =
       nextRoom === "citizens"
         ? citizenId ?? candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id ?? simulation.focused_citizen_id ?? citizens[0]?.citizen_id
         : undefined;
-    disconnectLiveChannels();
     setShowCinematicIntro(false);
     setStageGate("live");
     setSceneTextOpen(false);
@@ -1460,6 +1620,26 @@ export default function App() {
         }
       } else {
         setStreetCandidateCitizenId(undefined);
+      }
+      if (keepVoiceLive) {
+        const expectedScope = dockScopeKeyForRoom(committedRoom, {
+          citizenId: committedRoom === "citizens" ? maybeSimulation?.focused_citizen_id ?? focusedCitizenId : undefined,
+          auditoriumMode: committedRoom === "debate" ? effectiveAuditoriumMode : undefined,
+        });
+        const generation = dockActionGenerationRef.current;
+        queueAfterPaint(() => {
+          withMountedDock(
+            (dock) => {
+              if (dock.getScopeKey() === expectedScope) {
+                void dock.enableVoice();
+              }
+            },
+            0,
+            generation,
+            committedRoom,
+            expectedScope,
+          );
+        });
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "failed to move room");
@@ -1512,8 +1692,9 @@ export default function App() {
       return;
     }
     honorQueryRequestedRoomRef.current = false;
-    advisorDockRef.current?.disconnect();
     handlePresenceChange("advisor", EMPTY_PRESENCE);
+    setCouncilFloor(null);
+    setLiveSceneCaptions((current) => ({ ...current, advisor: null }));
     setAdvisorMode(nextMode);
   }
 
@@ -1531,7 +1712,6 @@ export default function App() {
       return;
     }
     honorQueryRequestedRoomRef.current = false;
-    debateDockRef.current?.disconnect();
     handlePresenceChange("debate", EMPTY_PRESENCE);
     setAuditoriumMode(nextMode);
     if (nextMode === "town_hall" && options?.launchTownHall) {
@@ -1539,14 +1719,163 @@ export default function App() {
     }
   }
 
+  function chooseCitizenForStreetCommand(command: StreetVoiceCommand) {
+    if (citizens.length === 0) {
+      return undefined;
+    }
+    if (command.kind === "nearest") {
+      return candidateCitizen ?? activeCitizen ?? citizens.find((citizen) => citizen.citizen_id === simulation?.focused_citizen_id) ?? citizens[0];
+    }
+    const query = command.query?.trim();
+    if (!query) {
+      return candidateCitizen ?? activeCitizen ?? citizens[0];
+    }
+    const terms = citizenQueryTerms(query);
+    const scored = citizens.map((citizen, index) => {
+      const text = citizenSearchText(citizen);
+      let score = 0;
+      for (const term of terms) {
+        if (text.includes(term)) {
+          score += term === query.toLowerCase() ? 4 : 2;
+        }
+      }
+      if ((query.includes("support") || query.includes("optimistic") || query.includes("positive")) && citizen.approval_band === "approve") {
+        score += 3;
+      }
+      if ((query.includes("opponent") || query.includes("worried") || query.includes("skeptical")) && citizen.approval_band === "disapprove") {
+        score += 3;
+      }
+      if (citizen.citizen_id === candidateCitizen?.citizen_id || citizen.citizen_id === activeCitizen?.citizen_id) {
+        score += 0.6;
+      }
+      return { citizen, index, score };
+    });
+    scored.sort((left, right) => right.score - left.score || left.index - right.index);
+    return scored[0]?.score > 0 ? scored[0].citizen : candidateCitizen ?? activeCitizen ?? citizens[0];
+  }
+
   async function handleModeCommand(command: {
     room?: RoomName;
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
+    action?: "townhall_question" | "call_election" | "open_reels" | "close_reels" | "open_text" | "open_details" | "open_intel" | "close_panels" | "begin_reel" | "enter_war_room" | "toggle_theme" | "toggle_fullscreen" | "run_poll_now" | "run_queued_polls" | "update_policy_board";
+    pollQuestion?: string;
+    policyBoard?: {
+      action: "set" | "add" | "clear" | "remove" | "replace";
+      notes?: string[];
+      index?: number;
+    };
     citizenName?: string;
+    streetCommand?: StreetVoiceCommand;
   }) {
     if (!simulation) {
       return false;
+    }
+    if (command.action === "open_reels") {
+      openReelsSurface(null);
+      return true;
+    }
+    if (command.action === "close_reels") {
+      setReelsOpen(false);
+      setReelsRequestedFeaturetteId(null);
+      if (panelsOpen && drawerTab === "reels") {
+        setPanelsOpen(false);
+      }
+      return true;
+    }
+    if (command.action === "open_text") {
+      setSceneTextOpen(true);
+      setPanelsOpen(false);
+      return true;
+    }
+    if (command.action === "open_details") {
+      setDrawerTab("room");
+      setPanelsOpen(true);
+      return true;
+    }
+    if (command.action === "open_intel") {
+      setDrawerTab("intel");
+      setPanelsOpen(true);
+      return true;
+    }
+    if (command.action === "close_panels") {
+      setPanelsOpen(false);
+      setSceneTextOpen(false);
+      return true;
+    }
+    if (command.action === "toggle_theme") {
+      setThemeMode((current) => (current === "light" ? "dark" : "light"));
+      return true;
+    }
+    if (command.action === "toggle_fullscreen") {
+      await toggleFullscreen();
+      return true;
+    }
+    if (command.action === "begin_reel") {
+      handleLaunchStageIntro();
+      return true;
+    }
+    if (command.action === "enter_war_room") {
+      await handleEnterWarRoom({ openChannel: false });
+      return true;
+    }
+    if (command.action === "call_election") {
+      await handleResolveStage(debateAdvancePayload, latestDebatePlayerTurn);
+      return true;
+    }
+    if (command.action === "townhall_question") {
+      setPanelsOpen(false);
+      if (room !== "debate") {
+        await handleRoomFocus("debate", undefined, { nextAuditoriumMode: "town_hall" });
+      }
+      setAuditoriumRoomMode("town_hall", { launchTownHall: true });
+      queueAfterPaint(() => {
+        void debateRoomRef.current?.askTownHallQuestion();
+      });
+      return true;
+    }
+    if (command.action === "run_queued_polls") {
+      try {
+        const result = await callRealtimeTool(simulation.simulation_id, "advisor", "run_queued_polls", {});
+        const maybeSimulation = result.data?.simulation as SimulationState | undefined;
+        if (maybeSimulation?.simulation_id) {
+          handleSimulationSync(maybeSimulation);
+        }
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "failed to run queued polls");
+        return false;
+      }
+    }
+    if (command.action === "run_poll_now") {
+      const question = command.pollQuestion?.trim();
+      if (!question) {
+        return false;
+      }
+      try {
+        const result = await callRealtimeTool(simulation.simulation_id, "advisor", "run_poll_now", { question });
+        const maybeSimulation = result.data?.simulation as SimulationState | undefined;
+        if (maybeSimulation?.simulation_id) {
+          handleSimulationSync(maybeSimulation);
+        }
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "failed to run poll");
+        return false;
+      }
+    }
+    if (command.action === "update_policy_board" && command.policyBoard) {
+      try {
+        const result = await callRealtimeTool(simulation.simulation_id, "advisor", "update_policy_board", command.policyBoard);
+        const maybeSimulation = result.data?.simulation as SimulationState | undefined;
+        if (maybeSimulation?.simulation_id) {
+          handleSimulationSync(maybeSimulation);
+        }
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "failed to update policy board");
+        return false;
+      }
     }
     if (command.advisorMode) {
       setAdvisorRoomMode(command.advisorMode);
@@ -1571,6 +1900,29 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : "failed to focus citizen");
         return false;
       }
+    }
+    if (command.streetCommand) {
+      const targetCitizen = chooseCitizenForStreetCommand(command.streetCommand);
+      if (!targetCitizen) {
+        return false;
+      }
+      const expectedScope = dockScopeKeyForRoom("citizens", { citizenId: targetCitizen.citizen_id });
+      await handleRoomFocus("citizens", targetCitizen.citizen_id, { resumeVoice: false });
+      const generation = dockActionGenerationRef.current;
+      queueAfterPaint(() => {
+        withMountedDock(
+          (dock) => {
+            if (dock.getScopeKey() === expectedScope) {
+              void dock.startOrToggleVoice();
+            }
+          },
+          0,
+          generation,
+          "citizens",
+          expectedScope,
+        );
+      });
+      return true;
     }
     const targetRoom = command.room ?? (command.advisorMode ? "advisor" : command.auditoriumMode ? "debate" : undefined);
     if (targetRoom) {
@@ -1782,10 +2134,10 @@ export default function App() {
     if (room !== targetRoom || simulation.current_room !== targetRoom) {
       await handleRoomFocus(targetRoom, options?.citizenId, {
         nextAuditoriumMode: options?.auditoriumMode,
+        resumeVoice: false,
       });
-      // Room focus intentionally disconnects old channels, which invalidates
-      // pending dock actions. Refresh the token after navigation so the
-      // follow-up mic/text action still reaches the newly mounted dock.
+      // Room focus remounts the visible dock; refresh the token after
+      // navigation so the follow-up mic/text action reaches the new mount.
       dockActionGenerationRef.current += 1;
       generation = dockActionGenerationRef.current;
     } else {
@@ -1883,15 +2235,6 @@ export default function App() {
       });
       return;
     }
-    if (
-      room === "debate" &&
-      auditoriumMode === "town_hall" &&
-      (townHallSceneState?.readyForNextQuestion ?? true) &&
-      townHallSceneState?.phase !== "generating"
-    ) {
-      await debateRoomRef.current?.askTownHallQuestion();
-      return;
-    }
     await handOffRoomAction(room, (dock) => {
       void dock.startOrToggleVoice();
     });
@@ -1934,7 +2277,7 @@ export default function App() {
     if (hotspot.action === "townhall") {
       setPanelsOpen(false);
       if (auditoriumMode === "town_hall") {
-        setAuditoriumRoomMode("debate");
+        void debateRoomRef.current?.askTownHallQuestion();
         return;
       }
       void debateRoomRef.current?.primeTownHallAudio();
@@ -2099,8 +2442,8 @@ export default function App() {
       },
       {
         id: "debate-townhall",
-        label: auditoriumMode === "town_hall" ? "Debate stage" : "Town hall",
-        hint: auditoriumMode === "town_hall" ? "Return to the candidate exchange" : "Open the live audience floor",
+        label: auditoriumMode === "town_hall" ? "Audience question" : "Town hall",
+        hint: auditoriumMode === "town_hall" ? "Open the next voter question" : "Open the live audience floor",
         position: [2.58, 1.28, 1.5],
         tone: "sage",
         action: "townhall",
@@ -2125,19 +2468,20 @@ export default function App() {
             presentation="drawer"
             advisorMode={advisorMode}
             autoResponse={advisorMode !== "council"}
+            externalPlaybackActive={reelsOpen}
             councilContext={advisorMode === "council" ? councilContext : undefined}
             councilRoster={simulation?.config.council_roster}
             onCouncilFloorChange={advisorMode === "council" ? setCouncilFloor : undefined}
             title={advisorMode === "council" ? `Multi-advisor table · ${stage.phase_label}` : `Advisor desk · ${stage.phase_label}`}
             blurb={
               advisorMode === "council"
-                ? (stage.main_split || currentStageRoomBrief)
-                : (currentStageRoomBrief || stage.state_of_world)
+                ? (stageSplit(stage, 112) || stageWorldOpening(stage, 112))
+                : (currentStageRoomBrief || stageWorldOpening(stage, 112))
             }
             draftPlaceholder={
               advisorMode === "council"
-                ? `Ask the table where they split on ${stage.main_split || "the live question"}, who should lead, or what belongs on the board.`
-                : `Ask what ${stage.capability_frontier_now || "the frontier"} changes, what voters want kept, or which tradeoff binds this stage.`
+                ? `Ask where they split on ${stageSplit(stage, 84) || "the live question"}, who should answer, or what belongs on the board.`
+                : `Ask what ${stageWorldOpening(stage, 90) || "the frontier"} changes, what voters want kept, or which tradeoff binds this stage.`
             }
             emptyStateText={
               advisorMode === "council"
@@ -2145,7 +2489,7 @@ export default function App() {
                 : "The advisor room is quiet until you open the next strategic thread."
             }
             turns={advisorTurns}
-            metaChips={[stage.phase_label, `${simulation?.approval_rating.toFixed(0)} approval`, advisorMode === "council" ? "multi-advisor voice" : "single-advisor voice"]}
+            metaChips={[stage.phase_label, approvalBadge, advisorMode === "council" ? "multi-advisor voice" : "single-advisor voice"]}
             onSimulationSync={handleSimulationSync}
             onPresenceChange={(presence) => handlePresenceChange("advisor", presence)}
             onLiveCaptionChange={(turn) => handleLiveCaptionChange("advisor", turn)}
@@ -2155,43 +2499,31 @@ export default function App() {
             <div className="side-panel__block">
               <span>Working agenda</span>
               {advisorPolicyNotes.length > 0 ? (
-                advisorPolicyNotes.map((note, index) => <p key={note}>{index + 1}. {note}</p>)
+                advisorPolicyNotes.slice(0, 4).map((note, index) => <p key={note}>{index + 1}. {note}</p>)
+              ) : currentStageAxes.length > 0 ? (
+                currentStageAxes.slice(0, 3).map((note, index) => <p key={note}>{index + 1}. {note}</p>)
               ) : (
-                <p>{currentStageRoomBrief || "The room will hold the few planks that survive the argument."}</p>
+                <p>The room will hold the few planks that survive the argument.</p>
               )}
             </div>
             <div className="side-panel__block">
               <span>Current pressures</span>
-              {stage.tension_points.map((item) => (
-                <p key={item}>{item}</p>
-              ))}
-            </div>
-            <div className="side-panel__block">
-              <span>Queue manual poll</span>
-              <textarea
-                rows={3}
-                value={manualPollQuestion}
-                onChange={(event) => setManualPollQuestion(event.target.value)}
-                placeholder={
-                  stage.main_split
-                    ? `Ask the country where it lands on this split: ${stage.main_split}`
-                    : "Ask what benefit people most want kept, what feels unfair, or what they would not forgive you for slowing."
-                }
-              />
-              <div className="side-panel__actions">
-                <button className="btn btn--secondary" onClick={handleQueuePoll}>
-                  Queue question
-                </button>
-                <button className="btn btn--ghost" onClick={handleRunPolls}>
-                  Run polls now
-                </button>
-              </div>
-              <div className="side-panel__tags">
-                {simulation?.queued_poll_questions.map((item) => (
-                  <span key={`${item.question}-${item.created_at}`}>{item.question}</span>
+              {[stageSplit(stage, 132), stageConstraint(stage, 132)]
+                .filter(Boolean)
+                .map((item) => (
+                  <p key={item}>{item}</p>
                 ))}
-              </div>
             </div>
+            {simulation?.queued_poll_questions.length ? (
+              <div className="side-panel__block">
+                <span>Queued polls</span>
+                <div className="side-panel__tags">
+                  {simulation.queued_poll_questions.slice(0, 3).map((item) => (
+                    <span key={`${item.question}-${item.created_at}`}>{item.question}</span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
         </section>
       ) : null}
@@ -2209,6 +2541,7 @@ export default function App() {
               themeMode={themeMode}
               presentation="drawer"
               citizenId={activeCitizen.citizen_id}
+              externalPlaybackActive={reelsOpen}
               title={activeCitizen.display_name}
               blurb={activeCitizen.summary}
               draftPlaceholder={
@@ -2239,6 +2572,7 @@ export default function App() {
           debateTurns={debateTurns}
           auditoriumTurns={combinedAuditoriumTurns}
           auditoriumMode={auditoriumMode}
+          externalPlaybackActive={reelsOpen}
           resolvedPlatform={debatePlatform}
           pending={resolvingStage}
           onResolve={handleResolveStage}
@@ -2268,8 +2602,8 @@ export default function App() {
         </div>
         <div className="immersive-stat">
           <span>Approval</span>
-          <strong>{simulation?.approval_rating.toFixed(0)}%</strong>
-          <p>{stage.tracking.approval.display}</p>
+          <strong>{stageHasPublicRead ? `${simulation?.approval_rating.toFixed(0)}%` : "—"}</strong>
+          <p>{stageHasPublicRead ? stage.tracking.approval.display : "Polling in background"}</p>
         </div>
         <div className="immersive-stat">
           <span>Population ready</span>
@@ -2487,15 +2821,6 @@ export default function App() {
               >
                 {themeMode === "light" ? "◐" : "◑"}
               </button>
-              <button
-                className="scene__utility-button scene__utility-button--launch"
-                onClick={() => void handleRestart()}
-                disabled={setupBooting || launchingSetup}
-                aria-label="Restart setup"
-                title="Restart setup"
-              >
-                ↺
-              </button>
             </div>
 
             <div className="scene__channel-bar scene__channel-bar--setup setup-room__channel-bar">
@@ -2598,7 +2923,7 @@ export default function App() {
                     {resolvingStage
                       ? "The public choice is being counted and folded into the next chapter."
                       : readyForNextEra
-                      ? "The next documentary is ready. Launch it when your group is ready to step forward."
+                      ? "The next chapter is ready."
                       : simulation.progress.detail}
                   </p>
                 </div>
@@ -2628,7 +2953,7 @@ export default function App() {
                     <button className="btn btn--primary loading-stage__launch" onClick={handleLaunchStageIntro}>
                       Begin the chapter reel
                     </button>
-                    <p>The reel waits on your cue.</p>
+                    <p>Ready when you are.</p>
                   </div>
                 ) : null}
               </div>
@@ -2707,6 +3032,9 @@ export default function App() {
                     stageAdvanceLabel={debateAdvanceLabel}
                     stageAdvanceHint={debateAdvanceHint}
                     stageAdvanceDisabled={debateAdvanceDisabled}
+                    onTownHallQuestion={() => {
+                      void debateRoomRef.current?.askTownHallQuestion();
+                    }}
                     onStreetFocusChange={handleStreetFocusChange}
                     onTogglePanels={() => {
                       setDrawerTab("room");
@@ -2736,7 +3064,7 @@ export default function App() {
                     variant="cinematic"
                     themeProfile={themeProfile}
                     hidden={panelsOpen}
-                    onEnterWarRoom={() => void handleEnterWarRoom()}
+                    onEnterWarRoom={() => void handleEnterWarRoom({ startVoice: true })}
                   />
                 ) : null}
                 {simulation.status === "completed" && stage.resolution ? (
@@ -2793,46 +3121,46 @@ export default function App() {
                     reelsDrawerOpen ? "immersive-drawer--reels" : ""
                   }`}
                 >
-                  {panelsOpen ? (
-                    <div className="immersive-drawer__rail">
-                      <div className="immersive-drawer__handle" />
-                      <nav className="room-nav room-nav--immersive">
-                        {ROOM_BUTTONS.map((entry) => (
-                          <button
-                            key={entry.key}
-                            className={`room-nav__button ${room === entry.key ? "room-nav__button--active" : ""}`}
-                            onClick={() => void handleRoomFocus(entry.key)}
-                            disabled={simulation.status !== "stage_ready" && entry.key !== "briefing"}
-                          >
-                            {entry.label}
-                          </button>
-                        ))}
-                      </nav>
-                      <div className="immersive-drawer__tabs">
+                  <div className="immersive-drawer__rail">
+                    <div className="immersive-drawer__handle" />
+                    <nav className="room-nav room-nav--immersive">
+                      {ROOM_BUTTONS.map((entry) => (
                         <button
-                          className={`immersive-drawer__tab ${drawerTab === "room" ? "immersive-drawer__tab--active" : ""}`}
-                          onClick={() => setDrawerTab("room")}
+                          key={entry.key}
+                          className={`room-nav__button ${room === entry.key ? "room-nav__button--active" : ""}`}
+                          onClick={() => void handleRoomFocus(entry.key)}
+                          disabled={simulation.status !== "stage_ready" && entry.key !== "briefing"}
                         >
-                          Room
+                          {entry.label}
                         </button>
-                        <button
-                          className={`immersive-drawer__tab ${drawerTab === "intel" ? "immersive-drawer__tab--active" : ""}`}
-                          onClick={() => setDrawerTab("intel")}
-                        >
-                          Intel
-                        </button>
-                        <button
-                          className={`immersive-drawer__tab ${drawerTab === "reels" ? "immersive-drawer__tab--active" : ""}`}
-                          onClick={() => setDrawerTab("reels")}
-                        >
-                          Reels
-                        </button>
-                      </div>
+                      ))}
+                    </nav>
+                    <div className="immersive-drawer__tabs">
+                      <button
+                        className={`immersive-drawer__tab ${drawerTab === "room" ? "immersive-drawer__tab--active" : ""}`}
+                        onClick={() => setDrawerTab("room")}
+                      >
+                        Room
+                      </button>
+                      <button
+                        className={`immersive-drawer__tab ${drawerTab === "intel" ? "immersive-drawer__tab--active" : ""}`}
+                        onClick={() => setDrawerTab("intel")}
+                      >
+                        Intel
+                      </button>
+                      <button
+                        className={`immersive-drawer__tab ${drawerTab === "reels" ? "immersive-drawer__tab--active" : ""}`}
+                        onClick={() => setDrawerTab("reels")}
+                      >
+                        Reels
+                      </button>
+                    </div>
+                    {panelsOpen ? (
                       <button className="btn btn--ghost immersive-drawer__toggle" onClick={() => setPanelsOpen(false)}>
                         Close
                       </button>
-                    </div>
-                  ) : null}
+                    ) : null}
+                  </div>
 
                   <div className={`immersive-drawer__body ${panelsOpen ? "immersive-drawer__body--open" : ""}`}>
                     <div className={`immersive-drawer__pane ${drawerTab === "room" ? "immersive-drawer__pane--active" : ""}`}>

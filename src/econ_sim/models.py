@@ -116,6 +116,12 @@ class PollSummary(BaseModel):
     sample_reasons: list[str] = Field(default_factory=list)
 
 
+class MacroStatistic(BaseModel):
+    label: str
+    value: str
+    detail: str = ""
+
+
 class StageTracking(BaseModel):
     approval: TrackingMetric
     vote_share_player: TrackingMetric
@@ -195,33 +201,15 @@ class StagePackage(BaseModel):
     year_label: str
     title: str
     montage_logline: str = ""
-    capability_frontier_now: str = ""
-    still_hard_now: str = ""
-    physical_world_status: str = ""
-    dominant_mechanism: str = ""
-    dominant_upside: str = ""
-    main_split: str = ""
-    pro_adoption_constituency: str = ""
-    household_income_system: str = ""
-    capability_access_norm: str = ""
-    firm_structure_norm: str = ""
-    ownership_regime: str = ""
-    public_service_norm: str = ""
-    state_of_world: str
-    detailed_summary: str
+    world_brief: str
     room_briefing: str
-    authored_room_briefing: str = ""
-    economic_indicators: list[str]
-    tension_points: list[str]
-    suggested_policy_axes: list[str]
-    authored_policy_axes: list[str] = Field(default_factory=list)
     narrative_beats: list[NarrativeBeat]
     sample_citizens: list[CitizenSnapshot]
     tracking: StageTracking
+    macro_stats: dict[str, MacroStatistic] = Field(default_factory=dict)
     poll_summaries: list[PollSummary]
     queued_poll_questions: list[str]
     policy_notes: list[str] = Field(default_factory=list)
-    policy_board_manual: bool = False
     featurettes: list[DocumentaryFeaturette] = Field(default_factory=list)
     featurettes_status: FeaturetteStatus = "idle"
     featurettes_error: str | None = None
@@ -485,6 +473,10 @@ class CouncilAdvisorBeat(BaseModel):
     urgency: int = Field(ge=0, le=10)
     speak: bool = False
     text: str = ""
+
+
+class CouncilFloorPick(BaseModel):
+    next_speaker: str
 
 
 class CouncilSpeakerDecision(BaseModel):

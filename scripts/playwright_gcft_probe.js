@@ -3,52 +3,29 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const { execSync } = require("node:child_process");
-const { createRequire } = require("node:module");
+const {
+  DEFAULT_GCFT_BIN,
+  loadPlaywright,
+  launchChromiumBrowser,
+} = require("./playwright_runtime");
 
 const BASE_URL = process.env.ECON_SIM_BASE_URL || process.argv[2] || "http://127.0.0.1:5173/";
+const API_ORIGIN = new URL(BASE_URL).origin;
 const OUT_DIR = process.env.ECON_SIM_QA_DIR || process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-probe";
-const SETUP_PROMPT = process.env.ECON_SIM_SETUP_PROMPT || process.argv[4] || "Make this a Mexico national simulation.";
+const SETUP_PROMPT = process.env.ECON_SIM_SETUP_PROMPT || process.argv[4] || "Launch the broad default United States simulation.";
 const FOLLOWUP_PROMPT = process.env.ECON_SIM_FOLLOWUP_PROMPT || process.argv[5] || "go";
 const READY_TIMEOUT_MS = Number.parseInt(process.env.ECON_SIM_READY_TIMEOUT_MS || process.argv[6] || "90000", 10);
-const GCFT_BIN =
-  process.env.PLAYWRIGHT_GCFT_BIN ||
-  path.join(
-    os.homedir(),
-    "Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-  );
+const KEEP_OPEN = process.env.PLAYWRIGHT_KEEP_OPEN === "1";
 const RUNTIME_DIR =
   process.env.PLAYWRIGHT_RUNTIME_DIR ||
   path.join(process.env.TMPDIR || os.tmpdir(), "econ-sim-playwright");
-
-function ensureRuntime() {
-  fs.mkdirSync(RUNTIME_DIR, { recursive: true });
-  const packageJson = path.join(RUNTIME_DIR, "package.json");
-  if (!fs.existsSync(packageJson)) {
-    execSync("npm init -y >/dev/null 2>&1", { cwd: RUNTIME_DIR, stdio: "inherit", shell: "/bin/zsh" });
-  }
-  const playwrightDir = path.join(RUNTIME_DIR, "node_modules", "playwright");
-  if (!fs.existsSync(playwrightDir)) {
-    execSync("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install playwright >/dev/null 2>&1", {
-      cwd: RUNTIME_DIR,
-      stdio: "inherit",
-      shell: "/bin/zsh",
-    });
-  }
-}
-
-function loadPlaywright() {
-  ensureRuntime();
-  const runtimeRequire = createRequire(path.join(RUNTIME_DIR, "package.json"));
-  return runtimeRequire("playwright");
-}
 
 async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchSimulation(simId) {
-  const response = await fetch(`http://127.0.0.1:8000/api/simulations/${simId}`);
+  const response = await fetch(`${API_ORIGIN}/api/simulations/${simId}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch simulation ${simId}: ${response.status}`);
   }
@@ -95,16 +72,14 @@ async function screenshot(page, name, consoleLines, options = {}) {
 }
 
 async function run() {
-  if (!fs.existsSync(GCFT_BIN)) {
-    throw new Error(`GCFT binary not found at ${GCFT_BIN}`);
-  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const { chromium } = loadPlaywright();
-  const browser = await chromium.launch({
+  const { chromium } = loadPlaywright(RUNTIME_DIR);
+  const { browser, launcher, launchErrors } = await launchChromiumBrowser(chromium, {
     headless: false,
-    executablePath: GCFT_BIN,
+    gcftBin: process.env.PLAYWRIGHT_GCFT_BIN || DEFAULT_GCFT_BIN,
   });
 
+  let keepOpenBrowser = false;
   try {
     const page = await browser.newPage({
       viewport: { width: 1510, height: 960 },
@@ -133,6 +108,7 @@ async function run() {
     await page.waitForTimeout(3500);
     await screenshot(page, "02-root-after-setup-prompt.png", consoleLines);
 
+    let launchStartedAt = Date.now();
     if (!/\?sim=/.test(page.url())) {
       const launchButton = page.getByRole("button", { name: /Launch|Begin simulation/i }).first();
       if (await launchButton.isVisible().catch(() => false)) {
@@ -144,6 +120,7 @@ async function run() {
         await clickComposerSend(page);
       }
       await page.waitForURL(/\?sim=/, { timeout: 30000 });
+      launchStartedAt = Date.now();
     }
     await page.waitForTimeout(2500);
     await screenshot(page, "03-after-launch.png", consoleLines);
@@ -156,11 +133,19 @@ async function run() {
 
     let simulation;
     let stageReady = false;
+    let stageReadyAt = null;
     try {
       simulation = await waitForSimulation(simId, { timeoutMs: READY_TIMEOUT_MS, intervalMs: 3000 });
       stageReady = simulation.status === "stage_ready";
+      if (stageReady) {
+        stageReadyAt = Date.now();
+      }
     } catch {
       simulation = await fetchSimulation(simId);
+      stageReady = simulation.status === "stage_ready";
+      if (stageReady) {
+        stageReadyAt = Date.now();
+      }
     }
     await page.goto(`${BASE_URL.replace(/\/?$/, "")}/?sim=${simId}`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(2500);
@@ -169,9 +154,14 @@ async function run() {
     const summary = {
       simId,
       url: page.url(),
+      browserLauncher: launcher,
+      browserLaunchErrors: launchErrors,
       country: simulation.config?.country,
       status: simulation.status,
       stageReady,
+      launchStartedAt,
+      stageReadyAt,
+      stageReadyMs: stageReadyAt ? stageReadyAt - launchStartedAt : null,
       currentRoom: simulation.current_room,
       phase: simulation.stages?.[simulation.active_stage_index]?.phase_label,
       title: simulation.stages?.[simulation.active_stage_index]?.title,
@@ -180,8 +170,11 @@ async function run() {
     };
     fs.writeFileSync(path.join(OUT_DIR, "summary.json"), JSON.stringify(summary, null, 2));
     console.log(JSON.stringify(summary, null, 2));
+    keepOpenBrowser = KEEP_OPEN;
   } finally {
-    await browser.close();
+    if (!keepOpenBrowser) {
+      await browser.close();
+    }
   }
 }
 

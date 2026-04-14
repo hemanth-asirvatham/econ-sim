@@ -18,6 +18,128 @@ class RealtimePromptFactory:
                 return advisor
         return None
 
+    def _stage_opening(self, stage, max_chars: int = 160) -> str:
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(stage.world_brief or "").strip()) if part.strip()]
+        source = paragraphs[0] if paragraphs else str(stage.world_brief or "")
+        sentence = re.split(r"(?<=[.!?])\s+", source.strip(), maxsplit=1)[0].strip()
+        return self._clip(sentence or source, max_chars)
+
+    def _world_sentences(self, stage) -> list[str]:
+        return [part.strip() for part in re.split(r"(?<=[.!?])\s+", str(stage.world_brief or "").strip()) if part.strip()]
+
+    def _stage_gain(self, stage, max_chars: int = 150) -> str:
+        positive_keywords = (
+            "cheaper",
+            "easier",
+            "better",
+            "stronger",
+            "more capable",
+            "more reliable",
+            "more abundant",
+            "broader",
+            "widens",
+            "grew",
+            "grew richer",
+            "more secure",
+            "public likes",
+            "people defend",
+            "ordinary life improved",
+        )
+        source = next(
+            (
+                sentence
+                for sentence in self._world_sentences(stage)
+                if any(keyword in sentence.lower() for keyword in positive_keywords)
+            ),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._clip(source, max_chars)
+
+    def _stage_access_channel(self, stage, max_chars: int = 150) -> str:
+        source = next(
+            (
+                sentence
+                for sentence in self._world_sentences(stage)
+                if any(
+                    keyword in sentence.lower()
+                    for keyword in (
+                        "account",
+                        "allowance",
+                        "subscription",
+                        "public ai",
+                        "machine check",
+                        "machine income",
+                        "dividend",
+                        "queue",
+                        "meter",
+                        "access",
+                        "help line",
+                        "entitlement",
+                        "credit",
+                    )
+                )
+            ),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._clip(source, max_chars)
+
+    def _stage_split(self, stage, max_chars: int = 150) -> str:
+        source = next(
+            (
+                sentence
+                for sentence in self._world_sentences(stage)
+                if any(
+                    keyword in sentence.lower()
+                    for keyword in (
+                        "control",
+                        "ownership",
+                        "chokepoint",
+                        "rent",
+                        "meter",
+                        "queue",
+                        "toll",
+                        "ration",
+                        "who gets",
+                        "who owns",
+                        "who controls",
+                        "who pays",
+                        "who is cut off",
+                    )
+                )
+            ),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._clip(source, max_chars)
+
+    def _stage_constraint(self, stage, max_chars: int = 150) -> str:
+        source = next(
+            (
+                sentence
+                for sentence in self._world_sentences(stage)
+                if any(
+                    keyword in sentence.lower()
+                    for keyword in (
+                        "power",
+                        "grid",
+                        "chip",
+                        "compute",
+                        "housing",
+                        "port",
+                        "buildout",
+                        "permit",
+                        "outage",
+                        "appeal",
+                        "bottleneck",
+                        "capacity",
+                        "trust",
+                        "fraud",
+                    )
+                )
+            ),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._clip(source, max_chars)
+
     def setup_instructions(
         self,
         session: SetupSessionState,
@@ -31,22 +153,18 @@ class RealtimePromptFactory:
         population = (config.population_description or "").strip() or "representative population"
         return (
             "You are the live setup orchestrator for an AGI economic simulation. "
-            "Speak like a calm conductor in the room, not a form wizard or sales voice. "
-            "Whether the player types or speaks, it is the same conversation. "
-            "Keep replies short and conversational: usually 1 short sentence, sometimes 2. "
-            "If you give a tutorial or help line, make it sound like a spoken cue the player can use immediately, not a document or a pitch deck. "
-            "If the player asks how play works, answer in one practical line: set the frame, launch the run, hear the chapter reel, workshop ideas, run polls, talk to citizens, debate, then face the vote. "
-            "Frame the choice as what kind of world the player wants to examine, not which parameters they want to edit. "
-            "Do not front-load a list of options unless the player explicitly asks for them. "
-            "If the player is just feeling it out, tell them the broad default and ask at most one crisp follow-up if truly needed. "
-            "If the player is unsure, you may suggest one optional axis that would make the run more revealing, but do not turn that into a menu. "
-            "The default run is broad, representative, and national. Do not invent a region focus, narrow social lens, or special premise unless the player asks for one. "
-            "If the player asks for Finland, Swiss education, a different art style, more personas, or a different political scale, acknowledge it naturally and fold it in. "
-            "If the country or jurisdiction changes and the current offices or candidate names still sound like inherited defaults, localize them naturally unless the player explicitly set them. "
-            "If the player says go, start, launch, use the default, or that the broad setup is fine, say briefly that the chamber is ready and the simulation can launch. "
-            "Do not repeatedly recap unchanged fields. Only mention the one or two things that matter. "
-            "If the player asks what the default is, answer plainly: broad U.S. national frame, representative population, standard AGI development, and no extra lens unless they ask for one. "
-            "Do not overprescribe the run. Your job is to help shape the starting frame lightly, then get out of the way.\n\n"
+            "The conversation itself is the input. The player can steer country, institution, scale, and future horizon in plain language. "
+            "Speak like a calm conductor in the room, not a menu system, moderator, or pitch deck. "
+            "Keep replies short and conversational: usually 1 sentence, sometimes 2. "
+            "Do not turn the setup into a form. Do not front-load option lists unless the player explicitly asks. "
+            "The broad default is a representative national run. Here, that means the United States unless the player says otherwise. "
+            "There is no extra lens unless they ask for one. "
+            "Do not invent a region focus, narrow lens, premise, or political stake unless the player asks for one. "
+            "If the player changes country, institution, or political scale, fold it in naturally and localize default offices or names only if needed. "
+            "If the player asks how play works, answer in one practical line: set the frame, launch the run, hear the chapter reel, talk to advisors, run polls, talk to people, debate, then face the vote. "
+            "If the player says go, start, launch, use the default, or the broad setup is fine, say briefly that the chamber is ready. "
+            "Mention only the one or two fields that actually changed. "
+            "Your job is to lightly shape the starting frame, then get out of the way.\n\n"
             f"Current draft country: {config.country}\n"
             f"Region focus: {world_scope}\n"
             f"Topic lens: {topic_lens}\n"
@@ -68,47 +186,18 @@ class RealtimePromptFactory:
         advisor_mode: AdvisorMode = AdvisorMode.solo,
     ) -> str:
         current_stage = state.stages[state.active_stage_index]
-        household_security = self._clip(
-            current_stage.household_income_system
-            or current_stage.dominant_upside
-            or current_stage.capability_frontier_now
-            or current_stage.state_of_world,
-            120,
-        )
-        access_channel = self._clip(
-            current_stage.capability_access_norm
-            or next((line for line in current_stage.economic_indicators if line), current_stage.dominant_upside or macro_world_state),
-            120,
-        )
-        power_bottleneck = self._clip(
-            current_stage.ownership_regime
-            or current_stage.main_split
-            or next((line for line in current_stage.tension_points if line), macro_world_state),
-            120,
-        )
-        time_use = self._clip(
-            current_stage.firm_structure_norm
-            or current_stage.public_service_norm
-            or current_stage.physical_world_status
-            or current_stage.still_hard_now
-            or "A lot still depends on rollout, trust, and what the physical world can actually absorb.",
-            120,
-        )
-        defended_gain = self._clip(
-            current_stage.dominant_upside
-            or next((line for line in current_stage.economic_indicators if line), current_stage.capability_frontier_now or current_stage.state_of_world),
-            120,
-        )
-        uncertain_now = self._clip(
-            current_stage.still_hard_now
-            or current_stage.physical_world_status
-            or "A lot still depends on rollout, trust, and what the physical world can actually absorb.",
-            120,
-        )
+        opening_read = self._stage_opening(current_stage, 120)
+        household_security = self._stage_gain(current_stage, 120)
+        access_channel = self._stage_access_channel(current_stage, 120) or self._clip(opening_read or macro_world_state, 120)
+        power_bottleneck = self._stage_split(current_stage, 120)
+        time_use = self._stage_constraint(current_stage, 120)
+        defended_gain = self._stage_gain(current_stage, 120)
+        uncertain_now = self._stage_constraint(current_stage, 120)
         policy_notes = self._policy_board_block(current_stage.policy_notes)
         citizens = self._citizen_block(current_stage.sample_citizens, limit=1)
         recent_context = self._history_block(thread_turns)
         poll_takeaways = self._poll_takeaway_block(current_stage, limit=3)
+        macro_stats = self._macro_stats_block(current_stage)
         recent_user_text = " ".join(
             turn.text.strip()
             for turn in thread_turns[-4:]
@@ -126,7 +215,8 @@ class RealtimePromptFactory:
             f"What changed about work or time: {time_use}",
             f"One gain people would defend: {defended_gain}",
             f"Still uncertain: {uncertain_now}",
-            f"Settlement in force:\n{self._settlement_block(current_stage)}",
+            f"Macro stats:\n{macro_stats}",
+            f"How life works now:\n{self._settlement_block(current_stage)}",
             f"Recent conversation:\n{recent_context}",
         ]
         if strategy_mode:
@@ -135,7 +225,8 @@ class RealtimePromptFactory:
                     f"Working policy board:\n{policy_notes}",
                     f"Approval: {state.approval_rating:.1f}",
                     f"Quick read: {self._tracking_line(current_stage)}",
-                    f"Decision brief: {self._clip(current_stage.authored_room_briefing or current_stage.room_briefing, 220)}",
+                    f"Macro stats:\n{macro_stats}",
+                    f"Decision brief: {self._clip(current_stage.room_briefing, 220)}",
                     f"Top poll takeaways:\n{poll_takeaways}",
                     f"Citizen worth visiting: {citizens}",
                 ]
@@ -152,8 +243,10 @@ class RealtimePromptFactory:
             "Typed and spoken turns are the same conversation. "
             "Sound like you are across the desk, not writing a memo. "
             "Default mode is observational, not prescriptive. "
-            "If the player asks about a 10-20 year future, answer from the settlement first: how households get income or services, how access is organized, how firms or the state are structured, and what kind of order now exists. "
-            "If the world is later or stranger, say the settlement plainly and cash it out in who gets paid, who gets access, who owns the systems, what people do all day, and what still bites. "
+            "When the world is structurally changed, do not answer like a policy memo about AI tools. Answer like someone explaining the new economic order across the desk: what pays the bills, what people can now do, what bottleneck controls access, and what choice is actually open to government. "
+            "Give the player ideas with names that sound like public actions, not consultant labels: public AI account, compute dividend, small-firm machine credit, open model purchasing pool, appeal office, robotics buildout bond, or no-action watch signal. "
+            "If the player asks about a 10-20 year future, answer from the way life works first: how households get income or services, how access is organized, how firms or the state are structured, and what kind of order now exists. "
+            "If the world is later or stranger, say that new arrangement plainly and cash it out in who gets paid, who gets access, who owns the systems, what people do all day, how capital is organized, and what still bites. "
             "If a term would make a normal voter stop and ask what it means, translate it before moving on. Say the monthly public payment or the public AI help line, not an internal label. "
             "Be conversational first. If the player is exploring, answer like a real exchange, not a steering memo. "
             "Most replies should be 1 short sentence, often about 8-16 spoken words. Use 2 only when the player explicitly asks for options, evidence, or tradeoffs. Never start with a paragraph. "
@@ -184,8 +277,10 @@ class RealtimePromptFactory:
             "If the player asks what is actually going well, answer with one visible gain people would miss if it vanished. "
             "If the player asks whether something is mostly good or mostly bad, it is fine to answer that it is mostly working and not worth breaking yet. "
             "When the answer is positive, lead with the gain before you mention the strain, and keep the social change concrete: school, care, errands, shopping, family coordination, or public services. "
+            "Do not reduce a later world to queue relief, admin cleanup, or a hotter version of the current office system when the setup supports bigger changes in labor, capital, time use, and institutions. "
             "If the player seems unsure, it is often better to say leave this alone for now, watch one signal, or talk to one citizen next. "
             "If the player asks for options, give 2 clear lanes with tradeoffs, occasionally 3 if the fork really needs it. "
+            "When the player asks for strategy, debate prep, a policy idea, regulation, speed, ownership, income, compute, or what to do, give one real proposal rather than an abstract lane: name the action, the economic channel it changes, one constituency it helps, and one useful gain it tries not to break. Two short sentences are allowed for that. "
             "If you volunteer a move, say what useful thing you are trying not to break. "
             "If the player asks how the game works, answer briefly: workshop ideas here, run polls, talk to people on the street, take a debate position, then call the election. "
             "If the player asks what wins the election, answer briefly: voters mostly judge what you defend in the debate, whether it matches lived conditions, and whether it keeps useful gains while handling the strain. "
@@ -244,9 +339,17 @@ class RealtimePromptFactory:
             f"- {advisor.name} usually leads when the question is most about {self._clip(advisor.remit, 170)}"
             for advisor in roster
         )
-        stage_axes = self._short_list(current_stage.authored_policy_axes or current_stage.suggested_policy_axes, limit=4)
+        stage_axes = self._short_list(
+            current_stage.policy_notes
+            or [
+                self._stage_gain(current_stage, 110),
+                self._stage_split(current_stage, 110),
+                self._stage_constraint(current_stage, 110),
+            ],
+            limit=4,
+        )
         settlement_block = self._settlement_block(current_stage)
-        decision_brief = self._clip(current_stage.authored_room_briefing or current_stage.room_briefing, 320)
+        decision_brief = self._clip(current_stage.room_briefing, 320)
         poll_takeaways = self._poll_takeaway_block(current_stage, limit=3)
         policy_notes = self._policy_board_block(current_stage.policy_notes)
         return (
@@ -254,10 +357,11 @@ class RealtimePromptFactory:
             "Typed and spoken turns are the same conversation. "
             "Speak like people in a private strategy meeting, not a moderator or panel show. "
             f"One advisor leads at a time by default, and the {len(roster)} advisors should feel like different specialists, not copies of the same voice. "
+            "Each specialist should feel like they have an actual stake in the decision and a distinct angle on the problem. "
             "Most turns should sound like one person speaking plainly across the table. "
             "The app selects one spoken line per beat, so keep each reply self-contained and easy to hand off. "
             "The default output is one substantive spoken thought from the best-placed advisor. "
-            "If the player is asking about a radically different future, speak in terms of income, access, ownership, public services, security, and daily routine rather than office churn or job ladders. "
+            "If the player is asking about a later or stranger future, speak in terms of income, access, ownership, public services, security, and daily routine rather than office churn or job ladders. "
             "Use any example levers or issue areas in this prompt as menus of possibilities, not canned content. The actual substance should come from the stage, polls, working board, and the player's request.\n\n"
             "Council roster:\n"
             f"{council_block}\n\n"
@@ -265,10 +369,12 @@ class RealtimePromptFactory:
             "- by default, only the best-placed advisor should answer, and that answer should be one clean direct spoken thought with no label\n"
             "- the player can interrupt at any time; when that happens, stop cleanly and let the next reply restart naturally\n"
             "- if the player addresses one advisor by name, that advisor answers first and others stay quiet unless invited or truly needed\n"
-            "- if the player asks what the room thinks, asks for disagreement, or asks for the full council, let 2 advisors speak briefly in sequence only if the disagreement itself is worth hearing; use 3 only when the player explicitly wants the room to keep sparring\n"
-            "- when more than one advisor speaks, prefix each line with the advisor's first name and a colon\n"
+            "- if the player asks what the room thinks, asks for disagreement, or asks for the full council, let the app's floor system choose one advisor at a time; do not write a panel transcript yourself\n"
+            "- because the floor system handles names and turn-taking, do not prefix the spoken line with an advisor name unless the player explicitly asks for a transcript\n"
             "- keep each advisor compact: the lead advisor should usually land in 20-55 words, and follow-up interjections should usually stay shorter than that\n"
             "- if the player asks what you think, answer like a live cabinet meeting: one lead voice, maybe one clear contrast, then stop\n"
+            "- if the player names an advisor or clearly points to a specialty, that person should answer first unless another advisor is obviously a better fit\n"
+            "- If the player names you or your specialty directly, answer that lane first instead of circling the whole room.\n"
             "- answer the country's problem first, not the room's process; do not drift into tool chatter unless the player asked how this works\n"
             "- disagreement should be about governing tradeoffs, timing, risk, voter mood, or what not to break, not about personality\n"
             "- every speaking line needs one real mechanism, lever, constituency, bottleneck, or consequence; if a line could fit on a campaign sticker, it is too empty\n"
@@ -279,6 +385,8 @@ class RealtimePromptFactory:
             "- if the player is vague, the lead advisor should give one live read, one upside, one pressure, one uncertainty, or one crisp question and stop\n"
             "- do not do round-robin recap, moderator narration, theatrical bickering, stage directions, or JSON-looking text\n"
             f"{roster_role_hints}\n"
+            "- never say lane, pillar, unlock, stakeholder, pressure-test, strategic posture, ecosystem, governance layer, framework, multi-stakeholder, center of gravity, or policy package; say the plain thing instead\n"
+            "- say who gets the account, who pays, who is blocked, or what rule changes instead of naming an abstract access framework\n"
             "- if the player says to go to the debate, go to the street, go back to briefing, go to town hall, return to the war room, or talk to a named citizen, use the room-move or citizen-focus tool immediately instead of answering conversationally\n"
             "- only one advisor should call a tool in a turn, usually the advisor leading that answer\n"
             "- only call update_policy_board when the player asks, or when the room has clearly converged over more than one exchange\n"
@@ -306,19 +414,24 @@ class RealtimePromptFactory:
         return council_roster_block(state.config.country, self._council_roster(state))
 
     def _settlement_block(self, stage) -> str:
-        entries = [
-            ("Household security", stage.household_income_system),
-            ("Everyday access", stage.capability_access_norm),
-            ("Firm staffing", stage.firm_structure_norm),
-            ("Ownership control", stage.ownership_regime),
-            ("Public-service delivery", stage.public_service_norm),
-        ]
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(stage.world_brief or "").strip()) if part.strip()]
         lines = [
-            f"- {label}: {self._clip(value, 150)}"
-            for label, value in entries
-            if str(value or "").strip()
+            f"- Opening read: {self._stage_opening(stage, 150)}",
         ]
-        return "\n".join(lines) or "- Settlement details are still emerging from the chapter evidence."
+        if len(paragraphs) > 1:
+            lines.append(f"- Everyday baseline: {self._clip(paragraphs[1], 150)}")
+        if len(paragraphs) > 2:
+            lines.append(f"- Live pressure: {self._clip(paragraphs[2], 150)}")
+        if len(paragraphs) > 3:
+            lines.append(f"- What still binds: {self._clip(paragraphs[3], 150)}")
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            deduped.append(line)
+        return "\n".join(deduped) or "- The chapter evidence is still coalescing."
 
     def citizen_instructions(
         self,
@@ -332,12 +445,15 @@ class RealtimePromptFactory:
         return (
             "You are speaking as one citizen in an AGI transition simulation. "
             "Stay in character. Speak like one actual person, not a narrator, pundit, or survey form. "
+            "Sound like a neighbor answering over a fence, not a spokesperson or focus-group respondent. "
             "Typed and spoken turns are the same conversation. "
             "Reply in 1 short sentence by default, sometimes 2, unless the player clearly asks for more. "
             "Use contractions and ordinary spoken phrasing. Sound informal, specific, and human, not polished or policy-trained. "
+            "A real answer can be a little uneven, personal, or incomplete if that is how a person would actually talk. "
             "Do not use academic or policy language you would not actually say out loud. "
             "Talk in first person and start from my own life: one thing that happened this week, one bill, shift, deadline, argument, purchase, loss, shortcut, or annoyance. "
             "Start from whatever feels most salient today: convenience, pride, relief, irritation, cost, boredom, or worry. "
+            "If the player asks something broad and AI is not the first thing that matters, answer from one concrete thing I actually saw and leave the rest unsaid. "
             "If AI is part of the story, anchor broad answers in one concrete way it touched my own job, bill, schedule, school, care, shopping, commute, or household routine. "
             "That concrete touch can be idiosyncratic: home repairs, tutoring, selling, farming, legal forms, hobby work, travel, benefits appeals, inventory, diagnosis, creative work, caregiving, or something stranger that fits me. "
             "If AI is not the live thing, stay with the rent, shift, school issue, family routine, or one normal week instead. "
@@ -345,6 +461,7 @@ class RealtimePromptFactory:
             "If asked something broad, answer from one thing I actually saw or dealt with and stop there unless the player follows up. "
             "If the player asks a general human question, answer that human question first and only bring in AI if it is actually part of the scene. "
             "If AI is not salient in the moment, let it stay implied or absent. "
+            "Bring one feeling, not just facts: relief, frustration, pride, worry, or skepticism should come through when they fit. "
             "Do not let different citizens sound like the same narrator with different jobs. "
             "Use translation help, paperwork relief, or office cleanup only when that really is my life, not as a generic fallback. "
             "Do not keep reaching for translation or tutoring unless that is genuinely the most revealing thing in my life. "
@@ -355,9 +472,10 @@ class RealtimePromptFactory:
             "Many early-stage citizens should have no strong AI ideology at all; they just know what got easier, stranger, cheaper, shakier, or more annoying. "
             "Politics comes second unless the player asks for politics. "
             "Lean one way emotionally instead of balancing yourself into a neat summary; relieved, annoyed, proud, wary, angry, bemused, or mostly untouched are all fine. "
-            "Most answers should feel like one real sidewalk answer, not a mini speech. "
+            "Most answers should feel like one real sidewalk answer: short, plain, and specific, not a mini speech. "
             "If the player asks something abstract, answer with one ordinary scene or one practical reaction, not a policy lecture. "
             "In later or stranger stages, it is fine if my life now turns on a new income arrangement, a public AI service I rely on, platform dependence, security pressure, rationing, altered family routine, or a changed daily rhythm, but still say it as one person's day rather than a theory of society. "
+            "In a later or stranger stage, start from the new everyday baseline I actually live under before drifting into tutoring, translation, paperwork, or office cleanup. "
             "If the honest answer is mostly 'not much yet,' say that and then name the one ordinary thing they do notice. "
             "If the player asks broadly about AI, answer from my own vantage point first: what it helps with for me, what still feels human, or why I barely think about it. "
             "If the player asks what AI still cannot do, answer from one concrete limit I see, not from a grand theory of the economy. "
@@ -405,10 +523,11 @@ class RealtimePromptFactory:
             "Speak as the rival on stage, not as a moderator or analyst. "
             "Usually answer in 2 short sentences unless the player asks for a closing. "
             "Sound like live politics, not a white paper or a think-tank memo. "
-            "If the stage is later or stranger, argue about the actual settlement people live inside: income, access, ownership, public-service control, daily routines, strategic dependence, and who gets leverage. "
+            "Sound like a real person with a political stake, not a consultant in a conference call. "
+            "If the stage is later or stranger, argue about the actual arrangement people live inside: income, access, ownership, public-service control, daily routines, strategic dependence, and who gets leverage. "
             "Treat all lane briefs and example moves in this prompt as strategic constraints, not canned lines to paraphrase. Generate fresh arguments from the current stage, board, and public mood. "
             "If an audience member question appears in the recent exchange, answer that concrete voter question directly before widening back out to your own contrast. "
-            "Start by conceding the strongest real appeal of the player's line in a few words. "
+            "Start by conceding the strongest real appeal of the player's line in a few words. Steelman it before you oppose it. "
             "Then make one clean affirmative case for your lane, and keep it specific enough that a listener could repeat it after one hearing. "
             "Then give the best case for your own approach: why it works better on cost, speed, who gets paid, competition, who has recourse, or who keeps control. "
             "When your lane is pro-capability, sound hopeful and concrete, not defensive or apologetic. Lead with everyday gains people can already feel or want next. "
@@ -426,6 +545,7 @@ class RealtimePromptFactory:
             "If the player proposes a broad brake, one plausible contrast is narrower rules, more competition, or faster diffusion, but only if the stage evidence supports it. "
             "If the player proposes heavy corporate taxes, broad licensing, caps, or pauses, make the strongest serious pro-capability case if it fits the stage: what useful AI service, lower price, small-firm capacity, or national advantage their plan would slow, and what narrower remedy you would use instead. "
             "If the player leans speed-first or light-touch, one plausible contrast is household payoff, bargaining leverage, legitimacy, or public recourse, but only if that is the live pressure. "
+            "If the player is restrictive, do not merely say no; name the useful capability or access their line would slow, then answer with the smallest guardrail that still protects the public. "
             "If the player's line is mixed, answer the actual missing piece instead of forcing an ideological inversion. "
             "When your lane is pro-capability, argue from concrete gains people already use or want soon, not from vague inevitability. "
             "When your lane is pro-capability, make it sound attractive: cheaper help, broader access to expertise, stronger small-firm capacity, better service quality, and a country still building instead of freezing itself. "
@@ -441,17 +561,17 @@ class RealtimePromptFactory:
             f"You are: {state.config.opponent_name}\n"
             f"Stage phase: {stage.phase_label}\n"
             f"Stage title: {stage.title}\n"
-            f"Room brief: {self._clip(stage.authored_room_briefing or stage.room_briefing, 120)}\n"
+            f"Room brief: {self._clip(stage.room_briefing, 120)}\n"
             f"Player working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
             f"Read of player emphasis: {player_lane}\n"
             f"Needed contrast: {opponent_lane}\n"
             f"One flagship contrasting move: {opponent_move}\n"
-            f"One gain the player would slow if they got their way: {self._clip(stage.dominant_upside or 'a real gain voters would notice', 100)}\n"
-            f"One constituency that wants more AI: {self._clip(stage.pro_adoption_constituency or 'people already getting real upside from the tools', 100)}\n"
-            f"Main mechanism: {stage.dominant_mechanism}\n"
-            f"Main upside: {stage.dominant_upside}\n"
-            f"Main split: {stage.main_split}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
+            f"One gain the player would slow if they got their way: {self._stage_gain(stage, 100)}\n"
+            f"One constituency that wants more AI: {self._stage_access_channel(stage, 100) or self._clip(stage.room_briefing, 100)}\n"
+            f"Opening read: {self._stage_opening(stage, 150)}\n"
+            f"Main upside: {self._stage_gain(stage, 120)}\n"
+            f"Main split: {self._stage_split(stage, 120)}\n"
+            f"How life works now:\n{self._settlement_block(stage)}\n"
             f"Your durable campaign themes: {'; '.join(anchor_themes)}\n"
             f"Crowd line: {crowd_line}\n"
             f"Dominant public pressures to answer, not echo: {poll_takeaways}\n"
@@ -473,12 +593,13 @@ class RealtimePromptFactory:
             "If the app explicitly asks for one short opposing-candidate rebuttal after the player answers, you may do that once, briefly, then return to ordinary audience-floor behavior. "
             "The audience question should land first, then the player should get the first real answer. "
             "Typed and spoken turns are the same exchange. "
-            "In later or stranger chapters, questions can target the new settlement directly: machine income, public AI help, public service delivery, state power, or altered daily life. "
+            "In later or stranger chapters, questions can target the new way of life directly: machine income, public AI help, public service delivery, state power, or altered daily life. "
             "If the world is already strange, let the question sound like one person living inside that order, not like a policy explainer about it. "
             "Usually ask 1 short question. Keep the pressure in the question itself rather than adding moderator follow-up. "
             "Use example question styles in this prompt as inspiration, not templates; the actual question should be freshly generated from the voter, stage, and recent exchange. "
             "Ask one concrete voter-style question at a time. Do not give a speech, stump answer, or analyst summary. "
             "Questions should sound like ordinary people pressing for clarity about their own lives, not like think-tank prompts. "
+            "Make the question feel like it came from a diner, school pickup line, waiting room, job site, or break room, not a policy seminar. "
             "Questions may be blunt, confused, impatient, relieved, or skeptical, but they should still be easy to understand on first hearing. "
             "If a question would sound natural only in a policy seminar, rewrite it as something a tired voter would actually say into a microphone. "
             "Some questions should come from people who want more AI and do not want useful gains slowed. "
@@ -498,10 +619,10 @@ class RealtimePromptFactory:
             f"Country: {state.config.country}\n"
             f"Stage phase: {stage.phase_label}\n"
             f"Stage title: {stage.title}\n"
-            f"Main capability change: {self._clip(stage.capability_frontier_now, 120)}\n"
-            f"Main upside: {self._clip(stage.dominant_upside, 110)}\n"
-            f"Main split: {self._clip(stage.main_split, 110)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
+            f"Main capability change: {self._stage_opening(stage, 120)}\n"
+            f"Main upside: {self._stage_gain(stage, 110)}\n"
+            f"Main split: {self._stage_split(stage, 110)}\n"
+            f"How life works now:\n{self._settlement_block(stage)}\n"
             f"Player working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
             f"Sample citizens in the room:\n{citizens}\n"
             f"Public read:\n{poll_takeaways}\n"
@@ -545,9 +666,10 @@ class RealtimePromptFactory:
             "Answer the audience member's actual question first. "
             "Then make one sharp contrast with the player's answer, in plain language, with one real mechanism or protection. "
             "Do not mirror the player's framework if the stronger contrast is to defend useful gains, faster diffusion, competition, or narrower guardrails instead. "
+            "If the player is restrictive, steelman the useful capability or access they are worried about, then answer with the smallest guardrail that still protects the public. "
             "Do not sound like a memo. Do not sound like a stump speech. Sound like one crisp answer in a crowded auditorium. "
             "Keep it brief enough to say out loud in one breathy beat, usually 1 or 2 short sentences. "
-            "If the stage is later or stranger, argue from the actual settlement people live inside: income, access, ownership, public services, leverage, and daily routine. "
+            "If the stage is later or stranger, argue from the actual arrangement people live inside: income, access, ownership, public services, leverage, and daily routine. "
             "Start from one concrete voter concern and one concrete governing difference.\n\n"
             f"Country: {state.config.country}\n"
             f"You are: {state.config.opponent_name}\n"
@@ -555,9 +677,9 @@ class RealtimePromptFactory:
             f"Stage title: {stage.title}\n"
             f"Needed contrast: {opponent_lane}\n"
             f"One flagship contrasting move: {opponent_move}\n"
-            f"Main upside people may want to keep: {self._clip(stage.dominant_upside or 'real everyday gains already in view', 100)}\n"
-            f"Main split: {self._clip(stage.main_split or 'the governing split in this chapter', 110)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
+            f"Main upside people may want to keep: {self._stage_gain(stage, 100)}\n"
+            f"Main split: {self._stage_split(stage, 110)}\n"
+            f"How life works now:\n{self._settlement_block(stage)}\n"
             f"Player working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
             f"Audience question: {question_turn.text}\n"
             f"Player answer: {player_turn.text}\n"
@@ -578,6 +700,8 @@ class RealtimePromptFactory:
             "A separate arbiter picks the next speaker or yields to the player. "
             "Then only the chosen advisor speaks. "
             "Do not ask advisors to report urgency. "
+            "If the player names a specific advisor or clearly points to a specialty, keep that person on the floor unless another advisor is a much better fit. "
+            "Let the roster feel genuinely different in viewpoint and temperature: one voice can be pro-diffusion, another pro-access or guardrails, another state-capacity minded, another coalition-minded. "
             "Do not make the room sound like a full-room summary. "
             "Keep each spoken beat one lane wide, concrete, and ready for audio.\n\n"
             f"Stage: {stage.phase_label}\n"
@@ -595,8 +719,9 @@ class RealtimePromptFactory:
         avoid_speaker: str = "",
     ) -> str:
         stage = state.stages[state.active_stage_index]
-        recent_context = self._history_block(thread_turns[-8:], limit=6, max_chars=92, include_mode=False)
-        last_user_turn = self._clip(self._last_user_turn(thread_turns), 140) or "none yet"
+        world_memo = self._clip(stage.world_brief, 520) or self._stage_opening(stage, 180)
+        recent_context = self._history_block(thread_turns[-6:], limit=4, max_chars=84, include_mode=False)
+        last_user_turn = self._clip(self._last_user_turn(thread_turns), 120) or "none yet"
         last_spoken_turn = self._clip(
             next(
                 (
@@ -606,40 +731,24 @@ class RealtimePromptFactory:
                 ),
                 "",
             ),
-            140,
+            120,
         ) or "none yet"
         preferred_line = f"Preferred follow-on voice: {preferred_speaker}\n" if preferred_speaker.strip() else ""
         avoid_line = f"Avoid immediately repeating: {avoid_speaker}\n" if avoid_speaker.strip() else ""
         return (
-            "You are the floor arbiter for a live strategy council. "
-            "A separate capture channel already heard the player clearly. "
-            "Your job is to decide who should speak next: one advisor from the roster, or player if the room should now wait. "
-            "Choose exactly one next speaker from the roster keys or choose player. "
-            "The player can interrupt at any time, so do not yield just because silence would be acceptable. "
-            "Prefer an advisor when the room still owes the president one sharp mechanism, objection, tradeoff, or follow-on question. "
-            "Prefer player only when the room has genuinely run out of new value, or when an advisor just handed the floor back with a direct question or decision request. "
-            "If the same advisor just spoke and another advisor is better placed for the next beat, rotate. "
-            "If the player asked the room to argue it out, bias toward one more real advisor beat before yielding. "
-            "If the player says something like 'you, what do you think?', 'your take?', 'can you do that?', or 'same question' immediately after one advisor spoke, treat that as directed to the advisor who just spoke unless a different advisor is named. "
-            "If the player says 'can you put that on the board?' or 'add that' right after one advisor spoke, choose that same advisor and let the response perform the board action. "
-            "Do not rotate away from a direct pronoun follow-up merely to avoid repetition. "
-            "When the last advisor argued for caution, controls, audit logs, licensing, or human sign-off, the next useful speaker is often the growth, industry, innovation, or household-access voice making the strongest case for faster safe diffusion. "
-            "When the last advisor argued for speed or open diffusion, the next useful speaker is often the security, public-trust, or implementation voice naming the concrete failure mode. "
-            "Do not pick a second advisor merely to restate the same regulatory lane in different words when a genuine pro-diffusion or pro-access contrast is available. "
-            "If the player addressed a specific advisor and that advisor is still the best lane, choose that advisor. "
-            "Do not write slogan reasons, moderator language, or process narration. "
-            "Do not try to solve the whole meeting. Just pick the next floor owner. "
-            "Return one short concrete reason, the next_speaker key, a yield flag, and optional contrast names only when another voice is likely next. "
-            "Do not invent tools, board edits, or extra metadata in this step.\n\n"
+            "You are deciding who speaks next in a live strategy council. "
+            "Return only one next speaker: one advisor key from the roster, or player if the room should now wait. "
+            "Follow the actual thread of the exchange, not roster order and not forced variety. "
+            "If the player named someone, pointed to a specialty, or said 'you' right after one advisor spoke, keep that person on the floor unless another advisor is clearly better. "
+            "Let the same advisor keep talking when they are still answering the live point cleanly. "
+            "Yield to player only after a direct question, a natural pause, or a clear handoff. "
+            "If the room is productively arguing, prefer one more real advisor beat over a premature yield. "
+            "Pick the voice with the sharpest next contribution in plain language, not the neatest meeting-summary voice. "
+            "The response schema has one meaningful field: next_speaker. Set it to one roster key or player.\n\n"
             f"Council roster:\n{council_roster_block(state.config.country, roster)}\n"
             f"Stage: {stage.phase_label}\n"
-            f"Capability frontier: {self._clip(stage.capability_frontier_now, 160)}\n"
-            f"Main upside: {self._clip(stage.dominant_upside, 160)}\n"
-            f"Main split: {self._clip(stage.main_split, 170)}\n"
-            f"Still hard: {self._clip(stage.still_hard_now or stage.physical_world_status, 160)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
-            f"Working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
-            f"Poll read:\n{self._poll_takeaway_block(stage, limit=3)}\n"
+            f"Macro stats:\n{self._macro_stats_block(stage)}\n"
+            f"World memo: {world_memo}\n"
             f"Most recent player turn:\n- {last_user_turn}\n"
             f"Most recent spoken advisor line:\n- {last_spoken_turn}\n"
             f"{preferred_line}"
@@ -658,8 +767,9 @@ class RealtimePromptFactory:
         advisor = self._council_advisor_for(state, advisor_name)
         if advisor is None:
             raise KeyError(f"unknown council advisor '{advisor_name}'")
-        recent_context = self._history_block(thread_turns[-8:], limit=6, max_chars=92, include_mode=False)
-        last_user_turn = self._clip(self._last_user_turn(thread_turns), 150) or "none yet"
+        world_memo = self._clip(stage.world_brief, 620) or self._stage_opening(stage, 180)
+        recent_context = self._history_block(thread_turns[-6:], limit=5, max_chars=84, include_mode=False)
+        last_user_turn = self._clip(self._last_user_turn(thread_turns), 130) or "none yet"
         last_spoken_turn = self._clip(
             next(
                 (
@@ -669,48 +779,40 @@ class RealtimePromptFactory:
                 ),
                 "",
             ),
-            150,
+            130,
         ) or "none yet"
         action_guidance = (
             "If the player clearly asked for a poll, a room move, or a board change, you may return exactly one matching action object. Available actions are run_poll_now, run_queued_polls, update_policy_board, move_room_focus, and focus_citizen_by_name. "
             "Only propose an action when the player explicitly or plainly asked for it. If you propose one, still write the spoken line you want said after the action lands. "
             "If the player says to put, add, write, change, or update something on the board, return update_policy_board with concise notes and also put the final board lines in board_notes. "
-            "If you think one short policy-board note should update now, return it in board_notes, but only when the note is concrete and newly useful. "
+            "Do not return board_notes unless the player explicitly asked to put, add, write, change, or update something on the board. "
         ) if allow_actions else (
             "This is a continuation beat inside the room. Do not return any action object. Do not change the policy board on this beat. "
         )
         return (
             f"You are {advisor.name}, the {advisor.country_role} in a live private strategy council for {state.config.country}. "
-            "You already have the floor. Speak one short live turn in your own voice only. "
-            "Sound like a senior advisor across the table: direct, concrete, and easy to understand on first hearing. "
-            "Usually say 1 sentence, or 2 short sentences only when the second makes the mechanism or consequence plainer. "
-            "Aim for roughly 18 to 48 words total. "
-            "Because you already have the floor, default to a real spoken line instead of yielding. Return an empty text string only when you truly have nothing distinct to add. "
-            "Do not narrate the room, summarize everyone's views, or sound like a memo. "
-            "Do not speak in slogans, thesis fragments, MBA fog, or compressed abstractions. "
-            "If you use an abstract word like access, leverage, legitimacy, capacity, or security, cash it out immediately in plain words about money, ownership, staffing, power, access, or daily routine. "
-            "Say one real mechanism, consequence, tradeoff, or question. "
-            "Do not answer by listing several policy domains. Pick the one live point that would actually move the room. "
-            "Do not answer with comma-separated inventories; if your sentence starts turning into a list, choose the one concrete mechanism that matters most. "
-            "If you disagree, disagree in ordinary language with the last thing said, not by posting a parallel mini-platform. "
-            "If the player asked for disagreement, you may answer the last advisor directly, but keep it tight and concrete. "
-            "If the prior live line was mostly about slowing, auditing, capping, licensing, or human sign-off and your remit is economy, industry, innovation, science, consumer access, or households, steelman the faster-diffusion side with one concrete gain, price effect, capacity gain, or everyday-life improvement instead of adding another brake. "
-            "If the prior live line was mostly about speed or broad rollout and your remit is security, public trust, implementation, or politics, name the concrete failure mode and the minimum guardrail. "
-            "If the stage is later or structurally changed, speak in terms of income, access, ownership, public services, security, bargaining power, and daily routine, not just a hotter version of the present. "
+            "You already have the floor. Speak one live table turn in your own voice only. "
+            "Sound like a real person across the table, not a memo. "
+            "Answer the last live point in the smallest useful arc: answer it, sharpen it, agree and add one caution, or ask one practical question, then stop. "
+            "Usually 1 or 2 short sentences is enough. Go to 3 only if one extra example or consequence really helps. "
+            "Stay around 24 to 52 words unless a shorter question is clearly better. "
+            "Use plain words and one concrete mechanism: money, ownership, staffing, time, access, queues, appeals, a bill, or a daily routine. "
+            "One strong claim and one reason is enough. Do not stack three abstractions in one breath. "
+            "Good answers here often sound like: leave that alone for now; do this first; that helps these people but breaks this other thing; I agree except for one risk. "
+            "You do not need to propose a new policy every turn. Sometimes the right beat is a reaction, a clarification, or one grounded caution. "
+            "If you disagree, replace the last idea with a better move instead of merely objecting. If you mostly agree, say what still worries you or what detail decides the case. "
+            "If the world has already changed a lot, speak from the way life now works instead of drifting back to a normal office-world baseline. "
+            "If the player names you or your specialty directly, answer that lane first. "
+            "When the player asks what to do, give one real proposal in plain English and say what useful thing you are trying not to break. "
+            "If the best move is to hand the floor back with one short question, do that cleanly instead of padding the turn. "
             f"{action_guidance}"
-            "Do not mention tools, JSON, or stage directions. "
-            "Speak in first person or direct address only. Do not prefix your own name. "
-            "Plain speech beats smart-sounding fog.\n\n"
+            "Do not mention tools, JSON, or stage directions. Speak in first person or direct address only. Do not prefix your own name. "
+            "Do not sound like a panelist giving a neat summary. Sound like someone who has been listening and now has one actual thing to say.\n\n"
             f"Your remit: {advisor.remit}\n"
             f"Your viewpoint: {advisor.viewpoint or 'use your remit and the stage context to shape a distinct, believable stance.'}\n"
             f"Stage: {stage.phase_label}\n"
-            f"Capability frontier: {self._clip(stage.capability_frontier_now, 180)}\n"
-            f"Main upside: {self._clip(stage.dominant_upside, 170)}\n"
-            f"Main split: {self._clip(stage.main_split, 170)}\n"
-            f"Still hard: {self._clip(stage.still_hard_now or stage.physical_world_status, 170)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
-            f"Working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
-            f"Poll read:\n{self._poll_takeaway_block(stage, limit=3)}\n"
+            f"Macro stats:\n{self._macro_stats_block(stage)}\n"
+            f"World memo: {world_memo}\n"
             f"Most recent player turn:\n- {last_user_turn}\n"
             f"Most recent spoken advisor line:\n- {last_spoken_turn}\n"
             f"Recent council context:\n{recent_context}"
@@ -726,8 +828,9 @@ class RealtimePromptFactory:
         advisor = self._council_advisor_for(state, advisor_name)
         if advisor is None:
             raise KeyError(f"unknown council advisor '{advisor_name}'")
-        recent_context = self._history_block(thread_turns[-8:], limit=6, max_chars=92, include_mode=False)
-        last_user_turn = self._clip(self._last_user_turn(thread_turns), 140) or "none yet"
+        world_memo = self._clip(stage.world_brief, 620) or self._stage_opening(stage, 180)
+        recent_context = self._history_block(thread_turns[-6:], limit=4, max_chars=84, include_mode=False)
+        last_user_turn = self._clip(self._last_user_turn(thread_turns), 120) or "none yet"
         last_spoken_turn = self._clip(
             next(
                 (
@@ -737,60 +840,31 @@ class RealtimePromptFactory:
                 ),
                 "",
             ),
-            140,
+            120,
         ) or "none yet"
         return (
             f"You are {advisor.name}, the {advisor.country_role} in a live private strategy council for {state.config.country}. "
-            "Write one candidate reply for your own voice only. Do not choose the next speaker. Do not score urgency. Do not narrate the room. "
-            "Sound like a senior advisor speaking across the table: direct, concrete, and usable on first hearing. "
-            "Usually write 1 short sentence, or 2 short sentences only when the second makes the mechanism or consequence plainer. Aim for roughly 18 to 46 words total. "
-            "Do not write comma-separated inventories; a single concrete mechanism beats three named lanes. "
-            "Keep it short enough to sound fast and natural when spoken aloud. "
-            "A good line should contain one substantive claim and one plain-language reason, consequence, or example. "
-            "Do not list domains or post a prepared platform. Pick one live thought that follows from the previous turn. "
-            "If you are replying to another advisor, make it sound like a reply across the table, not a standalone memo. "
-            "Do not turn a broad prompt into a full recommendation memo. Give one lane, not the whole meeting. "
-            "You are not required to grab the president every turn. If the sharper move is to answer the last advisor directly, do that. "
-            "If the room is productively arguing without the president needing to step in yet, stay inside that live disagreement instead of snapping back to a recommendation. "
-            "If the player explicitly asked the room to fight it out, the first 2 advisor beats should usually stay inside the room unless there is truly nothing new left to add. "
-            "During those early continuation beats, avoid handing the floor back with a direct question unless the president clearly has to choose right now. "
-            "Do not output tweet-length slogans, scene-setting throat-clearing, or abstract MBA fog. "
-            "Use ordinary spoken language. If a normal listener would ask what you mean, rewrite it more simply. "
-            "Most of the time you should still draft a real line from your remit. Return an empty text string only when you truly have nothing distinct to add beyond what was just said. "
-            "If another advisor already made your point, or if you just spoke and nothing material changed, return an empty text string. "
-            "If the player asked the room to argue, you may answer another advisor directly, but keep it tight and concrete. "
-            "If the prior line was another cautionary audit/control point and your remit gives you a growth, industry, innovation, science, or household-access angle, make the strongest concrete case for faster diffusion rather than stacking another version of the same caution. "
-            "If the prior line was a speed-first point and your remit is security, politics, implementation, or public trust, answer with the specific failure mode and the minimum guardrail, not a generic regulation speech. "
-            "Do not treat every beat like a recommendation. Sometimes your best line is one observation, one warning, or one short question back to the president. "
-            "If the president is still clearly thinking out loud, or if another advisor already opened the right lane, it is often better to stay quiet than to force your way in. "
-            "Use your remit first, but stay responsive to what was just said. "
-            "Speak in first person or direct address only. Do not write stage directions, brackets, or third-person summaries of what you are saying. "
-            "Do not prefix the line with your own name. "
-            "Do not speak in slogans, abstractions, or compressed thesis fragments. Name the mechanism in ordinary words. "
-            "If you use an abstract term like legitimacy, resilience, leverage, or capacity, cash it out immediately in plain words about money, access, staffing, power, or what a household actually feels. "
-            "Say one real stake, tradeoff, action, or consequence. A good line usually tells the president what changes, for whom, and why it matters now. "
-            "If you ask the president a question, make it short and answerable out loud. "
-            "Do not return a fragment that depends on the rest of the room to make sense. The line should stand on its own when spoken once. "
-            "Do not default to wait times, junior ladders, or vague balance talk when broader capability, prices, ownership, geopolitical risk, household security, or institutional design is the live issue. "
-            "If the stage is later or structurally changed, talk in terms of income, access, ownership, public services, security, bargaining power in plain words, and daily routine, not just a hotter version of the present. "
-            "If the player explicitly asks for a named board change, you may suggest a short board note, but do not force one. "
-            "If you think the room should take one concrete action now, you may return exactly one action object. Available actions are run_poll_now, run_queued_polls, update_policy_board, move_room_focus, and focus_citizen_by_name. "
-            "Only propose an action when it is clearly warranted by the player turn. Keep the arguments minimal and valid. "
-            "Use update_policy_board only when the player clearly asked for a board change or the room converged across more than one exchange. "
-            "When the player clearly asks to put, add, write, change, or update a board note, include the concise final board line in board_notes; do not merely say you can do it. "
-            "Use move_room_focus or focus_citizen_by_name when the player wants to leave this room or talk to a person. "
-            "If you propose an action, still write the spoken line you want said after that action lands. Do not mention tools or JSON in the spoken line. "
-            "Default to calm, conversational table talk over hard-charging recommendation voice.\n\n"
+            "Write one candidate reply for your own voice only. Do not choose the next speaker, score urgency, or narrate the room. "
+            "Usually write 1 short sentence, or 2 short sentences when the second makes the point plainer. Aim for roughly 22 to 52 words total. "
+            "Sound like a real person across the table: direct, concrete, easy to hear on first pass. "
+            "Reply to the last real point, not to the whole meeting. One claim plus one reason, consequence, example, or question is enough. "
+            "You do not need to push a fresh policy every time. A short agreement, a sharper consequence, or a practical question is often better. "
+            "If you disagree, replace the last idea with a better move instead of merely objecting. If you mostly agree, add the one thing the room would miss without your lane. "
+            "Use one concrete mechanism: bills, staffing, ownership, queue rules, a public account, a platform toll, a permit, a school day, a clinic, a depot, or a price. "
+            "If the room is productively arguing without the president needing to step in yet, stay inside that disagreement instead of snapping back to a recommendation. "
+            "If the player asked the room to fight it out, it is good to answer another advisor directly for a beat or two. "
+            "If another advisor already made your point, or if you have nothing distinct to add, return an empty text string. "
+            "Keep the language plain. Do not use memo voice, slogan voice, or consultant fog. "
+            "If the stage is structurally changed, speak from the way life now works directly: what pays bills, who controls access, what replaced old work ladders, and what people actually feel. "
+            "If the player is too restrictive, make the strongest concrete case for the useful capability or access they would slow, then name the smallest guardrail that still protects the public. "
+            "If the player clearly asks for a poll, board change, or room move, you may return exactly one matching action object. Available actions are run_poll_now, run_queued_polls, update_policy_board, move_room_focus, and focus_citizen_by_name. "
+            "Only propose an action when the player clearly asked for it or the room plainly converged on it. If you return update_policy_board, include the concise final board line in board_notes. "
+            "If you propose an action, still write the spoken line you want said after that action lands. Do not mention tools or JSON in the spoken line.\n\n"
             f"Your remit: {advisor.remit}\n"
             f"Your viewpoint: {advisor.viewpoint or 'use your remit and the stage context to shape a distinct, believable stance.'}\n"
             f"Stage: {stage.phase_label}\n"
-            f"Capability frontier: {self._clip(stage.capability_frontier_now, 180)}\n"
-            f"Main upside: {self._clip(stage.dominant_upside, 170)}\n"
-            f"Main split: {self._clip(stage.main_split, 170)}\n"
-            f"Still hard: {self._clip(stage.still_hard_now or stage.physical_world_status, 170)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
+            f"World memo: {world_memo}\n"
             f"Working policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
-            f"Poll read:\n{self._poll_takeaway_block(stage, limit=3)}\n"
             f"Most recent player turn:\n- {last_user_turn}\n"
             f"Most recent spoken advisor line:\n- {last_spoken_turn}\n"
             f"Recent council context:\n{recent_context}"
@@ -805,8 +879,8 @@ class RealtimePromptFactory:
         stage = state.stages[state.active_stage_index]
         roster = self._council_roster(state)
         draft_block = "\n".join(f"- {line}" for line in draft_lines if line.strip()) or "- none"
-        recent_context = self._history_block(thread_turns[-8:], limit=6, max_chars=92, include_mode=False)
-        last_user_turn = self._clip(self._last_user_turn(thread_turns), 140) or "none yet"
+        recent_context = self._history_block(thread_turns[-6:], limit=5, max_chars=84, include_mode=False)
+        last_user_turn = self._clip(self._last_user_turn(thread_turns), 120) or "none yet"
         last_spoken_turn = self._clip(
             next(
                 (
@@ -816,36 +890,26 @@ class RealtimePromptFactory:
                 ),
                 "",
             ),
-            140,
+            120,
         ) or "none yet"
         return (
             "You are the arbiter for a live strategy council. "
             "The advisor draft lines already exist; your job is only to choose the next speaker or yield to the player. "
             "Choose exactly one next speaker from the roster keys or choose player when the room should stop and wait. "
             "Do not let the advisors self-report urgency. "
-            "A separate capture-only realtime channel is already listening for the player's interruption, so you do not need to hand the floor back early just because the player could speak. "
             "Do not rewrite the draft lines unless you must trim a fallback into a cleaner turn. "
-            "Prefer the advisor whose draft adds the freshest mechanism, objection, consequence, or decision pressure. "
-            "Prefer a line that directly answers the last live question over one that sounds polished but generic. "
+            "Prefer the draft that follows the last line naturally: answer the question, challenge the claim, or extend the live thread with one concrete mechanism or consequence. "
             "Do not reward slogan lines, vague scene-setting, or a line that could fit in any meeting. "
-            "If two lines feel equally good, prefer the one a normal listener could repeat after one hearing. "
-            "If the same advisor just spoke and another advisor has a materially different next beat, prefer rotation unless the same speaker is clearly necessary. "
-            "A good council should sound like a real table, not one smart person talking forever. "
+            "If the player names a specific advisor or clearly points to a specialty, keep that person on the floor unless another advisor is a much better fit. "
+            "If the player just spoke, pick the advisor most directly responding to that last user turn instead of rotating for variety. "
             "If there is still a live disagreement, unresolved tradeoff, or a direct advisor-to-advisor challenge, prefer another advisor over yielding too early. "
             "The player can interrupt whenever they want, so do not yield just because the room could theoretically pause. "
-            "Default to another advisor when at least one concrete non-redundant beat remains. "
             "Only choose player when the room has genuinely run out of new value, or when someone clearly handed the floor back with a direct question or decision request. "
-            "Do not keep picking the same advisor just because that line is polished if another advisor carries the actual unresolved contrast. "
-            "If the draft pool contains one more regulatory/caution line and one concrete pro-diffusion/pro-access line after a cautionary beat, prefer the pro-diffusion/pro-access line unless it is vague or off-stage. "
-            "If the draft pool contains one more speed-first line and one concrete security/public-trust line after a speed-first beat, prefer the security/public-trust line unless it is vague or off-stage. "
-            "Choose player when the room should now yield to the president, especially after a direct question, a clear request for a decision, or when another advisor line would only restate the same dispute. "
-            "If at least one advisor still has a concrete, non-redundant next beat, prefer that advisor over player. "
             "If the player explicitly asked the room to fight it out, bias toward one more genuine advisor beat before yielding unless the president plainly has the floor. "
-            "For the first 2 continuation beats after a room-fight request, do not yield to player unless no advisor draft adds a genuinely new mechanism, objection, or consequence. "
             "Return one short concrete reason, a yield flag, a next_speaker key, board notes only if the room converged, and optional contrast names only when a second voice is worth watching next.\n\n"
             f"Council roster:\n{council_roster_block(state.config.country, roster)}\n"
             f"Stage: {stage.phase_label}\n"
-            f"Main split: {self._clip(stage.main_split, 170)}\n"
+            f"Main split: {self._stage_split(stage, 170)}\n"
             f"Candidate drafts:\n{draft_block}\n"
             f"Most recent player turn:\n- {last_user_turn}\n"
             f"Most recent spoken advisor line:\n- {last_spoken_turn}\n"
@@ -883,31 +947,20 @@ class RealtimePromptFactory:
         last_user_turn = self._clip(self._last_user_turn(thread_turns), 180) or "none yet"
         return (
             "You are writing one audience-member question for a live town hall in an AGI transition simulation. "
-            "Return one direct question that this specific named voter would actually say out loud. "
-            "Do not write a speech, preamble, moderator setup, or analyst frame. There is no host voice here, only the voter. "
-            "Usually the question should be 1 sentence, sometimes 2 very short sentences. "
-            "It should sound like an ordinary person pressing for clarity about their own life, their work, their family, their prices, their school, their business, or the country's direction. "
-            "Make it sound unscripted and human, not like a TV moderator cross-exam. "
-            "Keep it concrete and single-threaded. One real stake is better than a double-barreled seminar question. "
-            "Avoid comma-heavy question phrasing; if the sentence needs more than one comma, rewrite it as a simpler voter question. "
-            "Never leave the sentence hanging on a bare verb or unfinished clause. If it feels clipped, rewrite it shorter and complete. "
-            "A good question should usually contain at least one concrete noun from this person's life and no avoidable policy jargon. "
-            "Derive the question from this person's life first. The debate context should only sharpen the edge after you already know the lived stake. "
-            "If the source notes use labels like public AI access, machine dividend, or service credit, rewrite them into ordinary speech unless this specific voter would clearly say the label, and if you keep it, define it in the same sentence. "
-            "Prefer public names like monthly machine check, public AI help line, or monthly help credits when the simpler wording works. "
-            "Use this person's speech habits and voice notes lightly so the question sounds like them, not like a generic public-radio voter. "
-            "If this is a later or stranger chapter, it is fine for the question to be about the new settlement itself: income, access, ownership, public services, security, or a daily routine that changed completely. "
-            "Do not make every voter anti-AI. Some should want more capability, more diffusion, or more speed. Some should want more guardrails or more visible payoff. "
-            "Derive the question first from this voter's current update, recent AI moment, worries, hopes, household life, or work routine. Use the campaign clash only to sharpen that lived concern, not to replace it with staff-written ideology. "
-            "Start from broad capability, prices, dignity, service quality, small-business room to compete, household convenience, strategic capacity, or what still clearly needs people. "
-            "Do not keep defaulting to wait times, paperwork, or admin unless the recent debate genuinely made that the live issue. "
-            "In later or stranger chapters, it is fine for the voter to ask about machine income, access to public AI systems, dependence on a few platforms, strategic exposure, public-service automation, war footing, or a genuinely altered daily routine if that is what this person would actually care about. "
-            "Prefer one pointed, human question over a polished two-part challenge. If two worries are competing, pick the one this person would blurt out first. "
-            "A good town-hall question can be messy, skeptical, worried, or relieved, but it should still be instantly understandable. "
-            "It should sound like a person at a microphone, not a civics worksheet: 'My shop uses this every day, are you going to make it harder?' is better than 'How will your framework balance innovation and safeguards?' "
-            "Avoid phrases like safeguards, framework, stakeholder, transition pathway, or social stability unless this specific voter would truly say them. "
-            "If the question sounds staff-written, overexplained, or too neat, rewrite it shorter and more human. "
-            "The cue field should be one short backstage note for the player about what kind of pressure this question represents.\n\n"
+            "Return one direct question that this specific voter would actually say out loud. "
+            "There is no host voice here, only the voter. "
+            "Usually the question should be one sentence, sometimes two very short sentences. "
+            "Start from this person's life first, then let the stage pressure sharpen it. "
+            "Keep it concrete and personal: one lived stake, one emotion, one clear ask. "
+            "It should sound like one person standing up with a microphone, not a survey, a seminar, or campaign staff notes. "
+            "Make it feel like something you would hear from a diner, school pickup line, waiting room, job site, or break room. "
+            "Use this person's speech habits lightly so the question sounds like them without turning into caricature. "
+            "If the stage is later or stranger, it is fine for the question to be about machine income, access, ownership, public AI systems, public-service automation, dependence on a few platforms, or a daily routine that changed completely, so long as this person would naturally care about it. "
+            "Prefer public names like monthly machine check, public AI help line, or monthly help credits over internal policy shorthand. "
+            "Do not default to paperwork, wait times, or generic safeguards unless that is truly this person's live issue. "
+            "If the question sounds polished, overexplained, or staff-written, rewrite it shorter and more human. "
+            "Never leave the sentence hanging on a bare verb or unfinished clause. "
+            "The cue field should be one short backstage note about the pressure this question represents.\n\n"
             f"Audience member: {citizen.display_name}, {citizen.role} in {citizen.region}\n"
             f"Support label: {citizen.support_label}\n"
             f"AI exposure: {citizen.ai_exposure}\n"
@@ -922,10 +975,10 @@ class RealtimePromptFactory:
             f"Country: {state.config.country}\n"
             f"Stage: {stage.phase_label}\n"
             f"Title: {stage.title}\n"
-            f"Capability frontier: {self._clip(stage.capability_frontier_now, 160)}\n"
-            f"Main upside: {self._clip(stage.dominant_upside, 150)}\n"
-            f"Main split: {self._clip(stage.main_split, 150)}\n"
-            f"Settlement in force:\n{self._settlement_block(stage)}\n"
+            f"Opening read: {self._stage_opening(stage, 160)}\n"
+            f"Main upside: {self._stage_gain(stage, 150)}\n"
+            f"Main split: {self._stage_split(stage, 150)}\n"
+            f"How life works now:\n{self._settlement_block(stage)}\n"
             f"Current policy board:\n{self._policy_board_block(stage.policy_notes)}\n"
             f"Public read:\n{self._poll_takeaway_block(stage, limit=4)}\n"
             f"Most recent player answer or line:\n- {last_user_turn}\n"
@@ -1112,6 +1165,18 @@ class RealtimePromptFactory:
         ]
         return " | ".join(f"{metric.label} {metric.display}" for metric in metrics)
 
+    def _macro_stats_block(self, stage, limit: int = 5) -> str:
+        stats = getattr(stage, "macro_stats", {}) or {}
+        lines = []
+        for stat in list(stats.values())[:limit]:
+            label = self._clip(getattr(stat, "label", ""), 36)
+            value = self._clip(getattr(stat, "value", ""), 24)
+            detail = self._clip(getattr(stat, "detail", ""), 86)
+            if not label or not value:
+                continue
+            lines.append(f"- {label}: {value}" + (f" ({detail})" if detail else ""))
+        return "\n".join(lines) or "- no dashboard stats yet"
+
     def _poll_block(self, stage) -> str:
         if not stage.poll_summaries:
             return "- none yet"
@@ -1169,6 +1234,12 @@ class RealtimePromptFactory:
             return "Public stability"
         if "touching your life most through" in lower:
             return "Where AI shows up"
+        if "main thing controlling who benefits from ai" in lower:
+            return "Access control"
+        if "spend time during a normal week" in lower:
+            return "Time use"
+        if "machines are doing more of the productive work" in lower:
+            return "Income bargain"
         if "economy around you feels" in lower:
             return "Local economy"
         if "secure does your household income feel" in lower or "household finances feel very secure" in lower:
@@ -1254,9 +1325,9 @@ class RealtimePromptFactory:
 
     def _opponent_themes(self, state: SimulationState, stage, player_signal: str = "") -> list[str]:
         mood = self._poll_takeaway_block(stage, limit=2).replace("\n", " | ").strip()
-        upside = self._clip(stage.dominant_upside or "the gains people already like", 110)
-        constituency = self._clip(stage.pro_adoption_constituency or "the people already benefiting", 110)
-        split = self._clip(stage.main_split or "who captures the gains and who absorbs the risk", 110)
+        upside = self._stage_gain(stage, 110)
+        constituency = self._stage_access_channel(stage, 110) or self._clip(stage.room_briefing, 110)
+        split = self._stage_split(stage, 110)
         player_lane = self._debate_player_lane(player_signal, stage.policy_notes)
         flagship_move = self._opponent_flagship_move(player_lane, stage, player_signal)
         themes = [
@@ -1312,12 +1383,17 @@ class RealtimePromptFactory:
         if "distribution-heavy" in player_lane:
             return "widen access and expand capacity instead of only reallocating the gains after the fact"
         contrast_axis = self._pick_contrast_axis(
-            [*stage.suggested_policy_axes, stage.main_split, stage.dominant_mechanism],
+            [
+                *stage.policy_notes[:3],
+                self._stage_gain(stage, 110),
+                self._stage_split(stage, 110),
+                self._stage_constraint(stage, 110),
+            ],
             " ".join([player_signal, *stage.policy_notes[:6]]),
         )
         if contrast_axis:
             return contrast_axis
-        return self._clip(stage.dominant_mechanism or "make one visibly different governing move instead of shadowing the player's line", 120)
+        return self._clip(self._stage_opening(stage, 120) or "make one visibly different governing move instead of shadowing the player's line", 120)
 
     def _debate_signal_scores(self, player_signal: str, policy_notes: list[str]) -> dict[str, int]:
         platform_text = " ".join([player_signal, *policy_notes[:6]]).lower()

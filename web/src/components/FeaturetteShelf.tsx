@@ -261,24 +261,10 @@ export function FeaturetteShelf({
               <div className="featurette-cinema__title">
                 <span>{visibleFeaturette.subject}</span>
                 <strong>{visibleFeaturette.title}</strong>
-                <p>{visibleFeaturette.logline}</p>
               </div>
               <div className="featurette-cinema__top-actions">
                 <button
                   className="btn btn--primary"
-                  onClick={() => {
-                    if (playing) {
-                      stopPlayback();
-                      return;
-                    }
-                    void playFeaturette(visibleFeaturette, activeBeatIndex);
-                  }}
-                  disabled={!isPlayable(visibleFeaturette)}
-                >
-                  {playing ? "Stop" : activeBeatIndex > 0 ? "Resume" : "Play"}
-                </button>
-                <button
-                  className="btn btn--ghost"
                   onClick={() => {
                     void playFeaturette(visibleFeaturette, 0);
                   }}
@@ -294,19 +280,11 @@ export function FeaturetteShelf({
                       onClose();
                       return;
                     }
-                    closeActiveFeaturette();
+                    returnToShelf();
                   }}
                 >
-                  Skip reel
+                  {onClose ? "Close" : "Back"}
                 </button>
-                <button className="btn btn--ghost" onClick={returnToShelf}>
-                  Back to reels
-                </button>
-                {onClose ? (
-                  <button className="btn btn--secondary" onClick={onClose}>
-                    Close
-                  </button>
-                ) : null}
               </div>
             </div>
 
@@ -373,7 +351,6 @@ export function FeaturetteShelf({
             <span>{featurette.subject || `Reel ${index + 1}`}</span>
             <strong>{featurette.title}</strong>
             <p className="featurette-card__question">{featuretteQuestionLabel(featurette)}</p>
-            <p>{featurette.logline}</p>
             <small>
               {isPlayable(featurette)
                 ? "Play this reel"

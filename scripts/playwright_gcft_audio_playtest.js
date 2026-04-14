@@ -1187,8 +1187,8 @@ async function openVoice(page, args) {
   if (args.room === "debate" && args.auditoriumMode === "town_hall") {
     await clickLocatorIfVisible(page.getByRole("button", { name: /^Hide$/i }).first(), 3000);
     const callButton = page.getByTestId("townhall-call-on-voter").first();
-    const visibleCallButton = page.getByRole("button", { name: /Call on voter/i }).last();
-    const sceneCallButton = page.locator(".scene__voice-trigger").filter({ hasText: /Call on voter/i }).first();
+    const visibleCallButton = page.getByRole("button", { name: /Audience question|Call on voter/i }).last();
+    const sceneCallButton = page.locator(".scene__voice-trigger").filter({ hasText: /Audience question|Call on voter/i }).first();
     const callClicked =
       await clickLocatorIfVisible(sceneCallButton) ||
       await clickLocatorIfVisible(visibleCallButton) ||

@@ -86,6 +86,12 @@ export interface PollSummary {
   sample_reasons?: string[];
 }
 
+export interface MacroStatistic {
+  label: string;
+  value: string;
+  detail?: string;
+}
+
 export interface StageTracking {
   approval: TrackingMetric;
   vote_share_player: TrackingMetric;
@@ -162,28 +168,12 @@ export interface StagePackage {
   year_label: string;
   title: string;
   montage_logline: string;
-  capability_frontier_now: string;
-  still_hard_now: string;
-  physical_world_status: string;
-  dominant_mechanism: string;
-  dominant_upside: string;
-  main_split: string;
-  household_income_system: string;
-  capability_access_norm: string;
-  firm_structure_norm: string;
-  ownership_regime: string;
-  public_service_norm: string;
-  state_of_world: string;
-  detailed_summary: string;
+  world_brief: string;
   room_briefing: string;
-  authored_room_briefing: string;
-  economic_indicators: string[];
-  tension_points: string[];
-  suggested_policy_axes: string[];
-  authored_policy_axes: string[];
   narrative_beats: NarrativeBeat[];
   sample_citizens: CitizenSnapshot[];
   tracking: StageTracking;
+  macro_stats?: Record<string, MacroStatistic>;
   poll_summaries: PollSummary[];
   queued_poll_questions: string[];
   policy_notes: string[];

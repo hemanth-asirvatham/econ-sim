@@ -32,14 +32,20 @@ class AppSettings(BaseSettings):
             "http://localhost:5173",
             "http://localhost:5174",
             "http://localhost:5175",
+            "http://localhost:5176",
+            "http://localhost:5177",
+            "http://localhost:5178",
             "http://127.0.0.1:5173",
             "http://127.0.0.1:5174",
             "http://127.0.0.1:5175",
+            "http://127.0.0.1:5176",
+            "http://127.0.0.1:5177",
+            "http://127.0.0.1:5178",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
         ]
     )
-    allow_origin_regex: str = r"^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?$"
+    allow_origin_regex: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
     dummy_openai: bool = False
     default_population_description: str = (
         "A representative sample of the current United States adult population, "
@@ -48,7 +54,7 @@ class AppSettings(BaseSettings):
     )
     default_visual_style: str = (
         "Cezanne-Monet-Matisse civic impressionism with grounded people, public institutions, thicker layered brushstrokes, "
-        "broad color planes, softened edges, luminous atmosphere, selective abstraction, simplified human forms, and painterly illegibility for screens, labels, and signage; "
+        "broad color planes, softened edges, luminous atmosphere, fauvist warmth, selective abstraction, simplified human forms, and painterly illegibility for screens, labels, signage, text, and numerals; "
         "never glossy CGI, stock-photo realism, or cartoon stylization."
     )
     max_stage_count: int = 5
@@ -60,7 +66,7 @@ class AppSettings(BaseSettings):
     narration_reasoning_effort: str = "low"
     debate_model: str = "gpt-5.4"
     debate_reasoning_effort: str = "low"
-    council_draft_model: str = "gpt-5.4-mini"
+    council_draft_model: str = "gpt-5.4"
     council_decider_model: str = "gpt-5.4-nano"
     council_audio_model: str = "gpt-audio"
     persona_update_model: str = "gpt-5.4"
@@ -77,9 +83,9 @@ class AppSettings(BaseSettings):
     narration_voice: str = "ballad"
     realtime_input_transcription_model: str = "gpt-4o-mini-transcribe"
     realtime_semantic_vad_eagerness: str = "low"
-    realtime_capture_vad_threshold: float = 0.88
+    realtime_capture_vad_threshold: float = 0.93
     realtime_capture_vad_prefix_padding_ms: int = 260
-    realtime_capture_vad_silence_duration_ms: int = 840
+    realtime_capture_vad_silence_duration_ms: int = 960
     speech_model: str = "gpt-4o-mini-tts"
     image_model: str = "gpt-image-1.5"
     image_size: str = "1536x1024"

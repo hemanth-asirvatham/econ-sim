@@ -1,4 +1,5 @@
 import type { ConversationTurn, StagePackage } from "../types";
+import { stageSplit } from "./stageText";
 
 export interface TownHallQuestion {
   id: string;
@@ -56,8 +57,9 @@ function cueForCitizen(stage: StagePackage, citizen = stage.sample_citizens[0]) 
   if (source.trim()) {
     return compactLine(source);
   }
-  if (stage.main_split.trim()) {
-    return compactLine(stage.main_split);
+  const split = stageSplit(stage);
+  if (split.trim()) {
+    return compactLine(split);
   }
   return compactLine(citizen.support_label || citizen.role);
 }
@@ -72,7 +74,7 @@ function fallbackQuestionForCitizen(stage: StagePackage, citizen = stage.sample_
       citizen.recent_ai_moment ||
       citizen.summary ||
       citizen.current_update ||
-      stage.main_split ||
+      stageSplit(stage) ||
       citizen.role,
     140,
   );
@@ -111,7 +113,7 @@ export function buildTownHallQuestions(stage: StagePackage, debateTurns: Convers
     .find((turn) => turn.speaker === "user" && turn.text.trim())
     ?.text ?? "";
   const liveKeywords = new Set(
-    keywordBag([latestPlayerText, stage.main_split, ...stage.policy_notes].join(" ")).slice(0, 8),
+    keywordBag([latestPlayerText, stageSplit(stage), ...stage.policy_notes].join(" ")).slice(0, 8),
   );
   const priorCitizenTurns = new Set(
     debateTurns
@@ -144,5 +146,5 @@ export function buildTownHallQuestions(stage: StagePackage, debateTurns: Convers
 }
 
 export function townHallPrompt(question: TownHallQuestion) {
-  return `Town hall question from ${question.displayName}, ${question.role} in ${question.region}: ${question.question} Answer this voter directly and concretely before you move on.`;
+  return `${question.displayName}, ${question.role} in ${question.region}: ${question.question}`;
 }

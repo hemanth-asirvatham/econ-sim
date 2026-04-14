@@ -58,6 +58,75 @@ class GabrielService:
         self.compact_persona_template = Path(__file__).resolve().parent.parent / "prompts" / "persona_compact.jinja2"
         self._quiet_sink = open(os.devnull, "w", encoding="utf-8")
 
+    def _stage_opening(self, stage: StagePackage, max_chars: int = 180) -> str:
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(stage.world_brief or "").strip()) if part.strip()]
+        source = paragraphs[0] if paragraphs else str(stage.world_brief or "")
+        sentence = re.split(r"(?<=[.!?])\s+", source.strip(), maxsplit=1)[0].strip()
+        return self._bounded_text(sentence or source, max_chars)
+
+    def _stage_gain(self, stage: StagePackage, max_chars: int = 180) -> str:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", str(stage.world_brief or "").strip())
+            if sentence.strip()
+        ]
+        positive_keywords = (
+            "cheaper",
+            "easier",
+            "better",
+            "stronger",
+            "more capable",
+            "more reliable",
+            "more abundant",
+            "broader",
+            "public ai account",
+            "machine check",
+            "productivity rebate",
+            "dividend",
+            "household",
+            "expertise",
+            "public service",
+            "school",
+            "clinic",
+        )
+        preferred = next(
+            (line for line in sentences if any(keyword in line.lower() for keyword in positive_keywords)),
+            "",
+        )
+        fallback = preferred or self._stage_opening(stage, max_chars)
+        return self._bounded_text(fallback, max_chars)
+
+    def _stage_split(self, stage: StagePackage, max_chars: int = 180) -> str:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", str(stage.world_brief or "").strip())
+            if sentence.strip()
+        ]
+        split_keywords = (
+            "who controls",
+            "who owns",
+            "who gets",
+            "platform",
+            "toll",
+            "queue",
+            "priority",
+            "bottleneck",
+            "power fight",
+            "depend",
+            "dependency",
+            "access",
+            "rent",
+            "ration",
+            "chokepoint",
+            "public utility",
+            "private",
+        )
+        source = next(
+            (line for line in sentences if any(keyword in line.lower() for keyword in split_keywords)),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._bounded_text(source, max_chars)
+
     async def prepare_poll_question(self, question: str) -> str:
         text = " ".join(str(question or "").split()).strip()
         if not text:
@@ -175,48 +244,24 @@ class GabrielService:
                 f"Previous stage update: {row.get('current_update', '') or 'none yet'}\n"
                 f"Political backdrop only if locally salient: incumbent {incumbent_name}; player candidate {player_name}; opponent candidate {opponent_name}\n"
                 "Write the one or two changes this person would bring up first about how life feels now.\n"
-                "Keep the writing lived-in and uneven, as if someone were answering quickly in their own words.\n"
+                "Treat the stage capsule as the world memo. Most of your job is to let this person live inside that memo in plain language.\n"
+                "Before you write, decide three things: what now pays this person's bills, what account, employer, agency, or platform they depend on most, and what concrete moment from this week they would mention first.\n"
+                "Keep the writing lived-in, uneven, and ordinary, as if someone were answering quickly in their own words.\n"
                 "Constraints:\n"
                 "- summary must be exactly one sentence, about 22-38 words, written in close third person as a natural human blurb\n"
                 "- current_update must usually be 1 sentence or 2 clipped first-person sentences; target about 24-60 words total\n"
-                "- pick one lead arena first: home or family, school or care, local service, work or business, neighborhood or status, or barely touched yet\n"
-                "- pick one concrete moment from this week first: one bill, one purchase, one shift, one repair, one argument, one school issue, one family coordination problem, one side hustle, one local outage, one hobby opportunity, one relief, or one irritation\n"
-                "- pick one feeling and let it color the update: relieved, pleased, proud, annoyed, wary, rattled, bemused, angry, or mostly untouched\n"
-                "- vary the lead arena across the population instead of repeating one office-work or helper-app story\n"
-                "- good lead arenas here include household budgeting, childcare, elder care, school, landlord or benefits fights, home repair, shopping, commuting, neighborhood safety, local business, community life, migration ties, scams, insurance, platform dependence, or barely touched yet\n"
-                "- pick one concrete mechanism that is specific to this person's life rather than a generic helper-app summary: repair quotes, dispatch, fraud screening, inventory, lesson prep, licensing, diagnosis support, permitting, bidding, routing, customer acquisition, benefits appeals, or something just as local and specific\n"
-                "- if it feels natural, anchor the update in one concrete macro detail this person would actually notice: rent, wages, hours, prices, staffing, service reliability, access, or household purchasing power\n"
-                "- pick one primary channel this person would notice first, and let everything else stay secondary\n"
-                "- if the previous stage already leaned on the same channel, switch to a different one unless persistence is the actual story this person would tell\n"
-                "- the first sentence should name the most material change since the last stage, but it does not need to say AI out loud if this person would not talk that way\n"
-                "- include one concrete household, price, service, or job effect this person feels\n"
-                "- sound like something this person would actually say out loud to a neighbor, parent, coworker, or campaign volunteer\n"
-                "- let the update stay ordinary if that is the honest read; not everyone needs a dramatic AI opinion\n"
-                "- use plain spoken language, contractions when natural, and one idiosyncratic turn of phrase this person would actually repeat\n"
-                "- avoid policy jargon, consultant phrasing, slogans, or tidy both-sides wrapups\n"
-                "- the tone can be pleased, skeptical, relieved, annoyed, or mixed, but it should always sound local, partial, and lived-in\n"
-                "- if the best update is mostly good news, let it be mostly good news\n"
-                "- if the best update is mostly indirect, let it stay indirect\n"
-                "- politics is optional unless it is salient right now, and if it appears it should be tied to pay, staffing, bills, service reliability, status loss, or local business conditions\n"
-                "- do not mention the incumbent, player, or opponent by name unless this person would spontaneously bring them up in ordinary conversation\n"
-                "- if AI is not the first thing this person would say, let it stay in the background or go unnamed\n"
-                "- do not force every update to explain AI directly\n"
-                "- recent_ai_moment can be indirect, quiet, or even effectively absent if AI is not actually salient in the moment\n"
-                "- do not lean on one recycled helper-app, tutoring, translation, office-cleanup, or paperwork story unless the seed or prior update truly makes that mechanism central for this specific person\n"
-                "- let some people first talk about feeling more capable, less dependent on scarce experts, newly able to handle a task they used to avoid, newly able to compare options, newly exposed to a new dependency, or newly able to run a household or small organization differently\n"
-                "- spread those concrete gains and frictions across very different domains: home repairs, parenting, farming, selling online, hobbies, design, care planning, insurance fights, school placement, benefits appeals, fraud defense, inventory, diagnosis, contracting, scheduling, neighborhood alerts, permitting, procurement, remittances, informal trade, disaster prep, or something idiosyncratic to this person\n"
-                "- some people should sound casually pleased, relieved, or quietly impressed by something that now works better; do not force every person into grievance mode\n"
-                "- across the full population, preserve a real spread: enthusiastic, quietly positive, mixed, lightly touched, skeptical, and materially harmed all need to exist\n"
-                "- do not let the population collapse into one repeating office-work story\n"
-                "- if the stage already lives inside a changed settlement, let some people name that new baseline directly: what now pays the bills, what account or institution they rely on, how their week changed, or which company or agency they feel dependent on\n"
-                "- in later or stranger chapters, some people may talk about new income arrangements, public AI access, platform dependence, altered schedules, security pressure, or changed family routines when that is what they honestly notice first, but do not make everyone echo the same new baseline phrase\n"
-                "- town_hall_question must be the one direct question this person would ask a candidate if handed a microphone today; usually 1 sentence, sometimes 2 very short ones\n"
-                "- town_hall_question should be plain, lived-in, and easy to understand on first hearing; no moderator framing, no speech, and no policy-jargon pileups\n"
-                "- town_hall_question should usually grow out of current_update, current_worries, or current_hopes rather than abstract ideology\n"
+                "- town_hall_question must be the one direct question this person would ask a candidate if handed a microphone today; usually 1 sentence, sometimes 2 short ones\n"
+                "- town_hall_question should sound like a real person in a diner, clinic, break room, school pickup line, or church basement, not a staff writer or moderator\n"
                 "- town_hall_cue should be one short backstage note of about 4-10 words capturing the pressure behind the question\n"
-                "- household, daily_routine, current_worries, and current_hopes should stay compact and concrete; preserve the same person rather than inventing a different life\n"
-                "- speech_habits should be one sentence on cadence, bluntness, filler words, or how this person talks when cornered\n"
-                "- voice_notes should be a short phrase of about 5-12 words naming pace, bluntness, filler words, or local phrasing\n"
+                "- household, daily_routine, current_worries, current_hopes, speech_habits, and voice_notes should stay compact, specific, and human\n"
+                "- preserve identity and relationships, but do not preserve a 2026 routine by inertia if the stage says the way life now works changed\n"
+                "- if the stage describes a changed social or economic arrangement, rewrite household, daily_routine, recent_ai_moment, and current_update so this person actually lives inside the new money, access, time-use, and dependency system\n"
+                "- not everyone should talk about AI directly; many people would talk first about the account that pays them, the service that improved, the platform toll, the school day that changed, the robot depot at the edge of town, the local outage, the new leisure routine, or the family bargain\n"
+                "- vary the lead arena across the population: home or family, school or care, work or business, local service, neighborhood or status, or barely touched yet\n"
+                "- vary the mood across the population: some people should sound pleased, relieved, proud, pragmatic, skeptical, angry, or mostly untouched\n"
+                "- do not let everyone collapse into the same office-work story, helper-app story, or grievance story\n"
+                "- use plain spoken language, contractions when natural, and one small idiosyncratic turn of phrase this person would actually repeat\n"
+                "- avoid policy jargon, consultant phrasing, slogans, tidy both-sides wrapups, and over-explaining the technology\n"
                 "- support_score must be an integer from 0 to 100 measuring support for the current incumbent"
             )
             prompts.append(prompt)
@@ -286,66 +331,34 @@ class GabrielService:
         return out
 
     def _stage_capsule(self, stage: StagePackage) -> str:
-        macro_lines = [line for line in stage.economic_indicators[:3] if line]
-        background_lines = [line for line in stage.economic_indicators[3:6] if line]
-        capability_line = stage.capability_frontier_now.strip()
-        upside_line = stage.dominant_upside.strip() or next(
-            (
-                line
-                for line in stage.economic_indicators
-                if any(keyword in line.lower() for keyword in ("faster", "cheaper", "better", "easier", "more reliable", "more available"))
-            ),
-            "",
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(stage.world_brief or "").strip()) if part.strip()]
+        macro_lines = paragraphs[:2]
+        background_lines = paragraphs[2:4]
+        capability_line = self._stage_opening(stage, 180)
+        upside_line = self._stage_gain(stage, 180)
+        unresolved_line = self._stage_split(stage, 180)
+        memo_parts: list[str] = []
+        if macro_lines:
+            memo_parts.append("\n\n".join(macro_lines[:2]))
+        elif capability_line:
+            memo_parts.append(capability_line)
+
+        notes: list[str] = []
+        if upside_line:
+            notes.append(f"Useful thing people may defend: {upside_line}")
+        if unresolved_line:
+            notes.append(f"Live strain or unfairness: {unresolved_line}")
+        if background_lines:
+            notes.append(f"One other current in the background: {background_lines[0]}")
+        if not notes:
+            notes.append("Keep the update grounded in one concrete routine, bill, dependence, or relief this person would mention first.")
+
+        memo_parts.append(
+            "Keep this person inside that world in plain language. "
+            "Start from what pays their bills, what service or platform they depend on, what changed in a normal week, and one concrete thing they would mention first.\n"
+            + "\n".join(f"- {line}" for line in notes[:3])
         )
-        unresolved_line = stage.main_split.strip() or (stage.tension_points[0] if stage.tension_points else "")
-        constituency_line = stage.pro_adoption_constituency.strip()
-        settlement_lines = [
-            ("Household security", stage.household_income_system.strip()),
-            ("Everyday access", stage.capability_access_norm.strip()),
-            ("Firm staffing", stage.firm_structure_norm.strip()),
-            ("Ownership and chokepoints", stage.ownership_regime.strip()),
-            ("Public services", stage.public_service_norm.strip()),
-        ]
-        background_section = [
-            "Background currents worth noticing:",
-            *[f"- {line}" for line in background_lines[:2]],
-            *(
-                [f"- {stage.tension_points[0]}"]
-                if stage.tension_points and stage.tension_points[0] not in background_lines
-                else []
-            ),
-        ]
-        if len(background_section) == 1:
-            background_section.append("- No extra background current is dominating above the main story yet.")
-        lines = [
-            "Big capability change:",
-            *([f"- {capability_line}"] if capability_line else []),
-            "Macro read:",
-            *[f"- {line}" for line in macro_lines],
-            "Settlement in force:",
-            *[f"- {label}: {value}" for label, value in settlement_lines if value],
-            "What people value:",
-            f"- {upside_line or 'Some useful service or tool got faster, cheaper, or easier to use.'}",
-            "Who is actively defending the gains:",
-            f"- {constituency_line or 'At least some households, firms, or institutions do not want to give the new capability back.'}",
-            "What still feels limited or ordinary:",
-            f"- {stage.still_hard_now or 'Plenty of life still runs through people, trust, and ordinary local routines.'}",
-            "Main split or friction:",
-            f"- {unresolved_line or 'One important bottleneck or unfairness is still hanging over everyday life.'}",
-            "What different people are noticing differently:",
-            f"- Some are defending: {upside_line or 'a useful gain they do not want to lose'}",
-            f"- Others are pressing on: {unresolved_line or 'a bottleneck or unfairness they feel directly'}",
-            "Lived channels to rotate across the population:",
-            "- One household-budget or family-coordination change",
-            "- One work, small-business, or institutional workflow change",
-            "- One service-quality, access, or public-system change",
-            "- One dependence, choke-point, or platform-control anxiety",
-            "- One hobby, community, informal-market, or family-bargaining change",
-            "- One infrastructure, buildout, or geopolitical current touching ordinary life from the side",
-            "- One person who is only lightly touched or mostly noticing second-order effects",
-            *background_section,
-        ]
-        return "\n".join(lines)
+        return "\n\n".join(part.strip() for part in memo_parts if part.strip())
 
     async def run_tracking_polls(
         self,
@@ -359,7 +372,7 @@ class GabrielService:
         extra_questions: list[QueuedPollQuestion],
     ) -> tuple[pd.DataFrame, list[PollSummary], StageTracking]:
         standard_specs = [
-            *self._core_question_specs(player_name, opponent_name),
+            *self._core_question_specs(player_name, opponent_name, stage),
             *(self._stage_question_specs(stage) if stage is not None else []),
         ]
         extra_specs = self._queued_poll_specs(extra_questions)
@@ -560,7 +573,7 @@ class GabrielService:
         return "detached"
 
     def standard_questions(self, player_name: str, opponent_name: str, stage: StagePackage | None = None) -> list[str]:
-        base = [spec.question for spec in self._core_question_specs(player_name, opponent_name)]
+        base = [spec.question for spec in self._core_question_specs(player_name, opponent_name, stage)]
         if stage is None:
             return base
         return [*base, *self._stage_questions(stage)]
@@ -604,37 +617,63 @@ class GabrielService:
             )
         return specs
 
-    def _core_question_specs(self, player_name: str, opponent_name: str) -> list[PollQuestionSpec]:
+    def _poll_stage_context(self, stage: StagePackage | None) -> str:
+        if stage is None:
+            return ""
+        parts = [
+            f"Opening read: {' '.join(self._stage_opening(stage, 180).split())}",
+            f"Main gain: {' '.join(self._stage_gain(stage, 160).split())}",
+            f"Main split: {' '.join(self._stage_split(stage, 160).split())}",
+        ]
+        if not parts:
+            return ""
+        context = " ".join(parts)
+        if len(context) > 720:
+            context = context[:720].rsplit(" ", 1)[0].rstrip()
+        return (
+            f"Stage context for this respondent: {context}. "
+            "Answer from your own persona's lived situation in this described world, not from today's baseline. "
+        )
+
+    def _core_question_specs(self, player_name: str, opponent_name: str, stage: StagePackage | None = None) -> list[PollQuestionSpec]:
+        context = self._poll_stage_context(stage)
+
+        def q(question: str) -> str:
+            return f"{context}{question}" if context else question
+
         return [
-            PollQuestionSpec(key="capability_read", board_label="Capability now", board_slot="capability", question="Choose one: right now AI mostly feels able to handle broad computer work and guided decisions, strong expert-style help across daily life, only narrow assistant tasks, mostly search and drafting, or not much reliably yet."),
-            PollQuestionSpec(key="national_effect", board_label="National read", board_slot="national", question="Choose one: the biggest national effect of AI right now feels like broader capability across work and daily life, cheaper or better services, more leverage for smaller organizations, more power for big firms, or still too uneven to judge."),
-            PollQuestionSpec(key="trusted_task", question="In one sentence, what is one task or service you now trust AI to handle that you would not have trusted a couple of years ago, and what makes it feel reliable enough now?"),
-            PollQuestionSpec(key="still_human", board_label="Still human", question="In one sentence, what still clearly needs a person, trust, physical handling, or local judgment, no matter how good the software gets?"),
-            PollQuestionSpec(key="ai_gain", board_label="Best gain", board_slot="gain", question="In one sentence, what part of life has gotten noticeably easier, cheaper, or better because of AI lately, and why would you miss it if it vanished?"),
-            PollQuestionSpec(key="keep_change", board_label="People keep", board_slot="gain", question="In one sentence, what AI-enabled change in daily life would you hate to lose right now because it made something more possible, cheaper, or easier?"),
-            PollQuestionSpec(key="new_capability", question="In one sentence, what can AI now help you do that used to take more time, money, or expertise than you had?"),
-            PollQuestionSpec(key="newly_normal", question="In one sentence, what has quietly become normal because capable software is now in the background around you?"),
-            PollQuestionSpec(key="barely_notice", question="In one sentence, where do you still barely notice AI in your own life, and what still feels basically ordinary?"),
-            PollQuestionSpec(key="main_pressure", board_label="Main pressure", board_slot="pressure", question="In one sentence, what change from AI is most shaping your life right now, for better or worse, and how does it actually show up?"),
-            PollQuestionSpec(key="daily_role", board_label="Daily role", question="Choose one: in your life right now, AI feels mostly like a useful convenience, a stronger work or study tool, a way to do more outside your old skill boundary, a background service that quietly helps, a risk you are watching, or not much yet."),
-            PollQuestionSpec(key="life_touchpoint", board_label="Where it lands", question="Choose one: AI is touching your life most through work tasks, shopping or bills, school or learning, medical or care coordination, entertainment or search, travel or planning, household organization, news or scams, or not much yet."),
-            PollQuestionSpec(key="expertise_access", question="Choose one: compared with a few years ago, useful expertise now feels much easier to access, somewhat easier, about the same, more confusing, or no more available than before."),
-            PollQuestionSpec(key="education_shift", question="Choose one: in school or learning around you, AI mostly feels like better tutoring and faster mastery, easier cheating and shortcuts, stronger tools with unclear rules, not much change, or not relevant to my life."),
-            PollQuestionSpec(key="pace_read", question="Choose one: around you, AI adoption feels too slow to deliver the gains, about right, a bit too fast, much too fast, or hardly visible yet."),
-            PollQuestionSpec(key="better_off", question="Compared with two years ago, your household feels much better off, somewhat better off, about the same, somewhat worse off, or much worse off because of this AI wave."),
-            PollQuestionSpec(key="econ_read", question="Choose one: around you, the economy feels stronger and more capable, mixed but functioning, split between winners and losers, weaker, or stalled."),
-            PollQuestionSpec(key="service_reliability", question="Choose one: compared with two years ago, everyday services now feel more reliable and more capable, faster but less trusted, cheaper but more confusing, not much different, or harder to trust."),
-            PollQuestionSpec(key="ai_comfort", board_label="AI comfort", question="How comfortable do you feel with AI showing up in work, services, and daily routines: very comfortable, somewhat comfortable, mixed, somewhat uncomfortable, or very uncomfortable?"),
-            PollQuestionSpec(key="job_worry", board_label="Job strain", question="How worried are you about job loss or income disruption from AI: not worried, slightly worried, mixed, worried, or very worried?"),
-            PollQuestionSpec(key="public_stability", board_label="Daily life", question="Choose one: compared with two years ago, daily life around you feels more capable and convenient, somewhat better, mixed, somewhat more strained, or much more strained."),
-            PollQuestionSpec(key="household_security", board_label="Household read", question="Choose one: over the next year, your household finances feel very secure, somewhat secure, mixed, somewhat insecure, or very insecure."),
-            PollQuestionSpec(key="biggest_worry", board_label="Top worry", board_slot="pressure", question="Choose one: when you think about AI right now, which issue most needs attention first: job security, scams or misinformation, human control and safety, concentration of power, keeping the gains broad, international competition, or something else?"),
-            PollQuestionSpec(key="fairness", question="In one sentence, what feels fairest or most unfair about how the gains and disruptions from AI are being shared where you live?"),
-            PollQuestionSpec(key="next_two_years", question="Choose one: over the next two years, who most needs to benefit more clearly from AI for the country to feel on the right track: ordinary households, exposed workers, small local businesses, public services, large national firms, or no one clearly yet?"),
-            PollQuestionSpec(key="gov_trust", board_label="Gov trust", question="How much do you trust the public authorities leading this response to manage the transition: high trust, some trust, mixed, low trust, or no trust?"),
-            PollQuestionSpec(key="approval", board_label="Approval mood", question="Choose one: strongly approve, somewhat approve, mixed, somewhat disapprove, or strongly disapprove of the current administration."),
-            PollQuestionSpec(key="vote", board_label="Vote today", question=f"If the election were held today, would you vote for {player_name}, {opponent_name}, or remain undecided?"),
-            PollQuestionSpec(key="vote_reason", question=f"In one sentence, why would you vote for {player_name}, {opponent_name}, or stay undecided today?"),
+            PollQuestionSpec(key="capability_read", board_label="Capability now", board_slot="capability", question=q("Choose one: right now AI mostly feels able to handle broad computer work and guided decisions, deliver strong expert-style help across daily life, take over major end-to-end work streams, reshape ordinary institutions, only handle narrow assistant tasks, or still not much reliably yet.")),
+            PollQuestionSpec(key="national_effect", board_label="National read", board_slot="national", question=q("Choose one: the biggest national effect of AI right now feels like broader productive capacity, cheaper or better services, new household security, more leverage for smaller organizations, more power for big firms, geopolitical pressure, or still too uneven to judge.")),
+            PollQuestionSpec(key="trusted_task", question=q("In one sentence, what is one task or service you now trust AI to handle in this stage of the world, and what makes it feel reliable enough now?")),
+            PollQuestionSpec(key="still_human", board_label="Still human", question=q("In one sentence, what still clearly needs a person, trust, physical handling, local judgment, or moral responsibility in your life?")),
+            PollQuestionSpec(key="ai_gain", board_label="Best gain", board_slot="gain", question=q("In one sentence, what part of life has gotten noticeably easier, cheaper, or better because of AI, and what new abundance or possibility would you miss if it vanished?")),
+            PollQuestionSpec(key="keep_change", board_label="People keep", board_slot="gain", question=q("In one sentence, what AI-enabled change in daily life would you hate to lose right now because it made something more possible, cheaper, or easier?")),
+            PollQuestionSpec(key="new_capability", question=q("In one sentence, what can AI now help you do that used to require more time, money, expertise, institutional access, or staff than you had?")),
+            PollQuestionSpec(key="newly_normal", question=q("In one sentence, what has quietly become normal because capable software or machine labor is now in the background around you?")),
+            PollQuestionSpec(key="barely_notice", question=q("In one sentence, where do you still barely notice AI or automation in your own life, and what still feels basically ordinary?")),
+            PollQuestionSpec(key="main_pressure", board_label="Main pressure", board_slot="pressure", question=q("In one sentence, what change from AI is most shaping your life right now, for better or worse, and how does it actually show up?")),
+            PollQuestionSpec(key="daily_role", board_label="Daily role", question=q("Choose one: in your life right now, AI feels mostly like a useful convenience, a stronger work or study tool, a way to cross old skill boundaries, a background service layer, a source of household income or bargaining power, a risk you are watching, or not much yet.")),
+            PollQuestionSpec(key="life_touchpoint", board_label="Where it lands", question=q("Choose one: AI is touching your life most through work tasks, shopping or bills, school or learning, medical or care coordination, entertainment or search, travel or planning, household organization, public services, news or scams, infrastructure costs, or not much yet.")),
+            PollQuestionSpec(key="expertise_access", question=q("Choose one: compared with life before this stage of AI, useful expertise now feels much easier to access, somewhat easier, about the same, more confusing, unevenly rationed, or no more available than before.")),
+            PollQuestionSpec(key="who_controls_access", board_label="Access control", board_slot="pressure", question=q("Choose one: the main thing controlling who benefits from AI now is public access, private platform rules, employer decisions, household money, local infrastructure, compute or energy supply, ownership shares, or still mostly personal skill.")),
+            PollQuestionSpec(key="time_use", board_label="Time use", question=q("In one sentence, what changed most about how people around you spend time during a normal week?")),
+            PollQuestionSpec(key="machine_income_attitude", board_label="Income bargain", question=q("Choose one: if machines are doing more of the productive work, including software agents where relevant, the gains should mostly show up as cheaper essentials, public payments, worker or citizen ownership shares, lower taxes, faster national buildout, universal public access, or private company profits.")),
+            PollQuestionSpec(key="education_shift", question=q("Choose one: in school or learning around you, AI mostly feels like better tutoring and faster mastery, new kinds of projects, easier cheating and shortcuts, stronger tools with unclear rules, less need for old credentials, not much change, or not relevant to my life.")),
+            PollQuestionSpec(key="pace_read", question=q("Choose one: around you, AI adoption feels too slow to deliver the gains, about right, a bit too fast, much too fast, unevenly rationed, or hardly visible yet.")),
+            PollQuestionSpec(key="better_off", question=q("Compared with life before this AI stage, your household feels much better off, somewhat better off, about the same, somewhat worse off, or much worse off because of this wave.")),
+            PollQuestionSpec(key="econ_read", question=q("Choose one: around you, the economy feels more abundant and capable, mixed but functioning, split between winners and losers, bottlenecked by scarce inputs, weaker, or stalled.")),
+            PollQuestionSpec(key="service_reliability", question=q("Choose one: compared with life before this AI stage, everyday services now feel more reliable and more capable, faster but less trusted, cheaper but more confusing, abundant but rationed, not much different, or harder to trust.")),
+            PollQuestionSpec(key="ai_comfort", board_label="AI comfort", question=q("How comfortable do you feel with AI showing up in work, services, institutions, and daily routines: very comfortable, somewhat comfortable, mixed, somewhat uncomfortable, or very uncomfortable?")),
+            PollQuestionSpec(key="job_worry", board_label="Job strain", question=q("How worried are you about job loss, income disruption, status loss, or bargaining-power disruption from AI: not worried, slightly worried, mixed, worried, or very worried?")),
+            PollQuestionSpec(key="public_stability", board_label="Daily life", question=q("Choose one: compared with life before this AI stage, daily life around you feels more capable and convenient, somewhat better, mixed, somewhat more strained, or much more strained.")),
+            PollQuestionSpec(key="household_security", board_label="Household read", question=q("Choose one: over the next year, your household finances feel very secure, somewhat secure, mixed, somewhat insecure, or very insecure, including access to essential services if that now matters in your life.")),
+            PollQuestionSpec(key="biggest_worry", board_label="Top worry", board_slot="pressure", question=q("Choose one: when you think about AI right now, which issue most needs attention first: job or income security, scams or misinformation, human control and safety, concentration of power, keeping the gains broad, compute or energy access, international competition, or something else?")),
+            PollQuestionSpec(key="fairness", question=q("In one sentence, what feels fairest or most unfair about how the gains and disruptions from AI are being shared where you live?")),
+            PollQuestionSpec(key="next_two_years", question=q("Choose one: over the next two years, who most needs to benefit more clearly from AI for the country to feel on the right track: ordinary households, exposed workers, small local businesses, public services, large national firms, students and families, or no one clearly yet?")),
+            PollQuestionSpec(key="gov_trust", board_label="Transition trust", question=q("How much do you trust the public authorities shaping access, buildout, and guardrails in this AI transition: high trust, some trust, mixed, low trust, or no trust?")),
+            PollQuestionSpec(key="approval", board_label="Handling it?", question=q("Choose one: strongly approve, somewhat approve, mixed, somewhat disapprove, or strongly disapprove of how the current administration is handling this AI transition.")),
+            PollQuestionSpec(key="vote", board_label="Vote today", question=q(f"If the election were held today, would you vote for {player_name}, {opponent_name}, or remain undecided, based on who seems more likely to widen gains and handle the risks?")),
+            PollQuestionSpec(key="vote_reason", question=q(f"In one sentence, why would you vote for {player_name}, {opponent_name}, or stay undecided in this AI transition?")),
         ]
 
     def _heuristic_poll_question(self, question: str) -> str:
@@ -1220,21 +1259,15 @@ class GabrielService:
 
     def _stage_questions(self, stage: StagePackage) -> list[str]:
         label = stage.phase_label.lower()
-        settlement_parts = [
-            part
-            for part in (
-                stage.household_income_system,
-                stage.capability_access_norm,
-                stage.ownership_regime,
-                stage.public_service_norm,
-                stage.firm_structure_norm,
-            )
-            if part
-        ]
-        settlement_text = " ".join(settlement_parts).lower()
-        settlement_dense = sum(1 for part in settlement_parts if len(str(part).split()) >= 6) >= 2
+        world_text = " ".join(
+            [
+                stage.phase_label,
+                stage.world_brief,
+            ]
+        ).lower()
+        settlement_dense = len([part for part in re.split(r"\n\s*\n", stage.world_brief) if part.strip()]) >= 3
         settlement_markers = any(
-            token in settlement_text
+            token in world_text
             for token in (
                 "dividend",
                 "credit",
@@ -1261,6 +1294,8 @@ class GabrielService:
                 "Choose one: in daily life the biggest change now feels most like a new income floor, a new public-service utility, more power for platform owners, more leverage for ordinary households and small groups, or still too uneven to judge.",
                 "In one sentence, what actually keeps life steady in this future when a normal full-time job is no longer the whole story?",
                 "In one sentence, where does this new arrangement still leave you dependent on a company, agency, or chokepoint you do not really control?",
+                "Choose one: the most important source of security now is public AI access, machine-linked income, ownership or profit shares, remaining human work, family and community support, or still nothing reliable.",
+                "In one sentence, what do people around you do with time now that the old workweek is no longer the only organizing rhythm?",
             ]
         if "practical ai" in label:
             return [
@@ -1297,10 +1332,9 @@ class GabrielService:
             " ".join(
                 [
                     stage.phase_label,
-                    " ".join(stage.tension_points),
-                    " ".join(stage.economic_indicators),
-                    " ".join(stage.authored_policy_axes or stage.suggested_policy_axes),
-                    stage.authored_room_briefing or stage.room_briefing,
+                    stage.world_brief,
+                    stage.room_briefing,
+                    " ".join(stage.policy_notes),
                 ]
             )
         )

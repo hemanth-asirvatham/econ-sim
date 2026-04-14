@@ -92,21 +92,16 @@ async def test_update_personas_prompt_requests_spoken_first_person_updates(
     )
 
     assert "current_update must usually be 1 sentence or 2 clipped first-person sentences" in recorded["prompt"]
-    assert "pick one lead arena first" in recorded["prompt"]
-    assert "sound like something this person would actually say out loud" in recorded["prompt"]
-    assert "avoid policy jargon, consultant phrasing, slogans, or tidy both-sides wrapups" in recorded["prompt"]
-    assert "do not mention the incumbent, player, or opponent by name" in recorded["prompt"]
-    assert "preserve a real spread" in recorded["prompt"]
-    assert "do not let the population collapse into one repeating office-work story" in recorded["prompt"]
-    assert "if AI is not the first thing this person would say, let it stay in the background or go unnamed" in recorded["prompt"]
-    assert "do not force every update to explain AI directly" in recorded["prompt"]
-    assert "do not lean on one recycled helper-app, tutoring, translation, office-cleanup, or paperwork story" in recorded["prompt"]
-    assert "let some people first talk about feeling more capable, less dependent on scarce experts" in recorded["prompt"]
-    assert "anchor the update in one concrete macro detail this person would actually notice" in recorded["prompt"]
-    assert "if the best update is mostly good news, let it be mostly good news" in recorded["prompt"]
-    assert "if the best update is mostly indirect, let it stay indirect" in recorded["prompt"]
+    assert "Before you write, decide three things" in recorded["prompt"]
+    assert "not everyone should talk about AI directly" in recorded["prompt"]
+    assert "vary the lead arena across the population" in recorded["prompt"]
+    assert "vary the mood across the population" in recorded["prompt"]
+    assert "do not let everyone collapse into the same office-work story" in recorded["prompt"]
+    assert "use plain spoken language, contractions when natural" in recorded["prompt"]
+    assert "avoid policy jargon, consultant phrasing, slogans, tidy both-sides wrapups" in recorded["prompt"]
     assert "town_hall_question must be the one direct question this person would ask a candidate" in recorded["prompt"]
     assert "town_hall_cue should be one short backstage note" in recorded["prompt"]
+    assert "diner, clinic, break room, school pickup line, or church basement" in recorded["prompt"]
     assert updated.loc[0, "display_name"] == "Melissa Anne Whitaker"
 
 
@@ -405,11 +400,30 @@ def test_standard_questions_expand_the_battery_for_richer_tracking(tmp_path: Pat
     assert any("most shaping your life right now" in question for question in questions)
     assert any("easier, cheaper, or better" in question for question in questions)
     assert any("useful expertise now feels" in question for question in questions)
+    assert any("main thing controlling who benefits from AI now" in question for question in questions)
+    assert any("spend time during a normal week" in question for question in questions)
+    assert any("machines are doing more of the productive work" in question for question in questions)
     assert any("school or learning around you" in question for question in questions)
     assert any("household finances feel very secure" in question for question in questions)
     assert any("everyday services now feel more reliable" in question for question in questions)
     assert any("daily life around you feels more capable and convenient" in question for question in questions)
     assert any("gains and disruptions from AI are being shared" in question for question in questions)
+
+
+def test_later_settlement_stage_questions_shift_to_income_access_and_time_use(tmp_path: Path) -> None:
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    service = GabrielService(settings)
+    stage = _stub_stage("Settlement Opening")
+    stage.world_brief = (
+        "Most households no longer organize life around a normal full-time job. Monthly machine-income accounts and public AI access keep bills paid, while platform tolls and ownership fights decide who captures the surplus.\n\n"
+        "Benefits, permitting, clinics, and school support now run through a standing public AI help line, so older labor metrics explain less of daily security than access and entitlement do."
+    )
+
+    questions = service.standard_questions("President Morgan Hale", "Governor Elena Cross", stage)
+
+    assert any("normal full-time job is no longer the whole story" in question for question in questions)
+    assert any("most important source of security now is public AI access" in question for question in questions)
+    assert any("old workweek is no longer the only organizing rhythm" in question for question in questions)
 
 
 @pytest.mark.asyncio
@@ -523,12 +537,10 @@ def test_pick_sample_citizens_reserves_stage_relevant_people(tmp_path: Path) -> 
         }
     )
     stage = _stub_stage("Embodied Rollout")
-    stage.tension_points = [
-        "Robotics is changing warehouses, care, and delivery unevenly across regions.",
-        "Grid and logistics bottlenecks are deciding who captures the gains first.",
-        "People want lower prices without losing local job ladders.",
-        "Households can feel convenience rising before institutions catch up.",
-    ]
+    stage.world_brief = (
+        "Robotics is changing warehouses, care, and delivery unevenly across regions. Grid and logistics bottlenecks are deciding who captures the gains first.\n\n"
+        "People want lower prices without losing local job ladders, and households can feel convenience rising before institutions catch up."
+    )
     citizens = service.pick_sample_citizens(personas, stage=stage)
 
     selected_ids = {citizen.citizen_id for citizen in citizens}
@@ -544,12 +556,8 @@ def _stub_stage(phase_label: str) -> StagePackage:
         phase_label=phase_label,
         year_label="2030",
         title="Test Stage",
-        state_of_world="A test stage.",
-        detailed_summary="A richer test stage.",
+        world_brief="A test stage with a simple world brief.",
         room_briefing="A test room briefing.",
-        economic_indicators=["Indicator one", "Indicator two", "Indicator three", "Indicator four", "Indicator five"],
-        tension_points=["Tension one", "Tension two", "Tension three", "Tension four"],
-        suggested_policy_axes=["Axis one", "Axis two", "Axis three", "Axis four"],
         narrative_beats=[NarrativeBeat(line="Beat", image_prompt="Prompt")],
         sample_citizens=[],
         tracking=StageTracking(

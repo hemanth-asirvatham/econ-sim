@@ -7,7 +7,7 @@ const { execSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 
 const TARGET_URL =
-  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_7db636bffb06&advisor=multi&auditorium=debate";
+  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_7db636bffb06&advisor=multi&auditorium=debate&room=debate&view=live";
 const OUT_DIR =
   process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-reels-check";
 const GCFT_BIN =

@@ -26,7 +26,18 @@ interface UseRealtimeSessionOptions {
     room?: RoomName;
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
+    action?: "townhall_question" | "call_election" | "open_reels" | "close_reels" | "open_text" | "open_details" | "open_intel" | "close_panels" | "begin_reel" | "enter_war_room" | "toggle_theme" | "toggle_fullscreen" | "run_poll_now" | "run_queued_polls" | "update_policy_board";
+    pollQuestion?: string;
+    policyBoard?: {
+      action: "set" | "add" | "clear" | "remove" | "replace";
+      notes?: string[];
+      index?: number;
+    };
     citizenName?: string;
+    streetCommand?: {
+      kind: "nearest" | "query";
+      query?: string;
+    };
   }) => Promise<boolean> | boolean;
 }
 
@@ -252,6 +263,16 @@ function looksLikeHybridPlaybackEcho(text: string, events: ConversationTurn[]) {
   return assistantText.includes(transcript) || transcript.includes(assistantText);
 }
 
+function isExpectedRealtimeTeardownMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("cancellation failed") ||
+    normalized.includes("no active response") ||
+    normalized.includes("response.cancel") ||
+    normalized.includes("output_audio_buffer.clear")
+  );
+}
+
 function compactPollSummaryForRealtime(summary: unknown) {
   const record = summary as Record<string, unknown>;
   const shares = record?.shares && typeof record.shares === "object" ? record.shares as Record<string, number> : {};
@@ -328,11 +349,11 @@ function compactRealtimeToolOutput(payload: unknown) {
 
 type ResponseDeliveryMode = "audio" | "text";
 type LocalTurnInput = Pick<ConversationTurn, "speaker" | "speaker_name" | "speaker_voice" | "text" | "mode">;
-const COUNCIL_MAX_CONTINUATION_MS = 55000;
-const COUNCIL_MAX_CONTINUATION_BEATS = 5;
-const COUNCIL_CONTEXT_TURN_LIMIT = 8;
-const COUNCIL_BARGE_IN_CONFIRM_MS = 220;
-const COUNCIL_IDLE_SPEECH_START_CONFIRM_MS = 1180;
+const COUNCIL_MAX_CONTINUATION_MS = 36000;
+const COUNCIL_MAX_CONTINUATION_BEATS = 4;
+const COUNCIL_CONTEXT_TURN_LIMIT = 12;
+const COUNCIL_BARGE_IN_CONFIRM_MS = 140;
+const COUNCIL_IDLE_SPEECH_START_CONFIRM_MS = 520;
 const SILENT_AUDIO_DATA_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
 function councilTurnSignature(turns: LocalTurnInput[]) {
@@ -381,10 +402,175 @@ function titleCaseCommandValue(text: string) {
     .join(" ");
 }
 
+function cleanVoiceCommandPayload(text: string) {
+  return text
+    .replace(/^(?:please\s+|can you\s+|could you\s+|would you\s+|let's\s+|lets\s+|i want to\s+|i'd like to\s+)/i, "")
+    .replace(/\s+please$/i, "")
+    .trim()
+    .replace(/[.?!]+$/, "")
+    .trim();
+}
+
+function isPolicyBoardPlaceholderNote(text: string) {
+  const normalized = cleanVoiceCommandPayload(text)
+    .toLowerCase()
+    .replace(/[.?!;:-]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return true;
+  }
+  const placeholders = new Set([
+    "this",
+    "that",
+    "it",
+    "this one",
+    "that one",
+    "the idea",
+    "our idea",
+    "this idea",
+    "that idea",
+    "the policy idea",
+    "the policy",
+    "a policy",
+    "the plan",
+    "this plan",
+    "the best idea",
+    "best idea",
+    "the best policy idea",
+    "best policy idea",
+    "the best concrete idea",
+    "best concrete idea",
+    "the best concrete policy idea",
+    "best concrete policy idea",
+  ]);
+  if (placeholders.has(normalized)) {
+    return true;
+  }
+  const words = normalized.split(/\s+/).filter(Boolean);
+  return words.length <= 7 && words.includes("idea") && words.some((word) => ["best", "concrete", "policy"].includes(word));
+}
+
+function policyBoardCommandNotes(text: string) {
+  return cleanVoiceCommandPayload(text)
+    .split(/\s+(?:and then|plus)\s+|[;\n]+|\s+\/\s+/i)
+    .map((item) => cleanVoiceCommandPayload(item))
+    .filter((item) => item.length >= 4 && !isPolicyBoardPlaceholderNote(item))
+    .slice(0, 6);
+}
+
+function policyBoardItemIndex(text?: string) {
+  const value = (text ?? "").trim().toLowerCase();
+  if (!value) {
+    return undefined;
+  }
+  const wordToNumber: Record<string, number> = {
+    one: 1,
+    first: 1,
+    two: 2,
+    second: 2,
+    three: 3,
+    third: 3,
+    four: 4,
+    fourth: 4,
+    five: 5,
+    fifth: 5,
+    six: 6,
+    sixth: 6,
+  };
+  const parsed = /^\d+$/.test(value) ? Number(value) : wordToNumber[value];
+  return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : undefined;
+}
+
+function interpretPollVoiceCommand(raw: string, normalized: string): {
+  action: "run_poll_now" | "run_queued_polls";
+  pollQuestion?: string;
+} | null {
+  if (/\b(?:run|take|conduct|launch|finish)\s+(?:the\s+)?(?:queued|pending|those|these|all)\s+polls?\b/.test(normalized)) {
+    return { action: "run_queued_polls" };
+  }
+  if (!/\b(?:run|take|conduct|launch|do)\s+(?:a\s+|the\s+)?poll\b|\bpoll\s+(?:people|voters|citizens|the public)\b/.test(normalized)) {
+    return null;
+  }
+  const question = cleanVoiceCommandPayload(
+    raw.replace(
+      /^.*?\bpoll(?:\s+(?:people|voters|citizens|the public))?(?:\s+(?:on|about|whether|if|asking|to ask))?\s*/i,
+      "",
+    ),
+  );
+  if (!question || /^(?:a poll|the poll|people|voters|citizens|the public)$/i.test(question)) {
+    return { action: "run_queued_polls" };
+  }
+  return { action: "run_poll_now", pollQuestion: question };
+}
+
+function interpretPolicyBoardVoiceCommand(raw: string, normalized: string): {
+  action: "update_policy_board";
+  policyBoard: {
+    action: "set" | "add" | "clear" | "remove" | "replace";
+    notes?: string[];
+    index?: number;
+  };
+} | null {
+  if (/\b(?:clear|erase|wipe|blank)\s+(?:the\s+)?(?:policy\s+)?board\b/.test(normalized)) {
+    return { action: "update_policy_board", policyBoard: { action: "clear" } };
+  }
+  const indexedReplaceMatch = raw.match(
+    /\b(?:replace|change|update|rewrite)\s+(?:policy\s+|idea\s+|item\s+|number\s+|#)?(\d+|one|first|two|second|three|third|four|fourth|five|fifth|six|sixth)\s+(?:with|to|as)\s+(.{4,220})$/i,
+  );
+  if (indexedReplaceMatch) {
+    const index = policyBoardItemIndex(indexedReplaceMatch[1]);
+    const notes = policyBoardCommandNotes(indexedReplaceMatch[2]);
+    if (index !== undefined && notes.length > 0) {
+      return { action: "update_policy_board", policyBoard: { action: "replace", index, notes: [notes[0]] } };
+    }
+  }
+  const indexedRemoveMatch = raw.match(
+    /\b(?:remove|delete|erase|cross off|strike)\s+(?:policy\s+|idea\s+|item\s+|number\s+|#)?(\d+|one|first|two|second|three|third|four|fourth|five|fifth|six|sixth)(?:\s+(?:from|off)\s+(?:the\s+)?(?:policy\s+|ideas?\s+)?board)?\b/i,
+  );
+  if (indexedRemoveMatch) {
+    const index = policyBoardItemIndex(indexedRemoveMatch[1]);
+    if (index !== undefined) {
+      return { action: "update_policy_board", policyBoard: { action: "remove", index } };
+    }
+  }
+  const setMatch = raw.match(
+    /\b(?:set|rewrite|replace|make)\s+(?:the\s+)?(?:policy\s+|ideas?\s+)?board\s+(?:to|as|be)\s+(.{6,320})$/i,
+  );
+  if (setMatch) {
+    const notes = policyBoardCommandNotes(setMatch[1]);
+    if (notes.length > 0) {
+      return { action: "update_policy_board", policyBoard: { action: "set", notes } };
+    }
+  }
+  const addMatch = raw.match(
+    /\b(?:add|put|write|pin)\s+(.{4,160}?)\s+(?:on|to)\s+(?:the\s+)?(?:policy\s+|ideas?\s+)?board\b/i,
+  );
+  const removeMatch = raw.match(
+    /\b(?:remove|delete|erase|cross off|strike)\s+(.{4,160}?)\s+(?:from|off)\s+(?:the\s+)?(?:policy\s+|ideas?\s+)?board\b/i,
+  );
+  const removeNotes = policyBoardCommandNotes(removeMatch?.[1] ?? "");
+  if (removeNotes.length > 0) {
+    return { action: "update_policy_board", policyBoard: { action: "remove", notes: removeNotes } };
+  }
+  const trailingMatch = raw.match(
+    /\b(?:on|to)\s+(?:the\s+)?(?:policy\s+|ideas?\s+)?board\s*[:,-]?\s*(.{4,160})$/i,
+  );
+  const notes = policyBoardCommandNotes(addMatch?.[1] ?? trailingMatch?.[1] ?? "");
+  if (notes.length === 0) {
+    return null;
+  }
+  return { action: "update_policy_board", policyBoard: { action: "add", notes } };
+}
+
 function interpretBareModeCommand(normalized: string): {
   room?: RoomName;
   advisorMode?: AdvisorMode;
   auditoriumMode?: AuditoriumMode;
+  action?: "townhall_question" | "call_election" | "open_reels" | "close_reels" | "open_text" | "open_details" | "open_intel" | "close_panels" | "begin_reel" | "enter_war_room" | "toggle_theme" | "toggle_fullscreen" | "run_queued_polls" | "update_policy_board";
+  policyBoard?: {
+    action: "clear";
+  };
 } | null {
   const trimmed = normalized
     .replace(/^(?:please\s+|let's\s+|lets\s+)/, "")
@@ -395,6 +581,48 @@ function interpretBareModeCommand(normalized: string): {
   }
   if (/^(?:town hall|town hall floor)$/.test(trimmed)) {
     return { room: "debate", auditoriumMode: "town_hall" };
+  }
+  if (/^(?:audience question|ask the audience|call on voter|next voter|next question|voter question)$/.test(trimmed)) {
+    return { room: "debate", auditoriumMode: "town_hall", action: "townhall_question" };
+  }
+  if (/^(?:call election|call the election|run election|hold the election|go to election|count the vote|count votes|next stage|go to the next stage|advance stage|advance to the next stage)$/.test(trimmed)) {
+    return { room: "debate", action: "call_election" };
+  }
+  if (/^(?:future reels|open reels|show reels|featurettes|show featurettes)$/.test(trimmed)) {
+    return { action: "open_reels" };
+  }
+  if (/^(?:close reels|hide reels|exit reels|back from reels|close movie|close featurette)$/.test(trimmed)) {
+    return { action: "close_reels" };
+  }
+  if (/^(?:begin reel|begin the reel|begin chapter reel|begin the chapter reel|start reel|start the reel|start documentary|play documentary|play intro|launch chapter reel)$/.test(trimmed)) {
+    return { action: "begin_reel" };
+  }
+  if (/^(?:skip reel|skip the reel|skip documentary|enter room|enter the room|enter war room|go live|return to room|back to room)$/.test(trimmed)) {
+    return { action: "enter_war_room" };
+  }
+  if (/^(?:type|type instead|keyboard|open keyboard|open text|text box|show text box|write instead)$/.test(trimmed)) {
+    return { action: "open_text" };
+  }
+  if (/^(?:details|open details|show details|open panel|show panel|show room panel|room notes)$/.test(trimmed)) {
+    return { action: "open_details" };
+  }
+  if (/^(?:intel|open intel|show intel|show numbers|show public mood|show polls|show statistics)$/.test(trimmed)) {
+    return { action: "open_intel" };
+  }
+  if (/^(?:close panel|close panels|hide panel|hide panels|close details|hide details)$/.test(trimmed)) {
+    return { action: "close_panels" };
+  }
+  if (/^(?:toggle theme|switch theme|light mode|dark mode|switch lights)$/.test(trimmed)) {
+    return { action: "toggle_theme" };
+  }
+  if (/^(?:fullscreen|full screen|go fullscreen|go full screen|exit fullscreen|exit full screen|toggle fullscreen)$/.test(trimmed)) {
+    return { action: "toggle_fullscreen" };
+  }
+  if (/^(?:run polls|run the polls|run queued polls|run pending polls|finish polls|finish the polls)$/.test(trimmed)) {
+    return { action: "run_queued_polls" };
+  }
+  if (/^(?:clear board|clear the board|erase board|erase the board|wipe board|wipe the board)$/.test(trimmed)) {
+    return { action: "update_policy_board", policyBoard: { action: "clear" } };
   }
   if (/^(?:debate|debate stage|auditorium|podium)$/.test(trimmed)) {
     return { room: "debate", auditoriumMode: "debate" };
@@ -417,11 +645,50 @@ function interpretBareModeCommand(normalized: string): {
   return null;
 }
 
+function interpretGlobalSceneAction(normalized: string): ReturnType<typeof interpretBareModeCommand> {
+  if (/\b(?:close reels|hide reels|exit reels|close featurette)\b/.test(normalized)) {
+    return { action: "close_reels" };
+  }
+  if (/\b(?:begin|start|play|launch)\s+(?:the\s+)?(?:chapter\s+)?(?:reel|documentary|intro)\b/.test(normalized)) {
+    return { action: "begin_reel" };
+  }
+  if (/\b(?:skip|stop)\s+(?:the\s+)?(?:reel|documentary|intro)\b|\b(?:enter|return to)\s+(?:the\s+)?(?:war room|room)\b/.test(normalized)) {
+    return { action: "enter_war_room" };
+  }
+  if (/\b(?:open|show)\s+(?:the\s+)?(?:details|panel|room panel|room notes)\b/.test(normalized)) {
+    return { action: "open_details" };
+  }
+  if (/\b(?:open|show)\s+(?:the\s+)?(?:intel|numbers|polls|statistics|public mood)\b/.test(normalized)) {
+    return { action: "open_intel" };
+  }
+  if (/\b(?:close|hide)\s+(?:the\s+)?(?:panel|panels|details|drawer)\b/.test(normalized)) {
+    return { action: "close_panels" };
+  }
+  if (/\b(?:toggle|switch)\s+(?:the\s+)?theme\b|\b(?:light mode|dark mode)\b/.test(normalized)) {
+    return { action: "toggle_theme" };
+  }
+  if (/\b(?:go\s+)?full\s*screen\b|\b(?:exit|toggle)\s+full\s*screen\b/.test(normalized)) {
+    return { action: "toggle_fullscreen" };
+  }
+  return null;
+}
+
 function interpretModeCommand(text: string): {
   room?: RoomName;
   advisorMode?: AdvisorMode;
   auditoriumMode?: AuditoriumMode;
+  action?: "townhall_question" | "call_election" | "open_reels" | "close_reels" | "open_text" | "open_details" | "open_intel" | "close_panels" | "begin_reel" | "enter_war_room" | "toggle_theme" | "toggle_fullscreen" | "run_poll_now" | "run_queued_polls" | "update_policy_board";
+  pollQuestion?: string;
+  policyBoard?: {
+    action: "set" | "add" | "clear" | "remove" | "replace";
+    notes?: string[];
+    index?: number;
+  };
   citizenName?: string;
+  streetCommand?: {
+    kind: "nearest" | "query";
+    query?: string;
+  };
 } | null {
   const raw = text.replace(/\s+/g, " ").trim();
   if (!raw) {
@@ -432,8 +699,56 @@ function interpretModeCommand(text: string): {
   if (bareCommand) {
     return bareCommand;
   }
+  const pollCommand = interpretPollVoiceCommand(raw, normalized);
+  if (pollCommand) {
+    return pollCommand;
+  }
+  const policyBoardCommand = interpretPolicyBoardVoiceCommand(raw, normalized);
+  if (policyBoardCommand) {
+    return policyBoardCommand;
+  }
+  const globalSceneAction = interpretGlobalSceneAction(normalized);
+  if (globalSceneAction) {
+    return globalSceneAction;
+  }
   if (!/\b(go to|take me to|bring me to|move me to|return to|back to|head to|switch to|let's go to|i want to go to|i'm ready to go to|i am ready to go to|talk to|speak to|speak with)\b/.test(normalized)) {
+    if (/\b(?:audience question|ask the audience|call on voter|next voter|voter question)\b/.test(normalized)) {
+      return { room: "debate", auditoriumMode: "town_hall", action: "townhall_question" };
+    }
+    if (/\b(?:call election|call the election|run election|hold the election|go to election|count the vote|count votes|next stage|go to the next stage|advance stage|advance to the next stage)\b/.test(normalized)) {
+      return { room: "debate", action: "call_election" };
+    }
+    if (/\b(?:future reels|open reels|show reels|featurettes|show featurettes)\b/.test(normalized)) {
+      return { action: "open_reels" };
+    }
+    if (/\b(?:type instead|open keyboard|keyboard|open text|show text box|write instead)\b/.test(normalized)) {
+      return { action: "open_text" };
+    }
     return null;
+  }
+  if (/\b(?:audience question|ask the audience|call on voter|next voter|voter question)\b/.test(normalized)) {
+    return { room: "debate", auditoriumMode: "town_hall", action: "townhall_question" };
+  }
+  if (/\b(?:call election|call the election|run election|hold the election|go to election|count the vote|count votes|next stage|go to the next stage|advance stage|advance to the next stage)\b/.test(normalized)) {
+    return { room: "debate", action: "call_election" };
+  }
+  if (/\b(?:future reels|open reels|show reels|featurettes|show featurettes)\b/.test(normalized)) {
+    return { action: "open_reels" };
+  }
+  if (/\b(?:type instead|open keyboard|keyboard|open text|show text box|write instead)\b/.test(normalized)) {
+    return { action: "open_text" };
+  }
+  if (/\b(?:talk to|speak to|speak with|bring me to|take me to|go to)\b.{0,24}\b(?:nearest|closest|nearby|someone nearby|person nearby|voter nearby)\b/.test(normalized)) {
+    return { room: "citizens", streetCommand: { kind: "nearest" } };
+  }
+  const queryCitizenMatch = normalized.match(
+    /\b(?:talk to|speak to|speak with|bring me to|take me to|go to)\s+(?:a|an|the)?\s*(kid|child|student|teacher|parent|older person|retiree|worker|small business owner|business owner|doctor|nurse|farmer|engineer|artist|someone optimistic|someone worried|someone skeptical|someone positive|supporter|opponent)\b/,
+  );
+  if (queryCitizenMatch) {
+    return {
+      room: "citizens",
+      streetCommand: { kind: "query", query: queryCitizenMatch[1] },
+    };
   }
   const citizenTargetMatch = raw.match(
     /(?:talk to|speak to|speak with|go to|take me to|bring me to|move me to|head to)\s+(?:the\s+)?([A-Za-z][A-Za-z' -]{1,56})(?:\s+(?:on|in)\s+the\s+street)?/i,
@@ -606,6 +921,7 @@ export function useRealtimeSession({
   const mutedRef = useRef(false);
   const voiceToggleInFlightRef = useRef(false);
   const connectionRequestedRef = useRef(false);
+  const intentionalDisconnectRef = useRef(false);
   const controlChannelFailureRef = useRef(false);
   const responseInFlightRef = useRef(false);
   const pendingToolFollowupsRef = useRef<Array<{ instructions?: string; textOnly: boolean }>>([]);
@@ -881,6 +1197,7 @@ export function useRealtimeSession({
           markAssistantSpeaking();
           speakingMarked = true;
         }
+        await onTurnStarted?.(currentLine.turn);
         const started = await settleAudioStart(audioElement, audioElement.play(), 1600);
         if (
           mutedRef.current ||
@@ -898,7 +1215,6 @@ export function useRealtimeSession({
           setError(message);
           return spokenTurns;
         }
-        await onTurnStarted?.(currentLine.turn);
         if (
           mutedRef.current ||
           councilSpeechEpochRef.current !== epoch
@@ -1001,6 +1317,12 @@ export function useRealtimeSession({
         turn_count: spokenTurns.length,
       });
       markAssistantSpeaking();
+      for (const turn of spokenTurns) {
+        if (mutedRef.current || councilSpeechEpochRef.current !== epoch) {
+          return [];
+        }
+        await onTurnStarted?.(turn);
+      }
       const started = await settleAudioStart(audioElement, audioElement.play(), 1400);
       if (mutedRef.current || councilSpeechEpochRef.current !== epoch) {
         return [];
@@ -1013,12 +1335,6 @@ export function useRealtimeSession({
         });
         setError(message);
         return [];
-      }
-      for (const turn of spokenTurns) {
-        if (mutedRef.current || councilSpeechEpochRef.current !== epoch) {
-          return [];
-        }
-        await onTurnStarted?.(turn);
       }
       const playbackResult = await waitForAudioCompletion(
         audioElement,
@@ -1088,10 +1404,15 @@ export function useRealtimeSession({
         turn_count: turns.length,
         prepared: Boolean(preparedAudio?.base64),
       });
-      if (preparedAudio?.base64) {
+      if (preparedAudio?.base64 && turns.length === 1) {
         return await playPreparedCouncilTurnAudio(turns, preparedAudio, onTurnStarted, onTurnSpoken);
       }
-      return await playCouncilSpeechTurns(turns, onTurnStarted, onTurnSpoken);
+      return await playCouncilSpeechTurns(
+        turns,
+        onTurnStarted,
+        onTurnSpoken,
+        [],
+      );
     }).catch((caught) => {
       const message = caught instanceof Error ? caught.message : "Queued council playback failed";
       emitPlaytestProbe("council_audio_error", {
@@ -1259,15 +1580,17 @@ export function useRealtimeSession({
       return [{ speaker: "assistant", text: transcriptText, mode }];
     }
     const councilLines = splitCouncilLines(transcriptText, councilRosterRef.current)
-      .map((line) => ({
-        speaker: "assistant" as const,
-        speaker_name: line.speaker ?? councilLeadRef.current ?? undefined,
-        speaker_voice: councilVoiceForSpeaker(line.speaker ?? councilLeadRef.current, councilRosterRef.current),
-        text: line.text,
-        mode,
-      }))
-      .filter((line) => sanitizeRealtimeText(line.text));
-    return councilLines.length > 0 ? councilLines : [{ speaker: "assistant", text: transcriptText, mode }];
+      .map((line) => sanitizeRealtimeText(line.text))
+      .filter(Boolean);
+    const chosenSpeaker = councilLeadRef.current ?? councilRosterRef.current[0]?.name ?? "Advisor";
+    const spokenText = councilLines.length > 0 ? councilLines.join(" ") : transcriptText;
+    return [{
+      speaker: "assistant",
+      speaker_name: chosenSpeaker,
+      speaker_voice: councilVoiceForSpeaker(chosenSpeaker, councilRosterRef.current),
+      text: spokenText,
+      mode,
+    }];
   });
 
   const sendEvent = useEffectEvent((payload: Record<string, unknown>, options?: { tolerateClosed?: boolean }) => {
@@ -1532,12 +1855,12 @@ export function useRealtimeSession({
           response.yield_after_turn;
         onCouncilFloorChange?.({
           lead: response.lead,
-          owner: shouldYieldToPlayer ? "player" : response.lead,
+          owner: shouldYieldToPlayer ? "player" : (response.next_speaker ?? response.lead),
           contrast: response.contrast,
           reason: response.reason ?? undefined,
         });
         councilLeadRef.current = response.lead;
-        const assistantTurns = response.turns
+        const rawAssistantTurns = response.turns
           .map((turn) => ({
             speaker: turn.speaker,
             speaker_name: turn.speaker_name,
@@ -1546,6 +1869,15 @@ export function useRealtimeSession({
             mode: turn.mode,
           }))
           .filter((turn) => sanitizeRealtimeText(turn.text));
+        const assistantTurns = rawAssistantTurns.length > 0
+          ? rawAssistantTurns.map((turn) => ({
+              speaker: "assistant" as const,
+              speaker_name: turn.speaker_name ?? response.lead ?? response.next_speaker ?? "Advisor",
+              speaker_voice: turn.speaker_voice ?? councilVoiceForSpeaker(turn.speaker_name ?? response.lead ?? response.next_speaker ?? "Advisor", councilRosterRef.current),
+              text: turn.text,
+              mode: turn.mode ?? "text",
+            }))
+          : [];
         emitPlaytestProbe("council_turn_response", {
           next_speaker: response.next_speaker,
           lead: response.lead,
@@ -1663,8 +1995,8 @@ export function useRealtimeSession({
         continuationBeatCount += 1;
         continueDialogue = true;
         nextText = "";
-        preferredSpeaker = response.contrast[0] ?? "";
-        avoidSpeaker = assistantTurns.at(-1)?.speaker_name ?? response.lead ?? "";
+        preferredSpeaker = shouldYieldToPlayer ? "" : (response.next_speaker ?? "");
+        avoidSpeaker = "";
         emitPlaytestProbe("council_continuation_next", {
           beat: continuationBeatCount,
           preferred_speaker: preferredSpeaker,
@@ -1721,6 +2053,9 @@ export function useRealtimeSession({
   ) => {
     if (dataChannel) {
       dataChannel.onmessage = null;
+      dataChannel.onopen = null;
+      dataChannel.onclose = null;
+      dataChannel.onerror = null;
       try {
         dataChannel.close();
       } catch {
@@ -1991,10 +2326,6 @@ export function useRealtimeSession({
         if (liveModeRef.current !== "voice" || mutedRef.current) {
           return;
         }
-        if (externalPlaybackActiveRef.current || Date.now() < externalPlaybackSuppressUntilRef.current) {
-          clearCouncilSpeechStartTimer();
-          return;
-        }
         clearCouncilSpeechStartTimer();
         const initialBusyPlayback =
           assistantSpeakingRef.current || audioOutputPlayingRef.current || responseInFlightRef.current || councilPlaybackActiveRef.current;
@@ -2057,12 +2388,6 @@ export function useRealtimeSession({
       }
       if (eventType === "conversation.item.input_audio_transcription.completed") {
         clearCouncilSpeechStartTimer();
-        if (externalPlaybackActiveRef.current || Date.now() < externalPlaybackSuppressUntilRef.current) {
-          councilSpeechBargeRef.current = false;
-          recordingVoiceTurnRef.current = false;
-          setRecordingVoiceTurn(false);
-          return;
-        }
         if (!canAcceptCompletedTranscript()) {
           return;
         }
@@ -2080,7 +2405,11 @@ export function useRealtimeSession({
           return;
         }
         if (
-          (assistantSpeakingRef.current || audioOutputPlayingRef.current || councilSpeechBargeRef.current) &&
+          (assistantSpeakingRef.current ||
+            audioOutputPlayingRef.current ||
+            councilSpeechBargeRef.current ||
+            externalPlaybackActiveRef.current ||
+            Date.now() < externalPlaybackSuppressUntilRef.current) &&
           looksLikeHybridPlaybackEcho(transcript, eventsRef.current)
         ) {
           councilSpeechBargeRef.current = false;
@@ -2383,8 +2712,16 @@ export function useRealtimeSession({
     if (eventType === "error") {
       responseInFlightRef.current = false;
       pendingToolFollowupsRef.current = [];
-      invalidateCouncilLoop();
       const message = String((payload.error as Record<string, unknown> | undefined)?.message ?? "Realtime session failed");
+      if (isExpectedRealtimeTeardownMessage(message)) {
+        emitPlaytestProbe("realtime_expected_teardown", { message });
+        setAwaitingVoiceReply(false);
+        recordingVoiceTurnRef.current = false;
+        setRecordingVoiceTurn(false);
+        releaseAssistantSpeaking();
+        return;
+      }
+      invalidateCouncilLoop();
       setAwaitingVoiceReply(false);
       recordingVoiceTurnRef.current = false;
       setRecordingVoiceTurn(false);
@@ -2394,6 +2731,7 @@ export function useRealtimeSession({
   });
 
   const disconnect = useEffectEvent(() => {
+    intentionalDisconnectRef.current = true;
     controlChannelFailureRef.current = false;
     voiceToggleInFlightRef.current = false;
     connectionRequestedRef.current = false;
@@ -2449,11 +2787,13 @@ export function useRealtimeSession({
       disconnect();
     }
     if (connectionRef.current || pendingConnectionRef.current || dataChannelRef.current || pendingDataChannelRef.current || remoteAudioRef.current || pendingRemoteAudioRef.current) {
+      intentionalDisconnectRef.current = true;
       disposeAllRealtimeTransport();
     }
     const generation = connectGenerationRef.current + 1;
     connectGenerationRef.current = generation;
     controlChannelFailureRef.current = false;
+    intentionalDisconnectRef.current = false;
     connectionRequestedRef.current = true;
     const generationMatches = () => connectGenerationRef.current === generation;
     responseTextRef.current = {};
@@ -2596,7 +2936,7 @@ export function useRealtimeSession({
       const dataChannel = peerConnection.createDataChannel("oai-events");
       localDataChannel = dataChannel;
       pendingDataChannelRef.current = dataChannel;
-      dataChannel.addEventListener("open", () => {
+      dataChannel.onopen = () => {
         if (!generationMatches()) {
           return;
         }
@@ -2607,19 +2947,19 @@ export function useRealtimeSession({
             mode: "system",
           });
         }
-      });
-      dataChannel.addEventListener("close", () => {
-        if (!generationMatches()) {
+      };
+      dataChannel.onclose = () => {
+        if (!generationMatches() || intentionalDisconnectRef.current) {
           return;
         }
         flagControlChannelFailure("The live voice control channel closed");
-      });
-      dataChannel.addEventListener("error", () => {
-        if (!generationMatches()) {
+      };
+      dataChannel.onerror = () => {
+        if (!generationMatches() || intentionalDisconnectRef.current) {
           return;
         }
         flagControlChannelFailure("The live voice control channel failed");
-      });
+      };
       dataChannel.onmessage = (event) => {
         if (!generationMatches()) {
           return;

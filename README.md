@@ -94,6 +94,19 @@ cd web
 npm run build
 ```
 
+## Component Lab
+
+For faster iteration on content without waiting for a full browser playthrough, use the component lab harness:
+
+```bash
+python scripts/component_lab.py --dummy-openai --stages 2
+python scripts/component_lab.py --dummy-openai --json --stages 1
+python scripts/component_lab.py --setup "Start five years ahead with AI already embedded in most office work." --stages 2 --reasoning medium
+python scripts/component_lab.py --dummy-openai --stages 1 --council-turn "What should we do first?" --continue-beats 2
+```
+
+Live runs use the configured OpenAI API by default and write temporary simulation files under `runs/_component_lab/` unless `--runs-dir` is supplied. Use `--dummy-openai` for deterministic smoke checks and `--json` when you want machine-readable output for inspection. Content notes are tasting notes for the reviewer, not pass/fail tests. The `--setup` text is fed through the same natural-language setup path as the opening orchestrator room, so later-world, country, state, or education-board tests should be expressed as normal instructions rather than mode flags.
+
 ## Notes
 
 - The repo defaults several non-Realtime models to `gpt-5.4` because that matches the intended sim design. If your project exposes a different GPT-5 variant, override the model names in `.env`.

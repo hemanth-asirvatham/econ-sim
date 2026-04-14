@@ -3,42 +3,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const { execSync } = require("node:child_process");
-const { createRequire } = require("node:module");
+const {
+  DEFAULT_GCFT_BIN,
+  loadPlaywright,
+  launchChromiumBrowser,
+} = require("./playwright_runtime");
 
 const TARGET_URL = process.argv[2] || "http://127.0.0.1:5173/?sim=sim_2522a948b55e";
 const OUT_DIR = process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-stage-cycle";
-const GCFT_BIN =
-  process.env.PLAYWRIGHT_GCFT_BIN ||
-  path.join(
-    os.homedir(),
-    "Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-  );
 const RUNTIME_DIR =
   process.env.PLAYWRIGHT_RUNTIME_DIR ||
   path.join(process.env.TMPDIR || os.tmpdir(), "econ-sim-playwright");
-
-function ensureRuntime() {
-  fs.mkdirSync(RUNTIME_DIR, { recursive: true });
-  const packageJson = path.join(RUNTIME_DIR, "package.json");
-  if (!fs.existsSync(packageJson)) {
-    execSync("npm init -y >/dev/null 2>&1", { cwd: RUNTIME_DIR, stdio: "inherit", shell: "/bin/zsh" });
-  }
-  const playwrightDir = path.join(RUNTIME_DIR, "node_modules", "playwright");
-  if (!fs.existsSync(playwrightDir)) {
-    execSync("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install playwright >/dev/null 2>&1", {
-      cwd: RUNTIME_DIR,
-      stdio: "inherit",
-      shell: "/bin/zsh",
-    });
-  }
-}
-
-function loadPlaywright() {
-  ensureRuntime();
-  const runtimeRequire = createRequire(path.join(RUNTIME_DIR, "package.json"));
-  return runtimeRequire("playwright");
-}
 
 async function screenshot(page, outDir, name, notes) {
   try {
@@ -70,14 +45,11 @@ async function clickIfVisible(page, selectors, notes, message) {
 }
 
 async function run() {
-  if (!fs.existsSync(GCFT_BIN)) {
-    throw new Error(`GCFT binary not found at ${GCFT_BIN}`);
-  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const { chromium } = loadPlaywright();
-  const browser = await chromium.launch({
+  const { chromium } = loadPlaywright(RUNTIME_DIR);
+  const { browser, launcher, launchErrors } = await launchChromiumBrowser(chromium, {
     headless: false,
-    executablePath: GCFT_BIN,
+    gcftBin: process.env.PLAYWRIGHT_GCFT_BIN || DEFAULT_GCFT_BIN,
   });
 
   try {
@@ -129,8 +101,14 @@ async function run() {
     const summary = {
       url: page.url(),
       title: await page.title(),
+      browserLauncher: launcher,
+      browserLaunchErrors: launchErrors,
       notes,
       mic: (await page.locator(".scene__voice-trigger").count()) > 0 ? await page.locator(".scene__voice-trigger").first().innerText() : null,
+      commandStrip: (await page.locator(".scene__command-strip").count()) > 0 ? await page.locator(".scene__command-strip").first().innerText() : null,
+      actions: (await page.locator(".scene__action-row button").count()) > 0
+        ? await page.locator(".scene__action-row button").allInnerTexts()
+        : [],
     };
     fs.writeFileSync(path.join(OUT_DIR, "summary.json"), JSON.stringify(summary, null, 2));
     console.log(JSON.stringify(summary, null, 2));

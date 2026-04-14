@@ -7,7 +7,7 @@ const { execSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 
 const TARGET_URL =
-  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_515e64b42952&advisor=multi&auditorium=town_hall";
+  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_515e64b42952&advisor=multi&auditorium=town_hall&room=debate&view=live";
 const OUT_DIR =
   process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-townhall-check";
 const GCFT_BIN =
@@ -134,16 +134,16 @@ async function run() {
     const sceneQuestionPanel = page.locator(".scene-townhall-floor p").first();
     const questionPreview =
       await sceneQuestionPanel.innerText().catch(async () => await questionPanel.innerText().catch(() => null));
-    const sceneVoiceButton = page.locator(".scene__voice-trigger").filter({ hasText: /Call on voter/i }).first();
+    const sceneVoiceButton = page.locator(".scene__townhall-action").filter({ hasText: /Audience question|Call on voter|Finding voter|Voter speaking|Answer the voter/i }).first();
     const callButton = page.getByTestId("townhall-call-on-voter");
     const callVisible = await callButton.isVisible().catch(() => false);
     const callEnabled = callVisible && await callButton.isEnabled().catch(() => false);
     if (callVisible && callEnabled && !SKIP_CALL) {
       if (await clickLocatorIfVisible(sceneVoiceButton)) {
-        notes.push("Clicked 3D Call on voter button.");
+        notes.push("Clicked 3D audience question button.");
       } else {
         await callButton.click({ timeout: 5000, force: true });
-        notes.push("Clicked Give them the mic in drawer.");
+        notes.push("Clicked audience question in drawer.");
       }
       try {
         await page.waitForFunction(
@@ -165,7 +165,7 @@ async function run() {
       await page.waitForTimeout(3000);
     } else {
       if (!SKIP_CALL && await clickLocatorIfVisible(sceneVoiceButton)) {
-        notes.push("Clicked 3D Call on voter button.");
+        notes.push("Clicked 3D audience question button.");
         await page.waitForTimeout(9000);
       }
     }

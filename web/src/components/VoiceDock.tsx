@@ -36,7 +36,18 @@ interface VoiceDockProps {
     room?: RoomName;
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
+    action?: "townhall_question" | "call_election" | "open_reels" | "close_reels" | "open_text" | "open_details" | "open_intel" | "close_panels" | "begin_reel" | "enter_war_room" | "toggle_theme" | "toggle_fullscreen" | "run_poll_now" | "run_queued_polls" | "update_policy_board";
+    pollQuestion?: string;
+    policyBoard?: {
+      action: "set" | "add" | "clear" | "remove" | "replace";
+      notes?: string[];
+      index?: number;
+    };
     citizenName?: string;
+    streetCommand?: {
+      kind: "nearest" | "query";
+      query?: string;
+    };
   }) => Promise<boolean> | boolean;
 }
 
@@ -279,6 +290,17 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
     await session.startOrToggleVoice();
   }
 
+  const voiceActionLabel =
+    session.status === "connecting"
+      ? session.liveMode === "voice"
+        ? "Joining..."
+        : "Opening..."
+      : session.liveMode === "voice" && session.status === "connected"
+        ? session.muted
+          ? "Resume mic"
+          : "Pause mic"
+        : "Speak";
+
   return (
     <section className={`voice-dock voice-dock--${role} voice-dock--theme-${themeMode} voice-dock--${presentation}`}>
       <div className="voice-dock__hero">
@@ -367,15 +389,7 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
           {presentation === "full" ? (
             <>
               <button className="btn btn--secondary" onClick={handleVoiceButton} disabled={!simulationId}>
-                {session.status === "connecting"
-                  ? session.liveMode === "voice"
-                    ? "Cancel joining"
-                    : "Opening…"
-                  : session.liveMode === "voice" && session.status === "connected"
-                    ? session.muted
-                      ? "Resume"
-                      : "Pause"
-                    : "Speak"}
+                {voiceActionLabel}
               </button>
               <button className="btn btn--ghost" onClick={session.disconnect} disabled={session.status === "idle"}>
                 End

@@ -7,7 +7,7 @@ const { execSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 
 const TARGET_URL =
-  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_6a82891d616a&advisor=council";
+  process.argv[2] || "http://127.0.0.1:5173/?sim=sim_6a82891d616a&advisor=council&room=advisor&view=live";
 const OUT_DIR =
   process.argv[3] || "/Users/hemanth/code/econ-sim/output/playwright/gcft-council-check";
 const PROMPT =

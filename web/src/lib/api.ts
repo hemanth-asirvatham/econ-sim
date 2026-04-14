@@ -28,7 +28,10 @@ function resolveDefaultApiBase() {
   if (port === "8000") {
     return origin;
   }
-  return `${protocol}//${hostname}:8000`;
+  if (port === "5173" || port === "4173") {
+    return `${protocol}//${hostname}:8000`;
+  }
+  return origin;
 }
 
 export const API_BASE = import.meta.env.VITE_API_BASE?.trim() || resolveDefaultApiBase();
@@ -42,11 +45,17 @@ interface SetupCandidate {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers ?? {});
+  const hasBody = init?.body !== undefined && init?.body !== null;
+  if (
+    hasBody &&
+    !(typeof FormData !== "undefined" && init?.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
+    headers,
     ...init,
   });
   if (!response.ok) {

@@ -5,7 +5,7 @@ export type RealtimeTurnDetection = {
   interrupt_response: boolean;
 };
 
-const REALTIME_VAD_EAGERNESS: RealtimeTurnDetection["eagerness"] = "medium";
+const REALTIME_VAD_EAGERNESS: RealtimeTurnDetection["eagerness"] = "low";
 const REALTIME_INTERRUPT_RESPONSE = true;
 
 export function makeRealtimeTurnDetection(createResponse = true): RealtimeTurnDetection {

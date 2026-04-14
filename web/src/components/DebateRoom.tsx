@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useEffectEvent, useImperativeHandle, useMemo, us
 import type { RefObject } from "react";
 import { VoiceDock, type VoiceDockHandle } from "./VoiceDock";
 import { generateTownHallOpponentReply, generateTownHallQuestion, speechStreamUrl } from "../lib/api";
-import { stagePolicyAxes, stageRoomBrief } from "../lib/stageText";
+import { stagePolicyAxes, stageRoomBrief, stageSplit } from "../lib/stageText";
 import { buildTownHallQuestions, type TownHallQuestion } from "../lib/townHall";
 import type { AdvisorMode, AuditoriumMode, ConversationTurn, RoomName, ScenePresence, SimulationState, StagePackage } from "../types";
 
@@ -38,6 +38,7 @@ interface DebateRoomProps {
   debateTurns: ConversationTurn[];
   auditoriumTurns?: ConversationTurn[];
   auditoriumMode: AuditoriumMode;
+  externalPlaybackActive?: boolean;
   resolvedPlatform: string;
   pending: boolean;
   onResolve: (playerPlatform: string, playerRebuttal: string) => Promise<void>;
@@ -49,6 +50,10 @@ interface DebateRoomProps {
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
     citizenName?: string;
+    streetCommand?: {
+      kind: "nearest" | "query";
+      query?: string;
+    };
   }) => Promise<boolean> | boolean;
   onTownHallStateChange?: (state: TownHallSceneState | null) => void;
   townHallLaunchNonce?: number;
@@ -167,6 +172,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   debateTurns,
   auditoriumTurns,
   auditoriumMode,
+  externalPlaybackActive = false,
   resolvedPlatform,
   pending,
   onResolve,
@@ -277,6 +283,9 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   }, [townHallIndex, townHallQuestions.length]);
 
   useEffect(() => {
+    if (townHallLaunchInFlightRef.current) {
+      return;
+    }
     setLiveTownHallQuestion(null);
     setActiveTownHallTurnId(null);
     setTownHallTurnBaseline(null);
@@ -300,12 +309,6 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     lastTownHallLaunchRef.current = townHallLaunchNonce;
     void handleAskTownHallQuestion();
   }, [auditoriumMode, handleAskTownHallQuestion, simulationId, townHallLaunchNonce]);
-
-  useEffect(() => {
-    if (townHallPhase === "opponent_turn" && opponentAnsweredCurrentTownHallQuestion) {
-      setTownHallPhase("idle");
-    }
-  }, [opponentAnsweredCurrentTownHallQuestion, townHallPhase]);
 
   useEffect(() => {
     if (
@@ -465,11 +468,19 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   }
 
   async function handleAskTownHallQuestion() {
-    if (!townHallQuestion || !simulationId) {
+    const nextQuestionIndex =
+      liveTownHallQuestion && readyForNextQuestion && townHallQuestions.length > 1
+        ? (townHallIndex + 1) % townHallQuestions.length
+        : townHallIndex;
+    const questionToAsk = townHallQuestions[nextQuestionIndex] ?? townHallQuestion;
+    if (!questionToAsk || !simulationId) {
       return;
     }
     if (townHallLaunchInFlightRef.current) {
       return;
+    }
+    if (nextQuestionIndex !== townHallIndex) {
+      setTownHallIndex(nextQuestionIndex);
     }
     townHallLaunchInFlightRef.current = true;
     await primeTownHallAudio();
@@ -479,12 +490,12 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     setActiveTownHallTurnId(null);
     setTownHallTurnBaseline(contextTurns.length);
     try {
-      const response = await generateTownHallQuestion(simulationId, townHallQuestion.citizenId, "voice");
+      const response = await generateTownHallQuestion(simulationId, questionToAsk.citizenId, "voice");
       const generatedQuestion = {
-        ...townHallQuestion,
+        ...questionToAsk,
         question: response.question_turn.text,
-        cue: response.cue || townHallQuestion.cue,
-        voice: response.question_turn.speaker_voice || townHallQuestion.voice,
+        cue: response.cue || questionToAsk.cue,
+        voice: response.question_turn.speaker_voice || questionToAsk.voice,
       } satisfies TownHallQuestion;
       setLiveTownHallQuestion(generatedQuestion);
       setActiveTownHallTurnId(response.question_turn.id);
@@ -496,7 +507,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
         voiceDockRef?.current?.focusComposer();
       }
     } catch (caught) {
-      const fallbackQuestion = visibleTownHallQuestion ?? townHallQuestion;
+      const fallbackQuestion = visibleTownHallQuestion ?? questionToAsk;
       if (!fallbackQuestion) {
         setTownHallPhase("idle");
         setTownHallError(caught instanceof Error ? caught.message : "Town hall question failed");
@@ -561,12 +572,12 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     if (townHallPhase === "generating") {
       return {
         label: "Finding the next voice",
-        detail: "A voter is stepping up to the microphone now.",
+        detail: "A voter is walking up to the mic.",
       };
     }
     if (townHallPhase === "voter_speaking" || townHallPlaying) {
       return {
-        label: "Audience mic is live",
+        label: "A voter is speaking",
         detail: "Let the question land, then answer that person directly.",
       };
     }
@@ -592,7 +603,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
       label: "Open the floor",
       detail: "Call on one voter, hear the question out loud, then answer them directly.",
     };
-  }, [awaitingPlayerAnswer, playerAnsweredCurrentTownHallQuestion, stage.main_split, townHallPhase, townHallPlaying]);
+  }, [awaitingPlayerAnswer, playerAnsweredCurrentTownHallQuestion, stage, townHallPhase, townHallPlaying]);
   const crowdQueue = useMemo(
     () =>
       townHallQuestions
@@ -675,17 +686,17 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
           auditoriumMode={auditoriumMode}
           sessionAuditoriumMode={liveSessionAuditoriumMode}
           autoResponse={auditoriumMode !== "town_hall"}
-          externalPlaybackActive={auditoriumMode === "town_hall" && townHallPlaying}
+          externalPlaybackActive={externalPlaybackActive || (auditoriumMode === "town_hall" && townHallPlaying)}
           title={auditoriumMode === "town_hall" ? `Town hall · ${stage.phase_label}` : `Debate stage · ${stage.phase_label}`}
           blurb={
             auditoriumMode === "town_hall"
-              ? (stage.main_split || roomBrief)
-              : (stage.debate_reply?.analyst_take || stage.main_split || roomBrief)
+              ? (stageSplit(stage) || roomBrief)
+              : (stage.debate_reply?.analyst_take || stageSplit(stage) || roomBrief)
           }
           draftPlaceholder={
             auditoriumMode === "town_hall"
               ? `Answer ${visibleTownHallQuestion?.displayName ?? "the voter"} directly, then decide whether you want a rebuttal.`
-              : `Make one clear case about ${stage.main_split || "the live split"} and challenge the rival on one concrete consequence.`
+              : `Make one clear case about ${stageSplit(stage) || "the live split"} and challenge the rival on one concrete consequence.`
           }
           emptyStateText={
             auditoriumMode === "town_hall"
@@ -758,78 +769,29 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
               onClick={() => onResolve(resolvedPlatform, latestPlayerTurn ?? "")}
               disabled={pending || !resolvedPlatform.trim()}
             >
-              {pending ? "Resolving..." : "Call election and advance"}
+              {pending ? "Resolving..." : "Call election"}
             </button>
             <p className="debate-room__callout">
               {auditoriumMode === "town_hall"
-                ? (stage.main_split
-                    ? `Use the audience floor to pressure-test your case on ${stage.main_split.toLowerCase()}. Let one voter land, answer them directly, then decide whether the rival gets a rebuttal.`
+                ? (stageSplit(stage)
+                    ? `Use the audience floor to pressure-test your case on ${stageSplit(stage).toLowerCase()}. Let one voter land, answer them directly, then decide whether the rival gets a rebuttal.`
                     : "Use the audience floor to pressure-test your case. Let one voter land, answer them directly, then decide whether the rival gets a rebuttal.")
                 : (stage.debate_reply?.analyst_take || "Keep debating as long as you want. Call the election only when you are ready to lock the public choice and move to the next stage.")}
             </p>
           </div>
 
           {auditoriumMode === "town_hall" && visibleTownHallQuestion ? (
-            <section className="debate-room__audience-floor">
+            <section className="debate-room__audience-floor debate-room__audience-floor--compact">
               <header className="debate-room__audience-floor-head">
                 <div className="debate-room__audience-floor-copy">
                   <span>{townHallStatus.label}</span>
-                  <strong>{visibleTownHallQuestion.displayName} has the next audience mic</strong>
-                  <p>{visibleTownHallQuestion.role} · {visibleTownHallQuestion.region} · {visibleTownHallQuestion.supportLabel}</p>
-                </div>
-                <div className="debate-room__audience-floor-actions">
-                  <button
-                    className="btn btn--secondary"
-                    onClick={handleNextTownHallVoice}
-                    disabled={townHallQuestions.length <= 1 || townHallPhase === "generating" || townHallPhase === "voter_speaking"}
-                  >
-                    Another voice
-                  </button>
-                  <button
-                    className="btn btn--primary"
-                    data-testid="townhall-call-on-voter"
-                    onClick={() => (liveTownHallQuestion ? void handleReplayTownHallQuestion() : void handleAskTownHallQuestion())}
-                    disabled={!simulationId || townHallPhase === "generating" || (townHallPhase === "voter_speaking" && !townHallError)}
-                  >
-                    {townHallPhase === "generating"
-                      ? "Opening the floor..."
-                      : townHallPlaying
-                        ? "Question live..."
-                        : liveTownHallQuestion
-                          ? "Replay question"
-                          : `Give ${visibleTownHallQuestion.displayName.split(" ")[0]} the mic`}
-                  </button>
-                  {playerAnsweredCurrentTownHallQuestion ? (
-                    <button
-                      className="btn btn--ghost"
-                      data-testid="townhall-opponent-reply"
-                      onClick={() => void handleRequestOpponentReply()}
-                      disabled={townHallPhase === "opponent_turn"}
-                    >
-                      {townHallPhase === "opponent_turn" ? "Rival answering..." : "Let rival answer too"}
-                    </button>
-                  ) : null}
+                  <strong>{visibleTownHallQuestion.displayName} is at the mic</strong>
                 </div>
               </header>
 
-              <div className="debate-room__audience-floor-strip">
-                <article className="debate-room__audience-floor-note">
-                  <span>What this voter wants</span>
-                  <p>{liveTownHallQuestion?.cue || visibleTownHallQuestion.cue || townHallStatus.detail}</p>
-                </article>
-                <article className="debate-room__audience-floor-note">
-                  <span>{liveTownHallQuestion ? "Live question" : "How town hall works"}</span>
-                  <p>
-                    {liveTownHallQuestion
-                      ? liveTownHallQuestion.question
-                      : "Call on one person from the crowd, hear the question out loud, answer them in the same thread, then decide whether the rival gets a rebuttal."}
-                  </p>
-                </article>
-              </div>
-
-              {crowdQueue.length > 0 ? (
-                <p className="debate-room__audience-floor-queue">Still waiting in the crowd: {crowdQueue.join(" · ")}</p>
-              ) : null}
+              <p className="debate-room__audience-floor-question">
+                {liveTownHallQuestion?.question || visibleTownHallQuestion.question || townHallStatus.detail}
+              </p>
               {townHallError ? <p className="voice-dock__error">{townHallError}</p> : null}
             </section>
           ) : null}

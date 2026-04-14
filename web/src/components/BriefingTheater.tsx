@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toAbsoluteAssetUrl } from "../lib/api";
-import { stageRoomBrief } from "../lib/stageText";
+import { stageRoomBrief, stageWorldOpening } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
 import type { StagePackage } from "../types";
 
@@ -291,9 +291,11 @@ export function BriefingTheater({
                 <strong>{stage.year_label}</strong>
               </div>
               <div className="briefing__cinematic-controls">
-                <button className="btn btn--secondary" onClick={() => void playBeat(0)}>
-                  Replay
-                </button>
+                {readyToEnter ? (
+                  <button className="btn btn--secondary" onClick={() => void playBeat(0)}>
+                    Replay
+                  </button>
+                ) : null}
                 {onEnterWarRoom ? (
                   <button className="btn btn--primary" onClick={onEnterWarRoom}>
                     Skip
@@ -345,7 +347,7 @@ export function BriefingTheater({
       <div className="briefing__meta">
         <div>
           <span className="briefing__label">World frame</span>
-          <p>{stage.state_of_world}</p>
+          <p>{stageWorldOpening(stage, 220)}</p>
         </div>
         <div>
           <span className="briefing__label">Command brief</span>
