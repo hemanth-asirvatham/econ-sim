@@ -2229,7 +2229,7 @@ export default function App() {
     }
     await handOffCitizenAction(
       citizenId,
-      keepStreetVoiceOpen
+      citizenVoiceWasLive
         ? (dock) => {
             void dock.enableVoice();
           }

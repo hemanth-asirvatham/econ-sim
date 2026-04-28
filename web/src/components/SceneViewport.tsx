@@ -1625,14 +1625,9 @@ export default function SceneViewport({
         : "";
   const voiceTriggerCompact = false;
   const showSceneCaption =
+    room !== "citizens" &&
     Boolean(captionText) &&
-    councilCaptionVisible &&
-    (
-      room !== "citizens" ||
-      citizenConversationLocked ||
-      !currentCitizen ||
-      currentCitizen.citizen_id === activeCitizen?.citizen_id
-    );
+    councilCaptionVisible;
   const townHallBannerActive =
     townHallState?.phase === "generating" ||
     townHallState?.phase === "voter_speaking" ||
@@ -3672,7 +3667,15 @@ function SceneCitizenLabel({
         }}
       >
         <span>{compactCitizenLabel(citizen.display_name)}</span>
-        <small className="scene-citizen-label__role">{boardSnippet(citizen.role, 24)}</small>
+        <small className="scene-citizen-label__role">
+          {boardSnippet(`${citizen.role} · ${citizen.region}`, 54)}
+        </small>
+        <small className="scene-citizen-label__support">
+          {boardSnippet(`${citizen.support_label} · ${citizen.mood}`, 58)}
+        </small>
+        <small className="scene-citizen-label__disposition">
+          {boardSnippet(citizenCardDisposition(citizen), 92)}
+        </small>
         <small className={`scene-citizen-label__status scene-citizen-label__status--${citizen.approval_band}`}>
           {ready ? "ready to talk" : "move closer"}
         </small>

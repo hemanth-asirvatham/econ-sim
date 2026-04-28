@@ -2180,7 +2180,6 @@ export function useRealtimeSession({
         }
         const canSpeculativelyPrepareContinuation =
           wantsVoiceResponse &&
-          !usingPreparedResponse &&
           !shouldYieldToPlayer &&
           assistantTurns.length > 0 &&
           Date.now() - loopStartedAt < COUNCIL_MAX_CONTINUATION_MS &&
@@ -2723,6 +2722,7 @@ export function useRealtimeSession({
               // off an advisor on speech_started alone; wait for a real transcript
               // and filter playback echo before interrupting the council loop.
               councilSpeechBargeRef.current = false;
+              return;
             } else {
               councilSpeechBargeRef.current = true;
               onHybridSpeechStart?.();

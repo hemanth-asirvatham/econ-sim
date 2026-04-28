@@ -1528,7 +1528,7 @@ class SimulationDirector:
             ),
             text_format=CouncilFloorPick,
             reasoning_effort="none",
-            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:floor-decider-v2",
+            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:floor-decider-v3",
             max_output_tokens=12,
             verbosity="low",
         )
@@ -1631,7 +1631,8 @@ class SimulationDirector:
             base = (
                 "Take the next live beat in the current council exchange. "
                 "React to the last spoken advisor line first. "
-                "If the room is still productively disagreeing, stay inside that live disagreement instead of bouncing straight back to the president."
+                "If the room is still productively disagreeing, stay inside that live disagreement instead of bouncing straight back to the president. "
+                "Make this beat a real response to the previous claim: sharpen it, challenge it, or name the missing upside or bottleneck."
             )
         else:
             base = f"Player turn: {player_text.strip()}"
@@ -1721,7 +1722,7 @@ class SimulationDirector:
             input_text=input_text,
             text_format=CouncilAdvisorDraft,
             reasoning_effort="low",
-            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:{advisor.key}:spoken-draft-v2",
+            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:{advisor.key}:spoken-draft-v3",
             max_output_tokens=200,
             verbosity="low",
         )
