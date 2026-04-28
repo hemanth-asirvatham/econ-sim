@@ -262,8 +262,6 @@ export interface SetupDraft {
   persona_count: number;
   stage_count: number;
   visual_style?: string | null;
-  orchestrator_reasoning_effort: ReasoningEffort;
-  realtime_model: string;
   council_roster?: CouncilAdvisorProfile[];
 }
 
@@ -277,6 +275,7 @@ export interface SetupTranscriptTurn {
 export interface SetupGuidance {
   chamber_reply: string;
   readiness: "ready" | "needs_input";
+  launch_now: boolean;
   applied_updates: string[];
   open_questions: string[];
   next_actions: string[];
@@ -296,7 +295,7 @@ export interface SetupSessionState {
 }
 
 export interface SimulationCreateRequest {
-  title: string;
+  title?: string | null;
   country: string;
   region_focus?: string | null;
   topic_lens?: string | null;
@@ -311,8 +310,6 @@ export interface SimulationCreateRequest {
   premise?: string | null;
   stakes?: string | null;
   visual_style?: string;
-  orchestrator_reasoning_effort: ReasoningEffort;
-  realtime_model: string;
   council_roster?: CouncilAdvisorProfile[];
 }
 
@@ -378,15 +375,15 @@ export function trackingList(tracking: StageTracking): TrackingMetric[] {
 
 export function makeDefaultSetupDraft(): SetupDraft {
   return {
-    title: "AGI Transition Command",
+    title: "",
     country: "United States",
     region_focus: "",
     topic_lens: "",
     population_description:
-      "A representative sample of the current United States adult population, with realistic variation across region, class, education, industry, family structure, ideology, ethnicity, age, and AI exposure.",
-    player_name: "President Lena Park",
+      "A representative sample of the United States adult population, with realistic variation across region, class, education, industry, family structure, ideology, ethnicity, age, and AI exposure.",
+    player_name: "",
     player_role: "incumbent president",
-    opponent_name: "Governor Malcolm Pryce",
+    opponent_name: "",
     opponent_role: "challenger governor",
     opponent_voice: "ash",
     premise: "",
@@ -395,21 +392,19 @@ export function makeDefaultSetupDraft(): SetupDraft {
     stage_count: 5,
     visual_style:
       "Painterly civic documentary in a Cezanne, Monet, and Matisse register: thicker brushstrokes, bold color planes, softened edges, lived-in institutions and neighborhoods, atmospheric light, selective abstraction, and never glossy CGI, stock-photo realism, or cartoon exaggeration.",
-    orchestrator_reasoning_effort: "medium",
-    realtime_model: "gpt-realtime-1.5",
     council_roster: [],
   };
 }
 
 export function setupDraftToCreateRequest(draft: SetupDraft): SimulationCreateRequest {
   return {
-    title: draft.title.trim() || "AGI Transition Command",
+    title: draft.title.trim() || undefined,
     country: draft.country.trim() || "United States",
     region_focus: draft.region_focus?.trim() || undefined,
     topic_lens: draft.topic_lens?.trim() || undefined,
-    player_name: draft.player_name?.trim() || draft.player_role?.trim() || undefined,
+    player_name: draft.player_name?.trim() || undefined,
     player_role: draft.player_role?.trim() || undefined,
-    opponent_name: draft.opponent_name?.trim() || draft.opponent_role?.trim() || undefined,
+    opponent_name: draft.opponent_name?.trim() || undefined,
     opponent_role: draft.opponent_role?.trim() || undefined,
     opponent_voice: draft.opponent_voice?.trim() || undefined,
     persona_count: draft.persona_count,
@@ -418,8 +413,6 @@ export function setupDraftToCreateRequest(draft: SetupDraft): SimulationCreateRe
     premise: draft.premise?.trim() || undefined,
     stakes: draft.stakes?.trim() || undefined,
     visual_style: draft.visual_style?.trim() || undefined,
-    orchestrator_reasoning_effort: draft.orchestrator_reasoning_effort,
-    realtime_model: draft.realtime_model.trim() || "gpt-realtime-1.5",
     council_roster: draft.council_roster?.length ? draft.council_roster : undefined,
   };
 }

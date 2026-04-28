@@ -2,9 +2,9 @@ import { forwardRef, useEffect, useEffectEvent, useImperativeHandle, useMemo, us
 import type { RefObject } from "react";
 import { VoiceDock, type VoiceDockHandle } from "./VoiceDock";
 import { generateTownHallOpponentReply, generateTownHallQuestion, speechStreamUrl } from "../lib/api";
-import { stagePolicyAxes, stageRoomBrief, stageSplit } from "../lib/stageText";
+import { stageRoomBrief, stageSplit } from "../lib/stageText";
 import { buildTownHallQuestions, type TownHallQuestion } from "../lib/townHall";
-import type { AdvisorMode, AuditoriumMode, ConversationTurn, RoomName, ScenePresence, SimulationState, StagePackage } from "../types";
+import type { AdvisorMode, AuditoriumMode, ConversationTurn, RealtimeRole, RoomName, ScenePresence, SimulationState, StagePackage } from "../types";
 
 type TownHallPhase = "idle" | "generating" | "voter_speaking" | "player_turn" | "opponent_turn";
 const SILENT_AUDIO_DATA_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
@@ -46,9 +46,32 @@ interface DebateRoomProps {
   onSimulationSync: (simulation: SimulationState) => void;
   onPresenceChange?: (presence: ScenePresence) => void;
   onModeCommand?: (command: {
+    sourceRole?: RealtimeRole;
     room?: RoomName;
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
+    action?:
+      | "townhall_question"
+      | "call_election"
+      | "open_reels"
+      | "close_reels"
+      | "open_text"
+      | "open_details"
+      | "open_intel"
+      | "close_panels"
+      | "begin_reel"
+      | "enter_war_room"
+      | "toggle_theme"
+      | "toggle_fullscreen"
+      | "run_poll_now"
+      | "run_queued_polls"
+      | "update_policy_board";
+    pollQuestion?: string;
+    policyBoard?: {
+      action: "set" | "add" | "clear" | "remove" | "replace";
+      notes?: string[];
+      index?: number;
+    };
     citizenName?: string;
     streetCommand?: {
       kind: "nearest" | "query";
@@ -57,6 +80,8 @@ interface DebateRoomProps {
   }) => Promise<boolean> | boolean;
   onTownHallStateChange?: (state: TownHallSceneState | null) => void;
   townHallLaunchNonce?: number;
+  townHallDisabled?: boolean;
+  townHallDisabledReason?: string;
   voiceDockRef?: RefObject<VoiceDockHandle | null>;
 }
 
@@ -182,6 +207,8 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   onModeCommand,
   onTownHallStateChange,
   townHallLaunchNonce = 0,
+  townHallDisabled = false,
+  townHallDisabledReason = "Citizens are still arriving.",
   voiceDockRef,
 }, ref) {
   const ballotLine = useMemo(() => formatBallotLine(stage), [stage]);
@@ -198,7 +225,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     }
     onPresenceChange?.(presence);
   });
-  const platformNotes = stagePolicyAxes(stage, 4);
+  const platformNotes = stage.policy_notes.slice(0, 4);
   const roomBrief = stageRoomBrief(stage);
   const townHallQuestions = useMemo(() => buildTownHallQuestions(stage, contextTurns), [contextTurns, stage]);
   const [townHallIndex, setTownHallIndex] = useState(0);
@@ -211,6 +238,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   const townHallAudioRef = useRef<HTMLAudioElement | null>(null);
   const townHallAudioUnlockedRef = useRef(false);
   const lastTownHallLaunchRef = useRef(0);
+  const autoTownHallStartedRef = useRef(false);
   const townHallLaunchInFlightRef = useRef(false);
   const townHallOpponentReplyInFlightRef = useRef(false);
   const lastAutoOpponentReplyKeyRef = useRef<string | null>(null);
@@ -273,6 +301,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     setTownHallPhase("idle");
     setTownHallError(null);
     lastTownHallLaunchRef.current = 0;
+    autoTownHallStartedRef.current = false;
   }, [simulationId, stage.index]);
 
   useEffect(() => {
@@ -296,6 +325,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     if (auditoriumMode !== "town_hall") {
       setTownHallPhase("idle");
       setTownHallTurnBaseline(null);
+      autoTownHallStartedRef.current = false;
     }
   }, [auditoriumMode]);
 
@@ -309,6 +339,28 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     lastTownHallLaunchRef.current = townHallLaunchNonce;
     void handleAskTownHallQuestion();
   }, [auditoriumMode, handleAskTownHallQuestion, simulationId, townHallLaunchNonce]);
+
+  useEffect(() => {
+    if (auditoriumMode !== "town_hall" || !simulationId || autoTownHallStartedRef.current || townHallLaunchNonce > 0) {
+      return;
+    }
+    if (townHallLaunchInFlightRef.current || townHallPhase !== "idle" || liveTownHallQuestion || activeTownHallTurnId) {
+      return;
+    }
+    autoTownHallStartedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void handleAskTownHallQuestion();
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeTownHallTurnId,
+    auditoriumMode,
+    handleAskTownHallQuestion,
+    liveTownHallQuestion,
+    simulationId,
+    townHallLaunchNonce,
+    townHallPhase,
+  ]);
 
   useEffect(() => {
     if (
@@ -468,6 +520,11 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
   }
 
   async function handleAskTownHallQuestion() {
+    if (townHallDisabled) {
+      setTownHallError(townHallDisabledReason);
+      setTownHallPhase("idle");
+      return;
+    }
     const nextQuestionIndex =
       liveTownHallQuestion && readyForNextQuestion && townHallQuestions.length > 1
         ? (townHallIndex + 1) % townHallQuestions.length
@@ -583,7 +640,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
     }
     if (awaitingPlayerAnswer) {
       return {
-        label: "You have the floor",
+        label: "Your answer",
         detail: "Answer them in the main mic before you move on.",
       };
     }
@@ -711,6 +768,7 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
           ]}
           onSimulationSync={onSimulationSync}
           onPresenceChange={handleVoiceDockPresenceChange}
+          onHybridSpeechStart={stopTownHallPlayback}
           onModeCommand={onModeCommand}
         />
 
@@ -722,9 +780,13 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
             </article>
             <article>
               <span>Your platform</span>
-              {platformNotes.map((note) => (
-                <p key={note}>{note}</p>
-              ))}
+              {platformNotes.length > 0 ? (
+                platformNotes.map((note) => (
+                  <p key={note}>{note}</p>
+                ))
+              ) : (
+                <p>Shape a platform with your advisors before you call the election.</p>
+              )}
             </article>
             <article>
               <span>Latest line</span>
@@ -757,6 +819,8 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
                       onToggleTownHall();
                     }
                   }}
+                  disabled={townHallDisabled}
+                  title={townHallDisabled ? townHallDisabledReason : undefined}
                   role="tab"
                   aria-selected={auditoriumMode === "town_hall"}
                 >
@@ -786,6 +850,24 @@ export const DebateRoom = forwardRef<DebateRoomHandle, DebateRoomProps>(function
                 <div className="debate-room__audience-floor-copy">
                   <span>{townHallStatus.label}</span>
                   <strong>{visibleTownHallQuestion.displayName} is at the mic</strong>
+                </div>
+                <div className="debate-room__audience-floor-actions">
+                  <button
+                    className="btn btn--secondary"
+                    data-testid="townhall-call-on-voter"
+                    onClick={() => void handleAskTownHallQuestion()}
+                    disabled={townHallDisabled || townHallLaunchInFlightRef.current || townHallPlaying}
+                    title={townHallDisabled ? townHallDisabledReason : undefined}
+                  >
+                    {readyForNextQuestion ? "Next question" : "Call on voter"}
+                  </button>
+                  <button
+                    className="btn btn--secondary"
+                    onClick={() => void handleReplayTownHallQuestion()}
+                    disabled={!visibleTownHallQuestion || townHallPlaying}
+                  >
+                    Replay
+                  </button>
                 </div>
               </header>
 

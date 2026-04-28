@@ -32,6 +32,7 @@ interface VoiceDockProps {
     contrast: string[];
     reason?: string;
   } | null) => void;
+  onHybridSpeechStart?: () => void;
   onModeCommand?: (command: {
     room?: RoomName;
     advisorMode?: AdvisorMode;
@@ -121,11 +122,13 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
   onPresenceChange,
   onLiveCaptionChange,
   onCouncilFloorChange,
+  onHybridSpeechStart,
   onModeCommand,
 }: VoiceDockProps, ref) {
   const [draft, setDraft] = useState("");
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const lastPresenceSignatureRef = useRef("");
+  const lastSceneCaptionRef = useRef<ConversationTurn | null>(null);
   const liveAuditoriumMode = sessionAuditoriumMode ?? auditoriumMode;
   const normalizedCouncilRoster = useMemo(() => normalizeCouncilRoster(councilRoster), [councilRoster]);
   const liveScopeKey = useMemo(
@@ -145,6 +148,7 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
     initialTurns: turns,
     onSimulationSync,
     onCouncilFloorChange,
+    onHybridSpeechStart,
     onModeCommand,
   });
 
@@ -252,11 +256,29 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
         : session.recordingVoiceTurn || session.presence.playerActivity === "speaking"
           ? liveCaptionTurn?.speaker === "user"
           : false);
-    emitLiveCaptionChange(liveSpeaking ? liveCaptionTurn : null);
+    if (liveSpeaking && liveCaptionTurn) {
+      lastSceneCaptionRef.current = liveCaptionTurn;
+      emitLiveCaptionChange(liveCaptionTurn);
+      return;
+    }
+    const holdCouncilCaption =
+      role === "advisor" &&
+      advisorMode === "council" &&
+      session.awaitingVoiceReply &&
+      lastSceneCaptionRef.current?.speaker === "assistant";
+    if (holdCouncilCaption) {
+      emitLiveCaptionChange(lastSceneCaptionRef.current);
+      return;
+    }
+    lastSceneCaptionRef.current = null;
+    emitLiveCaptionChange(null);
   }, [
     emitLiveCaptionChange,
+    advisorMode,
     liveCaptionTurn,
+    role,
     session.assistantSpeaking,
+    session.awaitingVoiceReply,
     session.presence.counterpartActivity,
     session.presence.playerActivity,
     session.recordingVoiceTurn,
@@ -386,16 +408,12 @@ export const VoiceDock = forwardRef<VoiceDockHandle, VoiceDockProps>(function Vo
           <button className="btn btn--primary" onClick={handleSend} disabled={!simulationId || !draft.trim() || (session.status === "connecting" && session.liveMode === "text")}>
             Send
           </button>
-          {presentation === "full" ? (
-            <>
-              <button className="btn btn--secondary" onClick={handleVoiceButton} disabled={!simulationId}>
-                {voiceActionLabel}
-              </button>
-              <button className="btn btn--ghost" onClick={session.disconnect} disabled={session.status === "idle"}>
-                End
-              </button>
-            </>
-          ) : null}
+          <button className="btn btn--secondary composer__voice-action" onClick={handleVoiceButton} disabled={!simulationId}>
+            {voiceActionLabel}
+          </button>
+          <button className="btn btn--ghost composer__end-action" onClick={session.disconnect} disabled={session.status === "idle"}>
+            End
+          </button>
         </div>
       </div>
 

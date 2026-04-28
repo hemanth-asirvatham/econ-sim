@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import logging
 import re
 from pathlib import Path
 
@@ -16,7 +16,6 @@ from ..models import (
     CouncilAdvisorDraft,
     CouncilAdvisorProfile,
     CouncilFloorPick,
-    CouncilTurnPlan,
     CouncilTurnRequest,
     CouncilTurnResponse,
     CouncilSpeakerDecision,
@@ -72,6 +71,8 @@ COUNCIL_VOICES = {
     "Amina": "shimmer",
 }
 
+logger = logging.getLogger(__name__)
+
 
 class SimulationDirector:
     _COUNCIL_CONTEXT_TURN_LIMIT = 12
@@ -125,7 +126,7 @@ class SimulationDirector:
         player_role = "incumbent president"
         opponent_role = "challenger governor"
         return SimulationConfig(
-            title="AGI Transition Command",
+            title="",
             country="United States",
             player_name=self._retitle_candidate_name(ticket["player_name"], player_role),
             player_role=player_role,
@@ -437,8 +438,8 @@ class SimulationDirector:
             stage_count=request.stage_count,
             visual_style=request.visual_style or defaults.visual_style or self.settings.default_visual_style,
             council_roster=request.council_roster or defaults.council_roster,
-            orchestrator_reasoning_effort=request.orchestrator_reasoning_effort,
-            realtime_model=request.realtime_model,
+            orchestrator_reasoning_effort=self.settings.orchestrator_reasoning_effort,
+            realtime_model=self.settings.realtime_model,
         )
         state = SimulationState(
             simulation_id=simulation_id,
@@ -457,7 +458,10 @@ class SimulationDirector:
         return state
 
     async def get_simulation(self, simulation_id: str) -> SimulationState:
-        return await self.store.load(simulation_id)
+        state = await self.store.load(simulation_id)
+        for stage in state.stages:
+            self._decorate_asset_urls(stage)
+        return state
 
     async def create_setup_session(self, request: SetupSessionCreateRequest | None = None) -> SetupSessionState:
         config = self._build_default_config()
@@ -526,6 +530,7 @@ class SimulationDirector:
             open_questions=guidance.open_questions,
             next_actions=guidance.next_actions,
             config_updates=guidance.config_updates,
+            launch_now=guidance.launch_now,
         )
         session.turns = self._bounded_setup_turns(
             [*session.turns, ConversationTurn(speaker="assistant", text=session.guidance.chamber_reply, mode="text")]
@@ -577,6 +582,7 @@ class SimulationDirector:
     async def run_polls(self, simulation_id: str) -> RunPollsResponse:
         state = await self.get_simulation(simulation_id)
         self._ensure_stage_ready(state)
+        self._ensure_citizens_ready(state)
         personas = await self._load_personas(simulation_id)
         if personas is None:
             raise FileNotFoundError("personas not ready")
@@ -630,7 +636,14 @@ class SimulationDirector:
         if state.status == SimulationStatus.resolving:
             return state
         current_stage = state.stages[state.active_stage_index]
-        player_agenda_points = self._resolve_agenda_points(current_stage, request.player_platform)
+        platform_text = " ".join(str(request.player_platform or "").split()).strip()
+        if not platform_text:
+            raise RuntimeError("player platform is required before resolving the election")
+        player_agenda_points = self._resolve_agenda_points(
+            current_stage,
+            platform_text,
+            request.player_rebuttal,
+        )
         normalized_platform = "\n".join(player_agenda_points)
         state.status = SimulationStatus.resolving
         state.progress = StageProgress(
@@ -760,6 +773,7 @@ class SimulationDirector:
                 capture_prompt = None
             selected_voice = state.config.opponent_voice
         else:
+            self._ensure_citizens_ready(state)
             citizens = {citizen.citizen_id: citizen for citizen in current_stage.sample_citizens}
             citizen = citizens.get(request.citizen_id or "")
             if citizen is None:
@@ -837,6 +851,7 @@ class SimulationDirector:
         state = await self.get_simulation(simulation_id)
         self._ensure_stage_ready(state)
         if request.role == RealtimeRole.citizen:
+            self._ensure_citizens_ready(state)
             self._ensure_citizen_exists(state, request.citizen_id)
         turns = [
             ConversationTurn(
@@ -897,7 +912,10 @@ class SimulationDirector:
             working_stage = working_state.stages[working_state.active_stage_index]
             working_stage.policy_notes = self._maybe_apply_council_board_notes(working_stage, request.provisional_board_notes)
         trailing_advisor_beats = self._trailing_council_advisor_beats(working_turns, state=working_state)
-        room_fight_requested = self._turn_requests_council_fight(self._last_user_turn_text(working_turns))
+        room_fight_requested = (
+            self._turn_requests_council_fight(self._last_user_turn_text(working_turns))
+            or self._turn_requests_council_fight(text)
+        )
         preferred_speaker = request.preferred_speaker.strip()
         avoid_speaker = request.avoid_speaker.strip()
         direct_reference_speaker = self._direct_council_reference_speaker(working_state, working_turns, text)
@@ -909,15 +927,25 @@ class SimulationDirector:
                 avoid_speaker = last_speaker
         if direct_reference_speaker and avoid_speaker == direct_reference_speaker:
             avoid_speaker = ""
-        direct_board_notes = self._direct_policy_board_notes_from_turn(
-            working_state.stages[working_state.active_stage_index],
-            text,
-            working_turns,
+        tool_action_requested = self._council_tool_action_was_requested(text)
+        policy_commitment_signal = self._turn_signals_policy_commitment(text)
+        allow_tool_actions = (
+            not request.continue_dialogue
+            and request.commit
+            and tool_action_requested
+        )
+        allow_board_actions = (
+            not request.continue_dialogue
+            and request.commit
+            and (self._policy_board_change_was_requested(text) or policy_commitment_signal)
         )
         board_change_requested = bool(
-            direct_board_notes
-            or request.provisional_board_notes
-            or self._policy_board_change_was_requested(text)
+            allow_board_actions
+            and (
+                request.provisional_board_notes
+                or self._policy_board_change_was_requested(text)
+                or policy_commitment_signal
+            )
         )
         input_text = "Continue the council exchange from the latest spoken line."
         if request.continue_dialogue:
@@ -926,8 +954,8 @@ class SimulationDirector:
             input_text = (
                 "Council continuation turn. Everyone already heard the last spoken advisor line. "
                 "React directly to that last spoken line instead of restarting from the president's original prompt. "
-                "Pick the single best next voice unless a second interruption is essential. "
-                "If the room should now wait for the president, set yield_after_turn true and leave advisor text empty. "
+                "Pick the single best next voice. "
+                "If the room should now wait for the president, choose player. "
                 "If the room is still productively arguing among itself, keep yield_after_turn false and let the strongest reply take the next beat. "
                 f"There have already been {trailing_advisor_beats} advisor beat(s) since the player last spoke. "
                 "If the disagreement is already legible, yield instead of restating the same fight. "
@@ -962,6 +990,18 @@ class SimulationDirector:
             preferred_speaker=preferred_speaker,
             avoid_speaker=avoid_speaker,
         )
+        player_floor_values = {"player", "user", "you", "President", working_state.config.player_name}
+        if not request.continue_dialogue and text.strip() and decision.next_speaker in player_floor_values:
+            opening_roster = self._targeted_council_roster(working_state, working_turns) or self._council_roster_for(working_state)
+            preferred_advisor = self._council_advisor_profile_for(working_state, preferred_speaker)
+            selected_advisor = (
+                preferred_advisor
+                if preferred_advisor is not None and any(advisor.key == preferred_advisor.key for advisor in opening_roster)
+                else next(iter(opening_roster), None)
+            )
+            if selected_advisor is not None:
+                decision.next_speaker = selected_advisor.key
+                decision.yield_after_turn = False
         display_lookup = {
             advisor.key: advisor.name
             for advisor in self._council_roster_for(working_state)
@@ -969,10 +1009,8 @@ class SimulationDirector:
         display_lookup.update({advisor.name: advisor.name for advisor in self._council_roster_for(working_state)})
         assistant_turns: list[ConversationTurn] = []
         board_notes: list[str] = []
-        if direct_board_notes:
-            board_notes = list(direct_board_notes[:5])
         selected_label = display_lookup.get(decision.next_speaker, decision.next_speaker)
-        if decision.next_speaker not in {"player", "President"}:
+        if decision.next_speaker not in player_floor_values:
             draft_candidates: list[CouncilAdvisorProfile] = []
             for speaker_key_or_name in [decision.next_speaker]:
                 advisor = self._council_advisor_profile_for(working_state, speaker_key_or_name)
@@ -987,23 +1025,35 @@ class SimulationDirector:
                     working_turns=working_turns,
                     advisor=speaker_advisor,
                     input_text=advisor_input_text,
-                    allow_actions=not request.continue_dialogue,
+                    allow_actions=allow_tool_actions,
                 )
                 if turn is None or not turn.text.strip():
                     continue
                 selected_label = speaker_advisor.name
                 decision.next_speaker = speaker_advisor.key
                 if board_change_requested and drafted_notes and not board_notes:
-                    board_notes = self._dedupe_policy_notes(
-                        [self._normalize_policy_note(note) for note in drafted_notes if str(note).strip()]
-                    )[:5]
+                    normalized_drafted_notes = [
+                        self._normalize_policy_note(note)
+                        for note in drafted_notes
+                        if str(note).strip()
+                    ]
+                    board_action = (
+                        str(drafted_action.arguments.get("action", "add")).strip().lower()
+                        if drafted_action and drafted_action.name == "update_policy_board"
+                        else "add"
+                    )
+                    if board_action in {"set", "replace"}:
+                        board_notes = self._dedupe_policy_notes(normalized_drafted_notes)[:5]
+                    else:
+                        board_notes = self._dedupe_policy_notes(
+                            [*working_state.stages[working_state.active_stage_index].policy_notes, *normalized_drafted_notes]
+                        )[:5]
                 action_prefix = ""
                 state_after_action, action_prefix = await self._maybe_execute_council_action(
                     simulation_id=simulation_id,
                     state=state,
-                    action=drafted_action,
+                    action=drafted_action if allow_tool_actions else None,
                     player_text=text,
-                    direct_board_notes=direct_board_notes,
                 )
                 if state_after_action is not state:
                     state = state_after_action
@@ -1042,13 +1092,22 @@ class SimulationDirector:
                             selected_label = speaker_advisor.name
                             decision.next_speaker = speaker_advisor.key
                             if board_change_requested and fallback_draft.board_notes and not board_notes:
-                                board_notes = self._dedupe_policy_notes(
-                                    [
-                                        self._normalize_policy_note(note)
-                                        for note in fallback_draft.board_notes
-                                        if str(note).strip()
-                                    ]
-                                )[:5]
+                                normalized_fallback_notes = [
+                                    self._normalize_policy_note(note)
+                                    for note in fallback_draft.board_notes
+                                    if str(note).strip()
+                                ]
+                                fallback_action = (
+                                    str(fallback_draft.action.arguments.get("action", "add")).strip().lower()
+                                    if fallback_draft.action and fallback_draft.action.name == "update_policy_board"
+                                    else "add"
+                                )
+                                if fallback_action in {"set", "replace"}:
+                                    board_notes = self._dedupe_policy_notes(normalized_fallback_notes)[:5]
+                                else:
+                                    board_notes = self._dedupe_policy_notes(
+                                        [*working_state.stages[working_state.active_stage_index].policy_notes, *normalized_fallback_notes]
+                                    )[:5]
                             spoken_turn = ConversationTurn(
                                 speaker="assistant",
                                 speaker_name=speaker_advisor.name,
@@ -1059,9 +1118,8 @@ class SimulationDirector:
                             state_after_action, action_prefix = await self._maybe_execute_council_action(
                                 simulation_id=simulation_id,
                                 state=state,
-                                action=fallback_draft.action,
+                                action=fallback_draft.action if allow_tool_actions else None,
                                 player_text=text,
-                                direct_board_notes=direct_board_notes,
                             )
                             if state_after_action is not state:
                                 state = state_after_action
@@ -1079,7 +1137,28 @@ class SimulationDirector:
                 if not assistant_turns:
                     decision.yield_after_turn = True
                     decision.next_speaker = "player"
-        if decision.next_speaker in {"player", "President"} or not assistant_turns:
+        if not assistant_turns and not request.continue_dialogue and text:
+            fallback_roster = self._targeted_council_roster(working_state, working_turns) or self._council_roster_for(working_state)
+            preferred_advisor = self._council_advisor_profile_for(working_state, preferred_speaker)
+            fallback_advisor = (
+                preferred_advisor
+                if preferred_advisor is not None and any(advisor.key == preferred_advisor.key for advisor in fallback_roster)
+                else next(iter(fallback_roster), None)
+            )
+            if fallback_advisor is not None:
+                selected_label = fallback_advisor.name
+                decision.next_speaker = fallback_advisor.key
+                decision.yield_after_turn = False
+                assistant_turns = [
+                    ConversationTurn(
+                        speaker="assistant",
+                        speaker_name=fallback_advisor.name,
+                        speaker_voice=fallback_advisor.voice or self.settings.realtime_voice,
+                        text=self._fallback_council_opening_text(working_state, working_turns, fallback_advisor),
+                        mode="voice",
+                    )
+                ]
+        if decision.next_speaker in player_floor_values or not assistant_turns:
             decision.yield_after_turn = True
         contrast = [display_lookup.get(item, item) for item in decision.contrast[:2]]
         committed_turns = self._truncate_council_turns(self._merge_provisional_turns(prior_turns, provisional_turns))
@@ -1092,17 +1171,17 @@ class SimulationDirector:
             committed_turns = self._truncate_council_turns([*committed_turns, *assistant_turns])
 
         state_changed = False
-        if committed_turns != prior_turns:
+        if request.commit and committed_turns != prior_turns:
             state.conversation_threads[thread_key] = committed_turns
             state_changed = True
 
         current_stage = state.stages[state.active_stage_index]
-        if request.provisional_board_notes:
+        if request.commit and allow_board_actions and request.provisional_board_notes:
             provisional_notes = self._maybe_apply_council_board_notes(current_stage, request.provisional_board_notes)
             if provisional_notes != current_stage.policy_notes:
                 current_stage.policy_notes = provisional_notes
                 state_changed = True
-        if board_change_requested and board_notes:
+        if request.commit and board_change_requested and board_notes:
             committed_notes = self._maybe_apply_council_board_notes(current_stage, board_notes)
             if committed_notes != current_stage.policy_notes:
                 current_stage.policy_notes = committed_notes
@@ -1111,45 +1190,45 @@ class SimulationDirector:
         if state_changed:
             state.updated_at = utc_now()
             await self.store.save(state)
-        audio_base64: str | None = None
-        audio_format: str | None = None
-        if (
-            assistant_turns
-            and len(assistant_turns) == 1
-            and assistant_turns[0].mode == "voice"
-            and assistant_turns[0].text.strip()
-            and self.gateway.live
-        ):
-            try:
-                audio_bytes = await self.gateway.synthesize_bytes(
-                    text=assistant_turns[0].text,
-                    voice=assistant_turns[0].speaker_voice or self.settings.realtime_voice,
-                )
-                if audio_bytes:
-                    audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
-                    audio_format = "mp3"
-            except Exception:
-                audio_base64 = None
-                audio_format = None
         return CouncilTurnResponse(
             simulation=state,
             thread_key=thread_key,
-            lead=state.config.player_name if decision.next_speaker in {"player", "President"} else selected_label,
+            lead=state.config.player_name if decision.next_speaker in player_floor_values else selected_label,
             next_speaker=decision.next_speaker,
             contrast=contrast,
             reason=decision.reason,
             yield_after_turn=decision.yield_after_turn,
             board_notes=board_notes,
             turns=assistant_turns,
-            audio_base64=audio_base64,
-            audio_format=audio_format,
+            audio_base64=None,
+            audio_format=None,
+        )
+
+    def _council_tool_action_was_requested(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").lower().split())
+        if not normalized:
+            return False
+        if self._policy_board_change_was_requested(normalized):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:poll|survey|ask voters|ask people|what do voters think|what do people think|run polls?|take a poll|conduct a poll|queued polls?|pending polls?)\b",
+                normalized,
+            )
+            or re.search(
+                r"\b(?:go|head|move|return|back|take|bring|switch)\b.{0,36}\b(?:briefing|advisor|war room|street|citizen|debate|auditorium|town hall)\b",
+                normalized,
+            )
+            or re.search(
+                r"\b(?:talk to|speak to|take me to|show me|bring me to)\b.{0,36}\b(?:citizen|voter|worker|student|teacher|parent|retiree|owner|person|someone|[A-Z][a-z]+)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
         )
 
     def _council_line_yields_to_player(self, text: str) -> bool:
         cleaned = " ".join(str(text or "").split()).strip().lower()
         if not cleaned:
-            return False
-        if not cleaned.endswith("?"):
             return False
         direct_floor_patterns = (
             r"\bwhat do you want\b",
@@ -1165,6 +1244,18 @@ class SimulationDirector:
             r"\bwhere do you want\b",
             r"\bwhich room\b",
             r"\bwho do you want to talk to\b",
+            r"\byour call\b",
+            r"\bit is your call\b",
+            r"\bi need you to decide\b",
+            r"\byou need to decide\b",
+            r"\byou should decide\b",
+            r"\btell us which way\b",
+            r"\btell me which way\b",
+            r"\bpick one\b",
+            r"\bchoose one\b",
+            r"\bwhere do you land\b",
+            r"\bwhere are you landing\b",
+            r"\bwhat should we put on the board\b",
         )
         return any(re.search(pattern, cleaned) for pattern in direct_floor_patterns)
 
@@ -1199,6 +1290,96 @@ class SimulationDirector:
             action=action,
         )
 
+    def _fallback_council_opening_text(
+        self,
+        state: SimulationState,
+        working_turns: list[ConversationTurn],
+        advisor: CouncilAdvisorProfile,
+    ) -> str:
+        stage = state.stages[state.active_stage_index]
+        last_user = self._last_user_turn_text(working_turns).lower()
+        stats = list(stage.macro_stats.values())
+        stat = next(
+            (
+                item
+                for item in stats
+                if any(token in item.label.lower() for token in ("income", "access", "power", "growth", "week", "service"))
+            ),
+            stats[0] if stats else None,
+        )
+        stat_clause = (
+            f"{stat.label.lower()} is {stat.value}"
+            if stat is not None and stat.label and stat.value
+            else "the new machine-labor bargain is already visible in household accounts"
+        )
+        gain = self.realtime_prompts._stage_gain(stage, 150) or "people are already getting useful things they do not want to lose"
+        split = self.realtime_prompts._stage_split(stage, 150) or "the live fight is who controls the new productive floor"
+        constraint = self.realtime_prompts._stage_constraint(stage, 130) or "the real bottleneck is physical capacity and public legitimacy"
+        remit = " ".join([advisor.room_role, advisor.country_role, advisor.remit, advisor.viewpoint]).lower()
+        if "board" in last_user or "policy" in last_user:
+            if any(token in remit for token in ("commerce", "industry", "firm", "platform", "access")):
+                text = (
+                    "I would start with the account or platform people touch every week. "
+                    f"If that gatekeeper can meter the new productive floor, the board should say portability, switching rights, and a real appeal path. {stat_clause}."
+                )
+            elif any(token in remit for token in ("economic", "income", "household", "tax", "wage")):
+                text = (
+                    "I would write the household bargain in ordinary terms: keep the useful thing people now rely on, then make the payoff show up in rent, bills, time, or services. "
+                    f"{gain}"
+                )
+            elif any(token in remit for token in ("omb", "capacity", "agency", "procurement", "vendor")):
+                text = (
+                    "I would put the procurement rule on the board: public systems have to be inspectable, swappable, and appealable before they become the gate to essentials. "
+                    f"{constraint}"
+                )
+            else:
+                text = (
+                    "I would write the fork, not a slogan: protect the useful gain people already feel, then govern the exact place where leverage or scarcity sits. "
+                    f"{split}"
+                )
+        else:
+            text = (
+                "My first read is to name the thing people would miss if it vanished, then name the chokepoint around it. "
+                f"{gain} But {split}. With {stat_clause}, the policy should say who can refuse bad terms."
+            )
+        return self._normalize_council_candidate_text(state, text, advisor.name)
+
+    def _fallback_council_board_notes(
+        self,
+        state: SimulationState,
+        player_text: str,
+    ) -> list[str]:
+        stage = state.stages[state.active_stage_index]
+        lower = " ".join([player_text, stage.world_brief, stage.room_briefing]).lower()
+        gain = self.realtime_prompts._stage_gain(stage, 120).rstrip(".")
+        split = self.realtime_prompts._stage_split(stage, 120).rstrip(".")
+        access = self.realtime_prompts._stage_access_channel(stage, 96).rstrip(".")
+        if re.search(r"\b(?:machine check|dividend|household floor|income floor|machine income|paid week)\b", lower):
+            additions = [
+                "Index monthly machine checks to realized compute and power rents.",
+                "Keep public AI accounts portable when private tiers get scarce.",
+                "Fund human appeal desks for cutoffs in benefits, health, and model credits.",
+            ]
+        elif re.search(r"\b(?:compute|model credit|queue|service account|public account|platform toll)\b", lower):
+            additions = [
+                "Guarantee a portable basic model account before premium compute queues are served.",
+                "Auction premium compute only above a protected public service floor.",
+                "Require fast appeal rights when essential model services are cut or repriced.",
+            ]
+        elif re.search(r"\b(?:power|grid|data center|transmission|interconnection|robot|factory)\b", lower):
+            additions = [
+                "Fast-track power buildouts that return warrants or bill credits to households.",
+                "Tie data-center permits to local grid upgrades and transparent queue rules.",
+                "Keep robotics deployment fast while pricing congestion where capacity is scarce.",
+            ]
+        else:
+            additions = [
+                self._normalize_policy_note(f"Protect {gain}") if gain else "Protect the useful AI service voters would hate to lose.",
+                self._normalize_policy_note(f"Target {split}") if split else "Target the chokepoint instead of freezing broad AI use.",
+                self._normalize_policy_note(f"Make {access} portable and appealable") if access else "Make the household payoff visible before resentment hardens.",
+            ]
+        return self._dedupe_policy_notes([*stage.policy_notes, *additions])[:5]
+
     def _council_candidate_roster(
         self,
         state: SimulationState,
@@ -1222,7 +1403,15 @@ class SimulationDirector:
             )
             explicit_named = self._explicit_council_name_matches(state, latest_user_text)
             candidate_roster = list(explicit_named) if len(explicit_named) > 1 and trailing_advisor_beats < 3 else list(roster)
-        if continue_dialogue:
+        if (
+            continue_dialogue
+            and trailing_advisor_beats >= 1
+            and not preferred_speaker.strip()
+            and not (
+                len(self._explicit_council_name_matches(state, self._last_user_turn_text(turns))) > 1
+                and trailing_advisor_beats < 2
+            )
+        ):
             avoided = self._council_advisor_profile_for(state, avoid_speaker)
             if avoided is not None and len(candidate_roster) > 1:
                 filtered = [advisor for advisor in candidate_roster if advisor.key != avoided.key]
@@ -1269,10 +1458,28 @@ class SimulationDirector:
                 board_notes=[],
                 contrast=[],
             )
+        if not continue_dialogue:
+            preferred_advisor = self._council_advisor_profile_for(state, preferred_speaker)
+            if preferred_advisor is not None and any(advisor.key == preferred_advisor.key for advisor in roster):
+                return CouncilSpeakerDecision(
+                    next_speaker=preferred_advisor.key,
+                    reason="",
+                    yield_after_turn=False,
+                    board_notes=[],
+                    contrast=[],
+                )
         if len(roster) == 1:
             return CouncilSpeakerDecision(
                 next_speaker=roster[0].key,
-                reason="Only one advisor is clearly in lane for this beat.",
+                reason="",
+                yield_after_turn=False,
+                board_notes=[],
+                contrast=[],
+            )
+        if not continue_dialogue and not room_fight_requested and working_turns and working_turns[-1].speaker == "user":
+            return CouncilSpeakerDecision(
+                next_speaker=roster[0].key,
+                reason="",
                 yield_after_turn=False,
                 board_notes=[],
                 contrast=[],
@@ -1293,14 +1500,14 @@ class SimulationDirector:
             if continue_dialogue and trailing_advisor_beats >= (4 if room_fight_requested else 3):
                 return CouncilSpeakerDecision(
                     next_speaker="player",
-                    reason="Dummy council has surfaced enough beats for the player to steer.",
+                    reason="",
                     yield_after_turn=True,
                     board_notes=[],
                     contrast=[],
                 )
             return CouncilSpeakerDecision(
                 next_speaker=chosen.key,
-                reason="Dummy floor pick for component testing.",
+                reason="",
                 yield_after_turn=False,
                 board_notes=[],
                 contrast=[],
@@ -1321,12 +1528,13 @@ class SimulationDirector:
             ),
             text_format=CouncilFloorPick,
             reasoning_effort="none",
-            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:floor-decider",
-            max_output_tokens=16,
+            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:floor-decider-v2",
+            max_output_tokens=12,
             verbosity="low",
         )
         valid_keys = {advisor.key for advisor in roster} | {advisor.name for advisor in roster}
         next_speaker = str(getattr(parsed, "next_speaker", "") or "player").strip()
+        player_floor_values = {"player", "user", "you", "President", state.config.player_name}
         preferred_advisor = self._council_advisor_profile_for(state, preferred_speaker)
         avoided_advisor = self._council_advisor_profile_for(state, avoid_speaker)
         last_active_advisor = self._council_advisor_profile_for(
@@ -1342,7 +1550,8 @@ class SimulationDirector:
                     and candidate.key in roster_keys
                     and (
                         avoided_advisor is None
-                        or trailing_advisor_beats < 2
+                        or preferred_advisor is not None
+                        or trailing_advisor_beats < 1
                         or candidate.key != avoided_advisor.key
                     )
                 ):
@@ -1353,25 +1562,26 @@ class SimulationDirector:
                     for advisor in roster
                     if (
                         avoided_advisor is None
-                        or trailing_advisor_beats < 2
+                        or preferred_advisor is not None
+                        or trailing_advisor_beats < 1
                         or advisor.key != avoided_advisor.key
                     )
                 ),
                 roster[0].key,
             )
 
-        if next_speaker not in valid_keys and next_speaker not in {"player", "President"}:
+        if next_speaker not in valid_keys and next_speaker not in player_floor_values:
             next_speaker = fallback_speaker_key()
         normalized_next_speaker = self._council_advisor_profile_for(state, next_speaker)
         if normalized_next_speaker is not None:
             next_speaker = normalized_next_speaker.key
         if preferred_advisor is not None and preferred_advisor.key in roster_keys and working_turns and working_turns[-1].speaker == "user":
             next_speaker = preferred_advisor.key
-        if working_turns and working_turns[-1].speaker == "user" and next_speaker in {"player", "President"}:
+        if working_turns and working_turns[-1].speaker == "user" and next_speaker in player_floor_values:
             next_speaker = fallback_speaker_key()
-        if continue_dialogue and room_fight_requested and trailing_advisor_beats == 0 and next_speaker in {"player", "President"}:
+        if continue_dialogue and room_fight_requested and trailing_advisor_beats == 0 and next_speaker in player_floor_values:
             next_speaker = fallback_speaker_key()
-        if continue_dialogue and next_speaker in {"player", "President"} and trailing_advisor_beats == 0:
+        if continue_dialogue and next_speaker in player_floor_values and trailing_advisor_beats < 2:
             last_advisor_line = next(
                 (
                     turn.text
@@ -1387,7 +1597,8 @@ class SimulationDirector:
             and avoided_advisor is not None
             and next_speaker == avoided_advisor.key
             and len(roster) > 1
-            and trailing_advisor_beats >= 2
+            and trailing_advisor_beats >= 1
+            and preferred_advisor is None
         ):
             if preferred_advisor is not None and preferred_advisor.key != avoided_advisor.key:
                 next_speaker = preferred_advisor.key
@@ -1396,12 +1607,12 @@ class SimulationDirector:
         decision = CouncilSpeakerDecision(
             next_speaker=next_speaker,
             reason="",
-            yield_after_turn=next_speaker in {"player", "President"},
+            yield_after_turn=next_speaker in player_floor_values,
             board_notes=[],
             contrast=[],
             action=None,
         )
-        if decision.next_speaker in {"player", "President"}:
+        if decision.next_speaker in player_floor_values:
             decision.yield_after_turn = True
         elif continue_dialogue and room_fight_requested:
             decision.yield_after_turn = False
@@ -1510,7 +1721,7 @@ class SimulationDirector:
             input_text=input_text,
             text_format=CouncilAdvisorDraft,
             reasoning_effort="low",
-            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:{advisor.key}:spoken-draft",
+            prompt_cache_key=f"{simulation_id}:council:{state.active_stage_index}:{advisor.key}:spoken-draft-v2",
             max_output_tokens=200,
             verbosity="low",
         )
@@ -1528,12 +1739,57 @@ class SimulationDirector:
                 cleaned_text = repaired_text
         board_notes = (
             self._dedupe_policy_notes(
-                [self._normalize_policy_note(note) for note in getattr(parsed, "board_notes", []) if str(note).strip()]
+                [
+                    self._normalize_policy_note(note)
+                    for note in getattr(parsed, "board_notes", [])
+                    if str(note).strip() and not self._policy_board_extraction_is_placeholder(note)
+                ]
             )[:5]
             if allow_actions
             else []
         )
         action = self._normalize_council_action(parsed) if allow_actions else None
+        if allow_actions and action and action.name == "update_policy_board":
+            action_notes = action.arguments.get("notes") or []
+            if isinstance(action_notes, list):
+                board_notes = self._dedupe_policy_notes(
+                    [
+                        *board_notes,
+                        *[
+                            self._normalize_policy_note(note)
+                            for note in action_notes
+                            if str(note).strip() and not self._policy_board_extraction_is_placeholder(note)
+                        ],
+                    ]
+                )[:5]
+        last_user_turn = self._last_user_turn_text(working_turns)
+        if (
+            self._using_builtin_dummy_gateway()
+            and allow_actions
+            and cleaned_text
+            and self._policy_board_change_was_requested(last_user_turn)
+        ):
+            requested_note_count = self._requested_policy_board_note_count(last_user_turn)
+            extracted_notes = self._extract_policy_points_from_text(cleaned_text)[:5]
+            if (
+                requested_note_count
+                and len(extracted_notes) >= requested_note_count
+                and (
+                    len(board_notes) < requested_note_count
+                    or any(len(note.split()) < 5 for note in board_notes[:requested_note_count])
+                )
+            ):
+                board_notes = extracted_notes[:requested_note_count]
+            elif not board_notes or (requested_note_count and len(board_notes) < requested_note_count):
+                if extracted_notes:
+                    board_notes = self._dedupe_policy_notes([*board_notes, *extracted_notes])[:5]
+            if requested_note_count and len(board_notes) < requested_note_count:
+                board_notes = self._dedupe_policy_notes(
+                    [
+                        *board_notes,
+                        *self._fallback_council_board_notes(state, last_user_turn),
+                    ]
+                )[:requested_note_count]
         if not cleaned_text:
             return None, board_notes, action
         return (
@@ -1624,17 +1880,22 @@ class SimulationDirector:
     ) -> str:
         stage = state.stages[state.active_stage_index]
         last_user_turn = self._last_user_turn_text(working_turns)
+        macro_stats = self.realtime_prompts._macro_stats_block(stage)
+        world_memo = self.realtime_prompts._world_context_block(stage, memo_budget=760, brief_budget=2500)
         instructions = (
             f"You are repairing one live spoken line from {advisor.name}, the {advisor.country_role}. "
             "Return one CouncilAdvisorDraft JSON object. Only the text field matters. "
             "The current draft stopped at an objection or stayed too vague. Rewrite it as 1 or 2 short spoken sentences, about 22-56 words. "
             "Do not merely object. Name one replacement move, narrower guardrail, or concrete consequence in plain English. "
             "The replacement must say who gets something, who pays, who is blocked, what rule changes, or what public capacity is built. "
+            "Use one exact noun, institution, bottleneck, or watched statistic from this chapter. "
+            "Do not propose public accounts, audits, compute subsidies, licensing, or guardrails unless that object is actually live in the world memo or the player raised it. "
             "Avoid consultant language. Do not say lane, pillar, unlock, stakeholder, pressure-test, strategic posture, ecosystem, governance layer, framework, center of gravity, or policy package. "
             "No labels, no bullets, no moderator voice, no stage directions.\n\n"
             f"Advisor remit: {advisor.remit}\n"
             f"Stage: {stage.phase_label}\n"
-            f"World opening: {self.realtime_prompts._stage_opening(stage, 180)}\n"
+            f"World memo:\n{world_memo}\n"
+            f"Macro stats:\n{macro_stats}\n"
             f"Main upside: {self.realtime_prompts._stage_gain(stage, 150)}\n"
             f"Main split: {self.realtime_prompts._stage_split(stage, 150)}\n"
             f"Working board:\n{self.realtime_prompts._policy_board_block(stage.policy_notes)}"
@@ -1693,15 +1954,42 @@ class SimulationDirector:
         action: CouncilAdvisorAction | None,
         *,
         player_text: str,
-        direct_board_notes: list[str],
     ) -> bool:
         if action is None:
             return False
-        if action.name != "update_policy_board":
-            return True
-        if direct_board_notes:
-            return False
         normalized = " ".join(str(player_text or "").lower().split())
+        if action.name == "run_poll_now":
+            return bool(
+                re.search(
+                    r"\b(?:poll|survey|what do voters think|what do people think|run a poll|check the poll|see the poll|ask voters|ask people|test with voters|take the temperature|would people buy this|would voters buy this)\b",
+                    normalized,
+                )
+            )
+        if action.name == "run_queued_polls":
+            return bool(
+                re.search(
+                    r"\b(?:run|launch|do)\b.{0,24}\b(?:queued|those|all)\s+polls\b",
+                    normalized,
+                )
+                or "poll them now" in normalized
+                or "run the battery" in normalized
+            )
+        if action.name == "move_room_focus":
+            return bool(
+                re.search(
+                    r"\b(?:go|head|move|return|back|take|bring)\b.{0,32}\b(?:briefing|advisor|war room|street|citizen|debate|auditorium|town hall)\b",
+                    normalized,
+                )
+            )
+        if action.name == "focus_citizen_by_name":
+            return bool(
+                re.search(
+                    r"\b(?:talk to|speak to|take me to|show me|go to|bring me to)\b",
+                    normalized,
+                )
+            )
+        if action.name != "update_policy_board":
+            return False
         board_was_requested = bool(
             re.search(
                 r"\b(?:board|whiteboard|talking\s+points?|policy\s+ideas?|policy\s+board)\b",
@@ -1718,7 +2006,7 @@ class SimulationDirector:
         )
         if not board_was_requested:
             return False
-        action_name = str(action.arguments.get("action", "set")).strip().lower()
+        action_name = str(action.arguments.get("action", "add")).strip().lower()
         raw_notes = action.arguments.get("notes") or []
         notes = raw_notes if isinstance(raw_notes, list) else []
         if action_name in {"set", "add", "replace"} and not any(str(note).strip() for note in notes):
@@ -1781,9 +2069,19 @@ class SimulationDirector:
             return updated_state, "The poll battery is in."
         if action.name == "update_policy_board":
             policy_notes = result.data.get("policy_notes") or []
+            action_name = str(action.arguments.get("action", "set")).strip().lower()
+            if action_name == "clear":
+                return updated_state, "I cleared the board."
             if isinstance(policy_notes, list) and policy_notes:
-                return updated_state, f"I put it on the board: {policy_notes[0]}"
-            return updated_state, "I cleared the board."
+                preview = "; ".join(str(note).strip() for note in policy_notes[:2] if str(note).strip())
+                if action_name == "replace":
+                    return updated_state, f"I rewrote that line on the board: {preview or policy_notes[0]}"
+                if action_name == "add":
+                    return updated_state, f"I added it to the board: {preview or policy_notes[0]}"
+                if action_name == "set":
+                    return updated_state, f"I put it on the board: {preview or policy_notes[0]}"
+                return updated_state, f"I updated the board: {preview or policy_notes[0]}"
+            return updated_state, "I updated the board."
         if action.name == "move_room_focus":
             room = str(result.data.get("room", "")).strip()
             if room:
@@ -1805,12 +2103,10 @@ class SimulationDirector:
         state: SimulationState,
         action: CouncilAdvisorAction | None,
         player_text: str,
-        direct_board_notes: list[str],
     ) -> tuple[SimulationState, str]:
         if not self._should_execute_council_action(
             action,
             player_text=player_text,
-            direct_board_notes=direct_board_notes,
         ):
             return state, ""
         return await self._execute_council_action(
@@ -1888,6 +2184,7 @@ class SimulationDirector:
     ) -> TownHallQuestionResponse:
         state = await self.get_simulation(simulation_id)
         self._ensure_stage_ready(state)
+        self._ensure_citizens_ready(state)
         stage = state.stages[state.active_stage_index]
         citizen = self._resolve_town_hall_citizen(stage, request.citizen_id)
         thread_key = self._thread_key(
@@ -2032,6 +2329,8 @@ class SimulationDirector:
                 return RealtimeToolResult(ok=False, data={"message": "question is required"})
             state = await self.get_simulation(simulation_id)
             self._ensure_stage_ready(state)
+            if not state.stages[state.active_stage_index].sample_citizens:
+                return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
             existing_question_keys = {
                 self._poll_summary_identity(summary)
                 for summary in state.stages[state.active_stage_index].poll_summaries
@@ -2096,6 +2395,10 @@ class SimulationDirector:
                 }
             )
         if tool_name == "run_queued_polls":
+            state = await self.get_simulation(simulation_id)
+            self._ensure_stage_ready(state)
+            if not state.stages[state.active_stage_index].sample_citizens:
+                return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
             response = await self.run_polls(simulation_id)
             return RealtimeToolResult(
                 data={
@@ -2111,13 +2414,23 @@ class SimulationDirector:
             state = await self.get_simulation(simulation_id)
             self._ensure_stage_ready(state)
             stage = state.stages[state.active_stage_index]
-            action = str(payload.get("action", "set")).strip().lower()
+            action = str(payload.get("action", "add")).strip().lower()
             index = self._coerce_policy_note_index(payload.get("index"))
             raw_notes = payload.get("notes") or []
             if not isinstance(raw_notes, list):
                 return RealtimeToolResult(ok=False, data={"message": "notes must be an array of strings"})
             notes = [self._normalize_policy_note(item) for item in raw_notes]
             notes = [note for note in notes if note]
+            if action in {"add", "replace", "set"}:
+                invalid_placeholder = next(
+                    (note for note in notes if self._policy_board_extraction_is_placeholder(note)),
+                    None,
+                )
+                if invalid_placeholder is not None:
+                    return RealtimeToolResult(
+                        ok=False,
+                        data={"message": "policy board notes must be concrete lines, not placeholders"},
+                    )
             if action == "clear":
                 stage.policy_notes = []
             elif action == "add":
@@ -2156,11 +2469,15 @@ class SimulationDirector:
         if tool_name == "list_sample_citizens":
             state = await self.get_simulation(simulation_id)
             self._ensure_stage_ready(state)
+            if not state.stages[state.active_stage_index].sample_citizens:
+                return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
             citizens = [citizen.model_dump(mode="json") for citizen in state.stages[state.active_stage_index].sample_citizens]
             return RealtimeToolResult(data={"citizens": citizens})
         if tool_name == "recommend_citizens_for_topic":
             state = await self.get_simulation(simulation_id)
             self._ensure_stage_ready(state)
+            if not state.stages[state.active_stage_index].sample_citizens:
+                return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
             topic = str(payload.get("topic", "")).strip()
             if not topic:
                 return RealtimeToolResult(ok=False, data={"message": "topic is required"})
@@ -2173,6 +2490,8 @@ class SimulationDirector:
         if tool_name == "focus_citizen_by_name":
             state = await self.get_simulation(simulation_id)
             self._ensure_stage_ready(state)
+            if not state.stages[state.active_stage_index].sample_citizens:
+                return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
             citizen_name = str(payload.get("citizen_name", "")).strip()
             if not citizen_name:
                 return RealtimeToolResult(ok=False, data={"message": "citizen_name is required"})
@@ -2202,6 +2521,8 @@ class SimulationDirector:
                 return RealtimeToolResult(ok=False, data={"message": f"unknown room '{room_value}'"})
             citizen_id = str(payload.get("citizen_id", "")).strip() or None
             if room == RoomName.citizens:
+                if not state.stages[state.active_stage_index].sample_citizens:
+                    return RealtimeToolResult(ok=False, data={"message": "citizens are still hydrating"})
                 if citizen_id is not None:
                     self._ensure_citizen_exists(state, citizen_id)
                 elif state.stages[state.active_stage_index].sample_citizens:
@@ -2370,7 +2691,6 @@ class SimulationDirector:
 
     def _setup_missing_fields(self, config: SimulationConfig) -> list[str]:
         required_fields = [
-            "title",
             "country",
             "player_name",
             "player_role",
@@ -2395,6 +2715,7 @@ class SimulationDirector:
         open_questions: list[str] | None = None,
         next_actions: list[str] | None = None,
         config_updates: SetupSessionPatchRequest | None = None,
+        launch_now: bool = False,
     ) -> SetupChamberGuidance:
         missing = self._setup_missing_fields(config)
         readiness = "ready" if not missing else "needs_input"
@@ -2415,6 +2736,7 @@ class SimulationDirector:
         return SetupChamberGuidance(
             chamber_reply=chamber_reply,
             readiness=readiness,
+            launch_now=launch_now and readiness == "ready",
             applied_updates=applied_updates or [],
             open_questions=merged_questions[:3],
             next_actions=merged_actions[:3],
@@ -2438,8 +2760,6 @@ class SimulationDirector:
             "persona_count": "persona_count",
             "stage_count": "stage_count",
             "visual_style": "visual_style",
-            "orchestrator_reasoning_effort": "orchestrator_reasoning_effort",
-            "realtime_model": "realtime_model",
         }
         before_payload = before.model_dump()
         after_payload = after.model_dump()
@@ -2563,13 +2883,16 @@ class SimulationDirector:
             await self._set_progress(
                 state,
                 phase=PreparationPhase.seeding,
-                label="Seeding citizens while the world is written",
-                detail="Starting the representative sample and the economic chapter in parallel.",
+                label="Preparing the chapter frame",
+                detail="Loading the representative sample frame before the opening chapter is written.",
                 percent=12,
             )
             personas = await self._load_personas(simulation_id)
             persona_task: asyncio.Task[pd.DataFrame] | None = None
-            if personas is None:
+            if personas is not None:
+                state.persona_count_ready = len(personas)
+                await self.store.save(state)
+            else:
                 persona_task = asyncio.create_task(self.gabriel_service.ensure_personas(
                     simulation_id=simulation_id,
                     population_description=state.config.population_description,
@@ -2577,9 +2900,13 @@ class SimulationDirector:
                     save_dir=self.store.simulation_dir(simulation_id),
                 ))
                 background_tasks.append(persona_task)
-            else:
-                state.persona_count_ready = len(personas)
-                await self.store.save(state)
+                await self._set_progress(
+                    state,
+                    phase=PreparationPhase.seeding,
+                    label="Starting world and sample in parallel",
+                    detail="The representative sample is being seeded while the orchestrator writes the opening chapter.",
+                    percent=18,
+                )
 
             existing_current_stage = (
                 state.stages[state.active_stage_index]
@@ -2621,13 +2948,15 @@ class SimulationDirector:
                     state.stages[stage.index] = stage
                 else:
                     state.stages.append(stage)
+                if not state.config.title.strip() and stage.title.strip():
+                    state.config = state.config.model_copy(update={"title": stage.title.strip()})
                 state.updated_at = utc_now()
                 await self.store.save(state)
             await self._set_progress(
                 state,
                 phase=PreparationPhase.media,
-                label="Rendering briefing while citizens update",
-                detail="Generating the chapter reel in parallel with the citizen evidence and public polling.",
+                label="Rendering briefing while citizens prepare",
+                detail="Generating the chapter reel while the representative sample catches up to the new world.",
                 percent=56,
             )
             media_task = asyncio.create_task(self.orchestrator.materialize_stage_media(
@@ -2644,43 +2973,12 @@ class SimulationDirector:
                     state.config = state.config.model_copy(update={"council_roster": generated_roster})
                     state.updated_at = utc_now()
                     await self.store.save(state)
-            if persona_task is not None:
-                personas = await persona_task
-                await self._save_personas(simulation_id, personas)
-                state.persona_count_ready = len(personas)
-                state.updated_at = utc_now()
-                await self.store.save(state)
-            if personas is None:
-                raise RuntimeError("personas not ready")
-            await self._set_progress(
-                state,
-                phase=PreparationPhase.citizen_updates,
-                label="Refreshing citizen lives",
-                detail="Updating how different households and workers experience the new stage before measuring sentiment.",
-                percent=70,
-            )
-            personas = await self.gabriel_service.update_personas_for_stage(
-                personas=personas,
-                stage=stage,
-                incumbent_name=state.incumbent_name,
-                player_name=state.config.player_name,
-                opponent_name=state.config.opponent_name,
-                save_dir=self.store.persona_update_dir(simulation_id, stage.index),
-            )
-            stage.sample_citizens = self.gabriel_service.pick_sample_citizens(personas, stage=stage)
-            self._backfill_sample_citizen_town_hall_questions(state, stage)
-            stage.queued_poll_questions = [item.question for item in state.queued_poll_questions]
-            await self._set_progress(
-                state,
-                phase=PreparationPhase.media,
-                label="Finishing the opening reel",
-                detail="Waiting for any last narration or image frame before the chapter becomes playable.",
-                percent=94,
-            )
             await media_task
             stage.featurettes = []
             stage.featurettes_status = "queued"
             stage.featurettes_error = None
+            stage.sample_citizens = list(stage.sample_citizens or [])
+            stage.queued_poll_questions = [item.question for item in state.queued_poll_questions]
             self._decorate_asset_urls(stage)
             state.approval_rating = stage.tracking.approval.value
             state.standard_questions = self.gabriel_service.standard_questions(
@@ -2694,18 +2992,52 @@ class SimulationDirector:
                 state.stages.append(stage)
             state.status = SimulationStatus.stage_ready
             state.current_room = RoomName.briefing
-            state.focused_citizen_id = stage.sample_citizens[0].citizen_id if stage.sample_citizens else None
+            state.focused_citizen_id = None
             state.progress = StageProgress(
-                phase=PreparationPhase.polling,
-                label="Reading the country",
-                detail="The reel and rooms are live. Fresh polling is still reading the electorate in the background.",
-                percent=88,
+                phase=PreparationPhase.citizen_updates,
+                label="Opening the chapter",
+                detail="The reel and core rooms are live while citizens and polling catch up in the background.",
+                percent=72,
             )
+            state.updated_at = utc_now()
+            await self.store.save(state)
+            self._queue_stage_featurettes(simulation_id, stage.index)
+            if persona_task is not None:
+                personas = await persona_task
+                await self._save_personas(simulation_id, personas)
+                state.persona_count_ready = len(personas)
+                state.updated_at = utc_now()
+                await self.store.save(state)
+            if personas is None:
+                raise RuntimeError("personas not ready")
+            await self._set_progress(
+                state,
+                phase=PreparationPhase.citizen_updates,
+                label="Refreshing citizen lives",
+                detail="The chapter is live. Representative households are still being updated into this world.",
+                percent=80,
+            )
+            personas = await self.gabriel_service.update_personas_for_stage(
+                personas=personas,
+                stage=stage,
+                incumbent_name=state.incumbent_name,
+                player_name=state.config.player_name,
+                opponent_name=state.config.opponent_name,
+                save_dir=self.store.persona_update_dir(simulation_id, stage.index),
+            )
+            stage.sample_citizens = self.gabriel_service.pick_sample_citizens(personas, stage=stage)
+            self._backfill_sample_citizen_town_hall_questions(state, stage)
+            stage.queued_poll_questions = [item.question for item in state.queued_poll_questions]
+            if len(state.stages) > stage.index:
+                state.stages[stage.index] = stage
+            else:
+                state.stages.append(stage)
+            if stage.sample_citizens:
+                state.focused_citizen_id = stage.sample_citizens[0].citizen_id
             state.updated_at = utc_now()
             await self._save_personas(simulation_id, personas)
             await self.store.save(state)
             self._queue_stage_tracking_poll(simulation_id, stage.index)
-            self._queue_stage_featurettes(simulation_id, stage.index)
             self._queue_stage_town_hall_questions(simulation_id, stage.index)
         except Exception as exc:  # pragma: no cover - surfaced through API
             unfinished = [task for task in background_tasks if not task.done()]
@@ -2713,6 +3045,21 @@ class SimulationDirector:
                 task.cancel()
             if background_tasks:
                 await asyncio.gather(*background_tasks, return_exceptions=True)
+            if state.status == SimulationStatus.stage_ready:
+                logger.exception(
+                    "Stage %s for simulation %s stayed playable after late citizen hydration failed",
+                    state.active_stage_index,
+                    simulation_id,
+                )
+                state.progress = StageProgress(
+                    phase=PreparationPhase.citizen_updates,
+                    label="Citizens still arriving",
+                    detail="The chapter is playable. Citizen interviews and poll extras are still catching up.",
+                    percent=72,
+                )
+                state.updated_at = utc_now()
+                await self.store.save(state)
+                return
             state.status = SimulationStatus.error
             state.error = str(exc)
             state.progress = StageProgress(
@@ -2742,8 +3089,13 @@ class SimulationDirector:
         if state.status != SimulationStatus.stage_ready or state.active_stage_index >= len(state.stages):
             raise RuntimeError("stage is not ready yet")
 
-    def _ensure_citizen_exists(self, state: SimulationState, citizen_id: str | None) -> None:
+    def _ensure_citizens_ready(self, state: SimulationState) -> None:
         self._ensure_stage_ready(state)
+        if not state.stages[state.active_stage_index].sample_citizens:
+            raise RuntimeError("citizens are still hydrating")
+
+    def _ensure_citizen_exists(self, state: SimulationState, citizen_id: str | None) -> None:
+        self._ensure_citizens_ready(state)
         citizen_ids = {citizen.citizen_id for citizen in state.stages[state.active_stage_index].sample_citizens}
         if not citizen_id or citizen_id not in citizen_ids:
             raise KeyError(f"citizen '{citizen_id}' not found")
@@ -2797,32 +3149,6 @@ class SimulationDirector:
         existing.extend(turns)
         state.conversation_threads[thread_key] = existing[-48:]
 
-    def _assistant_turns_from_council_plan(self, plan: CouncilTurnPlan, mode: str) -> list[ConversationTurn]:
-        selected = [beat for beat in plan.advisors if beat.speak and " ".join(beat.text.split()).strip()]
-        if not selected:
-            lead_entry = next((beat for beat in plan.advisors if beat.name == plan.lead and beat.text.strip()), None)
-            if lead_entry is not None:
-                selected = [lead_entry]
-        if selected:
-            lead_selection = next((beat for beat in selected if beat.name == plan.lead), None)
-            if lead_selection is not None:
-                selected = [lead_selection, *[beat for beat in selected if beat.name != plan.lead]]
-        turns: list[ConversationTurn] = []
-        for beat in selected[:2]:
-            cleaned_text = self._normalize_council_speech(beat.text)
-            if not cleaned_text:
-                continue
-            turns.append(
-                ConversationTurn(
-                    speaker="assistant",
-                    speaker_name=beat.name,
-                    speaker_voice=COUNCIL_VOICES.get(beat.name),
-                    text=cleaned_text,
-                    mode="voice" if mode == "voice" else "text",
-                )
-            )
-        return turns
-
     def _normalize_council_speech(self, text: str) -> str:
         cleaned = self._plain_language_cleanup(" ".join(str(text or "").split()).strip()).strip("\"'“”‘’").strip()
         if not cleaned:
@@ -2842,22 +3168,21 @@ class SimulationDirector:
             f"{sentence[:1].upper()}{sentence[1:]}" if sentence and sentence[:1].islower() else sentence
             for sentence in sentences
         ]
-        if len(sentences) > 1 and len(sentences[0].split()) >= 18 and len(" ".join(sentences).split()) >= 26:
+        if (
+            len(sentences) > 1
+            and len(sentences[0].split()) >= 18
+            and sentences[1].lower().startswith(("the win ", "the point ", "that means ", "the catch ", "the question "))
+            and len(" ".join(sentences).split()) >= 26
+        ):
             cleaned = sentences[0].strip()
-        elif len(sentences) > 2:
-            cleaned = " ".join(sentences[:2]).strip()
         else:
-            cleaned = " ".join(sentences).strip()
+            cleaned = " ".join(sentences[:3]).strip() if len(sentences) > 3 else " ".join(sentences).strip()
         words = cleaned.split()
-        if len(words) > 60:
-            first_sentence = sentences[0].strip() if sentences else cleaned
-            if len(first_sentence.split()) <= 60:
-                cleaned = first_sentence
-            else:
-                trimmed_words = first_sentence.split()[:60]
-                while trimmed_words and trimmed_words[-1].lower() in {"a", "an", "the", "and", "or", "to", "of", "for", "with", "in", "on"}:
-                    trimmed_words.pop()
-                cleaned = " ".join(trimmed_words).rstrip(",;:")
+        if len(words) > 110:
+            trimmed_words = words[:110]
+            while trimmed_words and trimmed_words[-1].lower() in {"a", "an", "the", "and", "or", "to", "of", "for", "with", "in", "on"}:
+                trimmed_words.pop()
+            cleaned = " ".join(trimmed_words).rstrip(",;:")
         cleaned = self._collapse_adjacent_word_repetitions(cleaned.strip())
         if cleaned and cleaned[-1] not in ".!?":
             cleaned = f"{cleaned}."
@@ -2872,13 +3197,14 @@ class SimulationDirector:
         raw = " ".join(str(text or "").split()).strip()
         if not raw:
             return ""
+        roster_names = {advisor.name.lower() for advisor in self._council_roster_for(state)}
         speaker_match = re.match(r"^([A-Za-z][A-Za-z' .-]{0,40})\s*:\s*(.+)$", raw)
         if speaker_match:
             claimed_speaker = speaker_match.group(1).strip()
-            if claimed_speaker.lower() != advisor_name.lower():
-                return ""
-            raw = speaker_match.group(2).strip()
-        roster_names = {advisor.name.lower() for advisor in self._council_roster_for(state)}
+            if claimed_speaker.lower() in roster_names:
+                if claimed_speaker.lower() != advisor_name.lower():
+                    return ""
+                raw = speaker_match.group(2).strip()
         if raw.split(":", 1)[0].strip().lower() in roster_names and ":" in raw:
             return ""
         return self._normalize_council_speech(raw)
@@ -2992,7 +3318,11 @@ class SimulationDirector:
 
     def _maybe_apply_council_board_notes(self, stage: StagePackage, board_notes: list[str]) -> list[str]:
         normalized = self._dedupe_policy_notes(
-            [self._normalize_policy_note(note) for note in board_notes if str(note).strip()]
+            [
+                self._normalize_policy_note(note)
+                for note in board_notes
+                if str(note).strip() and not self._policy_board_extraction_is_placeholder(note)
+            ]
         )
         if not normalized:
             return stage.policy_notes
@@ -3009,7 +3339,9 @@ class SimulationDirector:
         self,
         state: SimulationState,
     ) -> tuple[ConversationTurn | None, ConversationTurn | None]:
-        turns = self._merged_auditorium_turns(state)
+        stage_index = state.active_stage_index
+        town_hall_key = self._thread_key(stage_index, RealtimeRole.debate, None, AdvisorMode.solo, AuditoriumMode.town_hall)
+        turns = list(state.conversation_threads.get(town_hall_key, []))
         latest_user_index: int | None = None
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].speaker == "user" and turns[index].text.strip():
@@ -3046,10 +3378,11 @@ class SimulationDirector:
         current_stage = state.stages[state.active_stage_index]
         source_options = [
             citizen.current_worries,
-            citizen.current_hopes,
-            citizen.recent_ai_moment,
-            citizen.summary,
             citizen.current_update,
+            citizen.recent_ai_moment,
+            citizen.current_hopes,
+            citizen.summary,
+            self.realtime_prompts._stage_gain(current_stage, 140),
             self.realtime_prompts._stage_split(current_stage, 140),
             citizen.role,
         ]
@@ -3071,9 +3404,21 @@ class SimulationDirector:
         if not cleaned:
             return "What does your plan actually do for people like me?"
         lead = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+        stage_split = self.realtime_prompts._stage_split(current_stage, 120)
+        stage_gain = self.realtime_prompts._stage_gain(current_stage, 120)
+        access_channel = self.realtime_prompts._stage_access_channel(current_stage, 110)
+        object_hint = access_channel or stage_gain or "the service or account my household depends on"
+        if stage_split:
+            return self._normalize_town_hall_question_text(
+                f"{lead}. If {object_hint.lower()} gets cut off, repriced, or delayed, who can reverse it fast?"
+            )
+        if stage_gain:
+            return self._normalize_town_hall_question_text(
+                f"{lead}. Are you protecting that gain, or changing who gets access to it?"
+            )
         if re.match(r"^(?:i|my|we|our)\b", cleaned, flags=re.IGNORECASE):
-            return self._normalize_town_hall_question_text(f"{lead}. What would change for people like me next month?")
-        return self._normalize_town_hall_question_text(f"{lead}. How would your plan change that for someone like me?")
+            return self._normalize_town_hall_question_text(f"{lead}. What would actually change in the account, queue, job, or bill next month?")
+        return self._normalize_town_hall_question_text(f"{lead}. What power does your plan give us when the account, queue, or service goes wrong?")
 
     def _fallback_town_hall_opponent_reply(
         self,
@@ -3138,10 +3483,25 @@ class SimulationDirector:
             return []
         if not self._policy_board_change_was_requested(raw):
             return []
+        if (
+            re.search(
+                r"\b(?:what|which|where|how|do\s+you\s+think)\b.{0,90}\b(?:put|add|write)\b.{0,40}\b(?:board|whiteboard|talking\s+points)\b",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            and not re.search(r"\b(?:with|as|to\s+say)\b|[:;-]", raw, flags=re.IGNORECASE)
+        ):
+            return []
         extracted = ""
-        direct_match = re.search(
-            r"\b(?:put|add|write|place)\s+(?P<note>.+?)\s+(?:on|onto|to|into)\s+(?:the\s+)?(?:policy\s+)?(?:ideas\s+)?(?:board|whiteboard|talking\s+points)\b",
+        raw_for_extraction = re.sub(
+            r"^[A-Z][A-Za-z' .-]{1,40},?\s+(?:can|could|would|will)\s+you\s+",
+            "",
             raw,
+            flags=re.IGNORECASE,
+        )
+        direct_match = re.search(
+            r"\b(?:put|add|write|place|keep|save|capture|note|pin)\s+(?P<note>.+?)\s+(?:on|onto|to|into)\s+(?:the\s+)?(?:policy\s+)?(?:ideas\s+)?(?:board|whiteboard|talking\s+points)\b",
+            raw_for_extraction,
             flags=re.IGNORECASE,
         )
         if direct_match:
@@ -3150,9 +3510,27 @@ class SimulationDirector:
                 extracted = ""
             if self._policy_board_extraction_is_placeholder(extracted):
                 extracted = ""
+        if not extracted and re.search(
+            r"\b(?:best|those|these|your|their|the)\s+(?:ones|ideas|recommendations|proposals|planks)\b",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            extracted = next(
+                (
+                    " ".join(turn.text.split()).strip()
+                    for turn in reversed(thread_turns or [])
+                    if turn.speaker == "assistant" and turn.text.strip()
+                ),
+                "",
+            )
+            distilled = self._extract_policy_points_from_text(extracted)
+            if distilled:
+                extracted = "; ".join(distilled[: self._requested_policy_board_note_count(raw) or 3])
+            else:
+                extracted = ""
         if not extracted:
             trailing_match = re.search(
-                r"\b(?:update|change|set|make|rewrite|replace|add\s+to|put\s+on|write\s+on)\b.{0,48}\b(?:board|whiteboard|talking\s+points)\b(?:\s*(?:to\s+say|with|as|that|this|:|-))?\s*(?P<note>.+)$",
+                r"\b(?:update|change|set|make|rewrite|replace|add\s+to|put\s+on|write\s+on)\b.{0,48}\b(?:board|whiteboard|talking\s+points)\b(?:\s*(?:to\s+say|with|as|that|this|:|-))\s*(?P<note>.+)$",
                 raw,
                 flags=re.IGNORECASE,
             )
@@ -3163,6 +3541,21 @@ class SimulationDirector:
         extracted = re.sub(r"^(?:that|this|it|please|can you|could you|let'?s)\s+", "", extracted.strip(), flags=re.IGNORECASE)
         if self._policy_board_extraction_is_placeholder(extracted):
             extracted = ""
+        if not extracted and re.search(
+            r"\b(?:your|our|these|those|the)\s+(?:ideas|recommendations|proposal|proposals|plan|thoughts)\b",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            extracted = next(
+                (
+                    " ".join(turn.text.split()).strip()
+                    for turn in reversed(thread_turns or [])
+                    if turn.speaker == "assistant" and turn.text.strip()
+                ),
+                "",
+            )
+            distilled = self._extract_policy_points_from_text(extracted)
+            extracted = "; ".join(distilled[: self._requested_policy_board_note_count(raw) or 3]) if distilled else extracted
         if not extracted and re.search(
             r"\b(?:put|add|write|place|keep|save|capture|note)\s+(?:that|this|it)\s+(?:(?:on|onto|to|into)\s+(?:the\s+)?(?:policy\s+)?(?:ideas\s+)?(?:board|whiteboard|talking\s+points)|down)\b",
             raw,
@@ -3176,12 +3569,25 @@ class SimulationDirector:
                 ),
                 "",
             )
+            distilled = self._extract_policy_points_from_text(extracted)
+            extracted = "; ".join(distilled[: self._requested_policy_board_note_count(raw) or 3]) if distilled else extracted
         notes = self._extract_policy_points_from_text(extracted)
+        if not notes and self._policy_board_change_was_requested(raw):
+            latest_advisor_line = next(
+                (
+                    " ".join(turn.text.split()).strip()
+                    for turn in reversed(thread_turns or [])
+                    if turn.speaker == "assistant" and turn.text.strip()
+                ),
+                "",
+            )
+            if latest_advisor_line:
+                notes = self._extract_policy_points_from_text(latest_advisor_line)
         if not notes:
             return []
         replace_board = bool(
             re.search(
-                r"\b(?:set|replace|rewrite|make|update|change)\b.{0,24}\b(?:board|whiteboard|talking\s+points)\b",
+                r"\b(?:set|replace|rewrite)\b.{0,24}\b(?:board|whiteboard|talking\s+points)\b|\b(?:make|change)\b.{0,24}\b(?:board|whiteboard|talking\s+points)\b.{0,16}\b(?:say|to)\b",
                 raw,
                 flags=re.IGNORECASE,
             )
@@ -3230,6 +3636,29 @@ class SimulationDirector:
             )
         )
 
+    def _requested_policy_board_note_count(self, text: str) -> int:
+        normalized = " ".join(str(text or "").lower().split())
+        if not normalized:
+            return 0
+        number_words = {
+            "one": 1,
+            "single": 1,
+            "two": 2,
+            "couple": 2,
+            "pair": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+        }
+        for word, count in number_words.items():
+            if re.search(
+                rf"\b{word}\b.{{0,32}}\b(?:planks?|ideas?|items?|lines?|polic(?:y|ies))\b",
+                normalized,
+            ):
+                return count
+        digit_match = re.search(r"\b([1-5])\b.{0,32}\b(?:planks?|ideas?|items?|lines?|polic(?:y|ies))\b", normalized)
+        return int(digit_match.group(1)) if digit_match else 0
+
     def _policy_board_extraction_is_placeholder(self, text: str) -> bool:
         normalized = " ".join(str(text or "").lower().strip(" .!?;:-").split())
         if not normalized:
@@ -3250,17 +3679,80 @@ class SimulationDirector:
             "this plan",
             "the best idea",
             "best idea",
+            "the best one",
+            "best one",
+            "the best ones",
+            "best ones",
             "the best policy idea",
             "best policy idea",
             "the best concrete idea",
             "best concrete idea",
             "the best concrete policy idea",
             "best concrete policy idea",
+            "idea",
+            "ideas",
+            "your idea",
+            "your ideas",
+            "our idea",
+            "our ideas",
+            "their idea",
+            "their ideas",
+            "these ideas",
+            "those ideas",
+            "the ideas",
+            "your recommendation",
+            "your recommendations",
+            "our recommendation",
+            "our recommendations",
+            "the recommendation",
+            "the recommendations",
+            "the plank",
+            "the planks",
+            "the policy plank",
+            "the policy planks",
+            "the best plank",
+            "best plank",
+            "the best planks",
+            "best planks",
+            "the best policy plank",
+            "best policy plank",
+            "the best policy planks",
+            "best policy planks",
+            "the best concrete plank",
+            "best concrete plank",
+            "the best concrete planks",
+            "best concrete planks",
+            "the best concrete policy plank",
+            "best concrete policy plank",
+            "the best concrete policy planks",
+            "best concrete policy planks",
+            "your proposal",
+            "your proposals",
+            "the proposal",
+            "the proposals",
+            "your thoughts",
+            "your plan",
+            "our plan",
         }
         if normalized in placeholders:
             return True
+        if self._policy_note_is_board_instruction(normalized):
+            return True
+        if re.search(r"\b(?:give|suggest|recommend|tell|show|write|put)\s+me\b", normalized) and re.search(
+            r"\b(?:ideas?|planks?|polic(?:y|ies)|recommendations?|proposals?)\b",
+            normalized,
+        ):
+            return True
+        if re.search(r"\b(?:what|which|where|how)\b.{0,40}\b(?:board|whiteboard|policy ideas|talking points)\b", normalized):
+            return True
         words = normalized.split()
-        return len(words) <= 7 and "idea" in words and any(word in words for word in ("best", "concrete", "policy"))
+        return len(words) <= 7 and (
+            ("idea" in words or "ideas" in words or "plank" in words or "planks" in words)
+            or (
+                any(word in words for word in ("idea", "ideas", "plank", "planks", "proposal", "proposals", "recommendation", "recommendations"))
+                and any(word in words for word in ("best", "concrete", "policy", "your", "our", "these", "those"))
+            )
+        )
 
     def _turn_requests_council_fight(self, text: str) -> bool:
         normalized = " ".join(text.lower().split())
@@ -3335,12 +3827,33 @@ class SimulationDirector:
         cleaned = " ".join(text.replace("\n", " ").split())
         if not cleaned:
             return []
-        chunks = re.split(
-            r";|(?:,\s+(?:but\s+)?(?=(?:fund|speed|open|keep|offer|require|share|build|cut|ban|restrict|expand|protect|guarantee|license|tax|subsidize|accelerate)\b))|(?:\b(?:and|but)\b\s+(?=(?:fund|speed|open|keep|offer|require|share|build|cut|ban|restrict|expand|protect|guarantee|license|tax|subsidize|accelerate)\b))",
+        policy_heads = (
+            "pay|finance|fund|speed|open|keep|offer|require|share|build|create|dedicate|cut|ban|restrict|"
+            "expand|protect|guarantee|license|tax|subsidize|accelerate|fast-track|charge|deploy|make|skim|"
+            "rebate|auction|establish|raise|audit|index|tie|target"
+        )
+        cleaned = re.sub(
+            rf"(?:^|(?<=[.;:!?])\s+|\s+)(?:first|second|third|fourth|fifth|one|two|three|four|five|[1-5][.)])"
+            rf"\s*,?\s*(?=(?:{policy_heads})\b)",
+            "; ",
             cleaned,
             flags=re.IGNORECASE,
         )
-        return [chunk.strip(" -*.") for chunk in chunks if chunk.strip(" -*.")]
+        chunks = re.split(
+            rf";|(?<=[.!?])\s+(?=(?:{policy_heads})\b)|(?:,\s+(?:but\s+)?(?=(?:{policy_heads})\b))|(?:\b(?:and|but)\b\s+(?=(?:{policy_heads})\b))",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return [
+            chunk.strip(" -*.")
+            for chunk in chunks
+            if chunk.strip(" -*.")
+            and not re.match(
+                r"^(?:i|we)\s+would\s+do\s+(?:one|two|three|four|five|\d+)\s+things?$|^here\s+are\s+(?:one|two|three|four|five|\d+)\s+(?:ideas?|planks?|polic(?:y|ies))$",
+                chunk.strip(" -*."),
+                flags=re.IGNORECASE,
+            )
+        ]
 
     def _extract_policy_notes(self, turns: list[ConversationTurn]) -> list[str]:
         notes: list[str] = []
@@ -3362,13 +3875,34 @@ class SimulationDirector:
         return notes
 
     def _extract_policy_points_from_text(self, text: str) -> list[str]:
-        pseudo_turn = ConversationTurn(speaker="user", text=text, mode="text")
+        candidate = " ".join(str(text or "").split())
+        board_body_matches = [
+            *re.finditer(
+            r"\b(?:my\s+)?(?:two|three|four|five)?\s*(?:fundable\s+|specific\s+)?planks?\s+(?:are|would be|should be)\s*:\s*(?P<body>.+)$",
+            candidate,
+            flags=re.IGNORECASE,
+            ),
+            *re.finditer(
+            r"\b(?:put|write|add).{0,80}\b(?:two\s+)?(?:up|on\s+the\s+board)\s*:\s*(?P<body>.+)$",
+            candidate,
+            flags=re.IGNORECASE,
+            ),
+        ]
+        if board_body_matches:
+            candidate = board_body_matches[-1].group("body")
+        candidate = re.sub(
+            r"\.\s+(?:And\s+)?(?=(?:audit|charge|fund|guarantee|keep|require|protect|build|create|dedicate|tax|offer|fast-track|index|auction|tie|make|target)\b)",
+            "; ",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        pseudo_turn = ConversationTurn(speaker="user", text=candidate, mode="text")
         notes = self._extract_policy_notes([pseudo_turn])
         if notes:
             return notes
         raw_lines = [
             segment.strip().strip("-* ")
-            for line in text.splitlines()
+            for line in candidate.splitlines()
             for segment in line.split(";")
             if segment.strip()
         ]
@@ -3378,38 +3912,28 @@ class SimulationDirector:
     def _draft_policy_notes(self, stage: StagePackage) -> list[str]:
         if stage.policy_notes:
             return stage.policy_notes[:5]
-        lowered = str(stage.world_brief or "").lower()
-        seed_notes: list[str] = []
-        if any(token in lowered for token in ("public ai account", "public model account", "household", "small firm", "school", "clinic", "access")):
-            seed_notes.append("Keep broad AI access open for households, schools, clinics, and small firms.")
-        if any(token in lowered for token in ("platform", "ownership", "chokepoint", "toll", "rent", "queue", "priority")):
-            seed_notes.append("Break chokepoints and spread ownership of the AI upside.")
-        if any(token in lowered for token in ("machine check", "dividend", "productivity rebate", "income", "household floor", "security")):
-            seed_notes.append("Turn machine gains into a visible household floor.")
-        if any(token in lowered for token in ("power", "grid", "compute", "chip", "transmission", "substation", "water", "housing", "logistics")):
-            seed_notes.append("Speed grid, compute, and deployment buildout.")
-        if any(token in lowered for token in ("fraud", "scam", "appeal", "liability", "records", "benefits", "infrastructure")):
-            seed_notes.append("Require audits and appeals where AI can move money, records, benefits, or infrastructure.")
-        if any(token in lowered for token in ("robot", "robotics", "warehouse", "depot", "construction", "port", "factory")):
-            seed_notes.append("Open the physical bottlenecks, not just the software layer.")
-        if not seed_notes:
-            seed_notes = [
-                "Keep useful AI access broad instead of rationed.",
-                "Build the physical bottlenecks faster.",
-                "Make the gains visible in ordinary household life.",
-            ]
-        return self._dedupe_policy_notes(seed_notes)[:5]
+        return []
 
-    def _resolve_agenda_points(self, stage: StagePackage, submitted_platform: str) -> list[str]:
-        extracted = self._extract_policy_points_from_text(submitted_platform)
+    def _resolve_agenda_points(
+        self,
+        stage: StagePackage,
+        submitted_platform: str,
+        player_rebuttal: str = "",
+    ) -> list[str]:
+        player_text = "\n".join(
+            part.strip()
+            for part in (submitted_platform, player_rebuttal)
+            if str(part or "").strip()
+        )
+        extracted = self._extract_policy_points_from_text(player_text)
         if extracted:
             return extracted[:6]
+        fallback = self._normalize_policy_note(player_text)
+        if fallback and len(fallback.split()) >= 4:
+            return [fallback]
         if stage.policy_notes:
             return stage.policy_notes[:6]
-        drafted = self._draft_policy_notes(stage)
-        if drafted:
-            return drafted[:6]
-        return ["Keep consumer AI open.", "Speed grid hookups.", "Cushion visible job loss."]
+        return []
 
     def _axis_to_policy_note(self, axis: str) -> str:
         lower = axis.lower()
@@ -3456,6 +3980,8 @@ class SimulationDirector:
         lowered_original = text.lower().strip(" .!?")
         if lowered_original in filler_phrases:
             return ""
+        if self._policy_note_is_board_instruction(text):
+            return ""
         text = re.sub(
             r"^(whether to|how to|how aggressively to|how hard to|whether|should we|should the government|let'?s|we should|our plan is to|the plan is to)\s+",
             "",
@@ -3465,23 +3991,95 @@ class SimulationDirector:
         if ":" in text:
             left, right = text.split(":", 1)
             text = right if len(right.split()) >= 3 else left
-        text = re.split(r"\b(?:while|without|because|so that|despite|if)\b", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        text = re.split(r"\b(?:because|so that|despite)\b", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if self._policy_note_has_dangling_ending(text):
+            return ""
         lowered = text.lower().strip(" .!?")
         if lowered in filler_phrases:
+            return ""
+        if self._policy_note_is_board_instruction(text):
             return ""
         if 2 <= len(text.split()) <= 8 and len(text) <= 56:
             text = text.strip(" ,;:-")
             text = re.sub(r"\s+\b(?:and|or|with|for|to|of|the|a|an)\b$", "", text, flags=re.IGNORECASE).strip(" ,;:-")
+            if self._policy_note_has_dangling_ending(text):
+                return ""
             if len(text.split()) < 2:
                 return ""
             if text and text[-1] not in ".!?":
                 text += "."
             return text[0].upper() + text[1:]
         lower = text.lower()
+        tokens = re.findall(r"[A-Za-z0-9'-]+", text)
+        if not tokens:
+            return ""
+        directive_verbs = {
+            "accelerate",
+            "speed",
+            "fast-track",
+            "streamline",
+            "pay",
+            "fund",
+            "finance",
+            "dedicate",
+            "subsidize",
+            "give",
+            "offer",
+            "expand",
+            "open",
+            "keep",
+            "protect",
+            "require",
+            "guarantee",
+            "share",
+            "build",
+            "create",
+            "cut",
+            "cap",
+            "tax",
+            "charge",
+            "license",
+            "ban",
+            "restrict",
+            "deploy",
+            "make",
+            "skim",
+            "rebate",
+            "auction",
+            "establish",
+            "raise",
+            "audit",
+            "index",
+            "tie",
+            "target",
+        }
+        if (
+            tokens[0].lower() in directive_verbs
+            and len(tokens) <= 28
+            and len(text) <= 220
+            and not (tokens[0].lower() in {"accelerate", "speed", "fast-track", "streamline"} and " while " in f" {lower} ")
+            and not (tokens[0].lower() == "require" and "appeal" in lower and re.search(r"\b(?:denial|denials|benefit|claim)\b", lower))
+            and not (tokens[0].lower() == "keep" and re.search(r"\b(?:tools?|access|frontier|ai)\b", lower) and re.search(r"\b(?:schools?|small firms?|small businesses?|public agencies|agencies)\b", lower))
+        ):
+            sentence = text.strip(" ,;:-")
+            if self._policy_note_has_dangling_ending(sentence):
+                return ""
+            if self._policy_note_is_board_instruction(sentence):
+                return ""
+            if sentence and sentence[-1] not in ".!?":
+                sentence += "."
+            return sentence[0].upper() + sentence[1:]
+        if re.search(r"compute[- ]lease revenue.*household|household.*compute[- ]lease revenue", lower):
+            return "Dedicate certified compute-lease revenue to monthly household dividends."
+        if re.search(r"paid human advocate.*(?:benefits?|health|legal|compute)", lower):
+            return "Fund paid human advocates for benefits, health, and legal compute disputes."
+        if re.search(r"public warrants?.*(?:power|compute)|(?:power|compute).*public warrants?", lower):
+            return "Take public warrants in fast-tracked power and compute campuses."
         pattern_labels = [
             (r"(public|national|federal).*(compute bank|compute reserve|compute utility|ai utility)", "Create a public compute bank."),
             (r"(premium|private).*(compute|frontier).*(market|tier|auction)|(?:market|auction).*(premium|private).*(compute|frontier)", "Auction premium compute above a public floor."),
-            (r"(grid|power|interconnection|transmission|permitting|permit)", "Speed grid hookups."),
+            (r"(grid|power|interconnection|transmission|permitting|permit)", "Speed grid interconnection."),
+            (r"(give|offer).*(every|each)\s+household.*(basic|public).*(ai|assistant|account)", "Give every household basic AI."),
             (r"(wage insurance|income insurance)", "Offer wage insurance."),
             (r"(apprentice|apprenticeship|entry[- ]level|first rung|junior hiring)", "Fund junior hiring credits."),
             (r"(appeal|human review).*(denial|claim|benefit|decision)", "Require appeals for AI denials."),
@@ -3495,17 +4093,17 @@ class SimulationDirector:
         for pattern, label in pattern_labels:
             if re.search(pattern, lower):
                 return label
-        tokens = re.findall(r"[A-Za-z0-9'-]+", text)
-        if not tokens:
-            return ""
         directive_verbs = {
             "accelerate",
             "speed",
             "fast-track",
             "streamline",
+            "pay",
             "fund",
             "finance",
+            "dedicate",
             "subsidize",
+            "give",
             "offer",
             "expand",
             "open",
@@ -3515,6 +4113,7 @@ class SimulationDirector:
             "guarantee",
             "share",
             "build",
+            "create",
             "cut",
             "cap",
             "tax",
@@ -3523,9 +4122,23 @@ class SimulationDirector:
             "ban",
             "restrict",
             "deploy",
+            "make",
+            "skim",
+            "rebate",
+            "auction",
+            "establish",
+            "raise",
+            "audit",
+            "index",
+            "tie",
+            "target",
         }
-        if tokens[0].lower() in directive_verbs and len(tokens) <= 14 and len(text) <= 112:
+        if tokens[0].lower() in directive_verbs and len(tokens) <= 28 and len(text) <= 220:
             sentence = text.strip(" ,;:-")
+            if self._policy_note_has_dangling_ending(sentence):
+                return ""
+            if self._policy_note_is_board_instruction(sentence):
+                return ""
             if sentence and sentence[-1] not in ".!?":
                 sentence += "."
             return sentence[0].upper() + sentence[1:]
@@ -3554,6 +4167,16 @@ class SimulationDirector:
             "ban": "Ban",
             "restrict": "Restrict",
             "deploy": "Deploy",
+            "make": "Make",
+            "skim": "Skim",
+            "rebate": "Rebate",
+            "auction": "Auction",
+            "establish": "Establish",
+            "raise": "Raise",
+            "audit": "Audit",
+            "index": "Index",
+            "tie": "Tie",
+            "target": "Target",
         }
         stopwords = {
             "the",
@@ -3589,19 +4212,114 @@ class SimulationDirector:
             if token.lower() in stopwords:
                 continue
             remaining.append(token)
-            if len(remaining) >= 4:
+            if len(remaining) >= 6:
                 break
         phrase = " ".join([verb, *remaining]).strip()
         phrase = re.sub(r"\s+", " ", phrase).strip(" ,;:-")
         phrase = re.sub(r"\s+\b(?:and|or|with|for|to|of|the|a|an)\b$", "", phrase, flags=re.IGNORECASE).strip(" ,;:-")
-        if len(phrase) > 40:
+        if len(phrase) > 72:
             words = phrase.split()
-            phrase = " ".join(words[: min(len(words), 5)])
+            phrase = " ".join(words[: min(len(words), 7)])
         if len(phrase.split()) < 2 and len(phrase.strip(" .!?")) < 8:
+            return ""
+        if self._policy_note_is_board_instruction(phrase):
             return ""
         if phrase and phrase[-1] not in ".!?":
             phrase += "."
         return phrase
+
+    def _policy_note_is_board_instruction(self, value: object) -> bool:
+        normalized = " ".join(str(value or "").lower().strip(" .!?;:-").split())
+        if not normalized:
+            return False
+        if not re.search(r"\b(?:board|whiteboard|talking\s+points?|policy\s+ideas?|policy\s+board)\b", normalized):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:please\s+)?(?:can|could|would|will)?\s*(?:you\s+)?(?:add|put|write|pin|place|keep|save|capture|note|update|change|rewrite|replace)\b",
+                normalized,
+            )
+            or re.search(
+                r"\b(?:this|that|it|one|idea|plank|policy)\b.{0,40}\b(?:on|to|onto|into)\s+(?:the\s+)?(?:policy\s+)?(?:ideas?\s+)?(?:board|whiteboard)\b",
+                normalized,
+            )
+        )
+
+    def _policy_note_has_dangling_ending(self, value: object) -> bool:
+        text = " ".join(str(value or "").split()).strip().rstrip(" .!?;:")
+        if not text:
+            return True
+        if re.search(
+            r"\b(?:and|or|but|because|if|when|while|unless|where|with|for|to|of|the|a|an)\s*$",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        tail = text.split()[-1].lower().strip("'\"")
+        if tail in {
+            "access",
+            "capacity",
+            "governance",
+            "resilience",
+            "alignment",
+            "safeguards",
+            "pathways",
+            "stakeholders",
+            "levers",
+            "framework",
+            "principles",
+            "model-credit",
+        } and len(text.split()) <= 7:
+            return True
+        conditional = re.search(r"\b(?:if|when|unless|where)\s+(?P<tail>[^.;!?]+)$", text, flags=re.IGNORECASE)
+        if conditional:
+            clause = conditional.group("tail").strip()
+            clause_tokens = re.findall(r"[A-Za-z0-9'-]+", clause.lower())
+            finite_verbs = {
+                "is",
+                "are",
+                "was",
+                "were",
+                "gets",
+                "get",
+                "got",
+                "has",
+                "have",
+                "had",
+                "cuts",
+                "cut",
+                "caps",
+                "cap",
+                "charges",
+                "charge",
+                "prices",
+                "price",
+                "reprices",
+                "reprice",
+                "fails",
+                "fail",
+                "falls",
+                "fall",
+                "rises",
+                "rise",
+                "shrinks",
+                "shrink",
+                "expands",
+                "expand",
+                "denies",
+                "deny",
+                "delays",
+                "delay",
+                "serves",
+                "serve",
+                "works",
+                "work",
+                "pays",
+                "pay",
+            }
+            if len(clause_tokens) <= 3 or not any(token in finite_verbs for token in clause_tokens):
+                return True
+        return False
 
     def _dedupe_policy_notes(self, notes: list[str]) -> list[str]:
         unique: list[str] = []
@@ -3650,15 +4368,29 @@ class SimulationDirector:
     def _decorate_asset_urls(self, stage: StagePackage) -> None:
         for beat in stage.narrative_beats:
             if beat.image_path:
-                beat.image_url = self.store.asset_url(Path(beat.image_path))
+                image_path = self._prefer_finished_image(Path(beat.image_path))
+                beat.image_path = str(image_path)
+                beat.image_url = self.store.asset_url(image_path)
             if beat.audio_path:
                 beat.audio_url = self.store.asset_url(Path(beat.audio_path))
         for featurette in stage.featurettes:
             for beat in featurette.narrative_beats:
                 if beat.image_path:
-                    beat.image_url = self.store.asset_url(Path(beat.image_path))
+                    image_path = self._prefer_finished_image(Path(beat.image_path))
+                    beat.image_path = str(image_path)
+                    beat.image_url = self.store.asset_url(image_path)
                 if beat.audio_path:
                     beat.audio_url = self.store.asset_url(Path(beat.audio_path))
+
+    def _prefer_finished_image(self, path: Path) -> Path:
+        if not path.name.endswith("-fallback.svg"):
+            return path
+        base_name = path.name.removesuffix("-fallback.svg")
+        for suffix in ("jpg", "jpeg", "png", "webp"):
+            candidate = path.with_name(f"{base_name}.{suffix}")
+            if candidate.exists() and candidate.stat().st_size > 0:
+                return candidate
+        return path
 
     def _queue_stage_featurettes(self, simulation_id: str, stage_index: int) -> None:
         key = (simulation_id, stage_index)
@@ -3705,16 +4437,33 @@ class SimulationDirector:
             state.updated_at = utc_now()
             await self.store.save(state)
 
+        poll_task = asyncio.create_task(self.gabriel_service.run_tracking_polls(
+            personas=personas,
+            stage_index=stage_index,
+            stage=stage,
+            player_name=state.config.player_name,
+            opponent_name=state.config.opponent_name,
+            save_dir=self.store.poll_dir(simulation_id, stage_index),
+            extra_questions=extra_questions,
+        ))
         try:
-            personas, poll_summaries, tracking = await self.gabriel_service.run_tracking_polls(
-                personas=personas,
-                stage_index=stage_index,
-                stage=stage,
-                player_name=state.config.player_name,
-                opponent_name=state.config.opponent_name,
-                save_dir=self.store.poll_dir(simulation_id, stage_index),
-                extra_questions=extra_questions,
-            )
+            try:
+                personas, poll_summaries, tracking = await asyncio.wait_for(
+                    asyncio.shield(poll_task),
+                    timeout=self.settings.tracking_poll_soft_timeout_seconds,
+                )
+            except TimeoutError:
+                latest = await self.get_simulation(simulation_id)
+                if latest.active_stage_index == stage_index and latest.progress.phase == PreparationPhase.polling:
+                    latest.progress = StageProgress(
+                        phase=PreparationPhase.ready,
+                        label="Stage ready",
+                        detail="Briefing, citizens, and rooms are ready. The electorate read will update the board when it lands.",
+                        percent=100,
+                    )
+                    latest.updated_at = utc_now()
+                    await self.store.save(latest)
+                personas, poll_summaries, tracking = await poll_task
         except Exception:
             latest = await self.get_simulation(simulation_id)
             if latest.active_stage_index == stage_index and latest.progress.phase == PreparationPhase.polling:
@@ -3812,7 +4561,7 @@ class SimulationDirector:
                 featurettes=featurettes,
                 featurettes_status="generating",
             )
-            for slot, featurette in enumerate(featurettes):
+            async def render_featurette(slot: int, featurette):
                 featurette_dir = self.store.asset_dir(simulation_id, stage_index) / "featurettes" / f"{slot + 1:02d}-{featurette.id}"
                 await self.orchestrator.materialize_featurette_media(featurette=featurette, asset_dir=featurette_dir)
                 featurette.status = "ready"
@@ -3822,6 +4571,10 @@ class SimulationDirector:
                     featurettes=featurettes,
                     featurettes_status="generating",
                 )
+
+            await asyncio.gather(
+                *(render_featurette(slot, featurette) for slot, featurette in enumerate(featurettes))
+            )
             await self._merge_stage_featurettes(
                 simulation_id,
                 stage_index,

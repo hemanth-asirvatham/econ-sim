@@ -1,6 +1,6 @@
 # Econ Sim Product Checklist
 
-Updated: 2026-04-10
+Updated: 2026-04-26
 
 Legend:
 - `[ ]` not met yet
@@ -11,6 +11,8 @@ This file is the working product contract for `econ-sim`. It turns the full conv
 
 ## Latest pass notes
 
+- 2026-04-26 current pass: full text/reasoning defaults moved to `gpt-5.5`, while the lightweight council floor picker remains on `gpt-5.4-nano`; default image generation moved to `gpt-image-2` with a thicker Cezanne / Matisse / Monet civic-impressionist style.
+- 2026-04-26 current pass: latest focus is fresh-run QA of the voice-first 3D loop: setup chamber, documentary reel, solo advisor realtime, council advisor floor loop, public mood board, street interviews, town hall, election, and multi-stage progression. Content quality is a taste gate, not a programmatic pass/fail.
 - 2026-04-10 current pass: setup, stage, montage, featurette, advisor, citizen, debate, and town-hall prompts were tightened around natural-language flexibility rather than explicit world-mode flags. The same setup conversation now has to carry broad U.S. defaults, country/state/institution nudges, and later/future starts without a separate radical parameter.
 - 2026-04-10 current pass: later-stage and later-start content was pushed harder toward genuinely changed economic settlements: AI as a substrate for cognitive work, new household security systems, altered time use, ownership and access bottlenecks, public-service changes, robotics constraints, and geopolitical or institutional rearrangements. The prompts now explicitly reject present-day admin/wait-time cliches as the default explanation.
 - 2026-04-10 current pass: the council room remains decider-first for latency: a lightweight floor picker chooses one advisor or the player, then only that advisor drafts and speaks. Board-change language now handles natural follow-ups like “write that down” or “put that down,” using the last advisor line when appropriate.
@@ -424,7 +426,7 @@ This file is the working product contract for `econ-sim`. It turns the full conv
 
 - [x] Focused backend / prompt / Gabriel test suite is green. Acceptance: `102 passed` for `tests/test_director.py tests/test_prompt_quality.py tests/test_gabriel_service.py`, and `git diff --check` passes.
 - [x] Production web build is green after the 3D board / voice patches. Acceptance: `npm --prefix web run build` passed with the existing large `three` chunk warning only.
-- [x] Live orchestrator content probe reached a later computer-work economy without an explicit mode parameter. Acceptance: GPT-5.4 medium produced a 2036 chapter where near-AGI runs most screen work, household security mixes citizen dividends / cheap digital essentials / intermittent human work, and the conflict is compute / power / utility access rather than admin wait times.
+- [x] Live orchestrator content probe reached a later computer-work economy without an explicit mode parameter. Acceptance: GPT-5.5 medium produced a 2036 chapter where near-AGI runs most screen work, household security mixes citizen dividends / cheap digital essentials / intermittent human work, and the conflict is compute / power / utility access rather than admin wait times.
 - [~] Documentary narration got a grammar guardrail. Acceptance: montage prompt and narration normalizer now reject / repair period-plus-lowercase example fragments such as `screen. research...` and lowercase connector starts such as `management. and people...`; a regression test covers the probe failure.
 - [~] Later-start setup recognition broadened. Acceptance: natural-language setup cues such as “all of what remote workers do,” “remote work is broadly automated,” and “tasks that happen on a laptop” now anchor at `AGI Power Contest` or later without a `world_mode` / `radical` parameter.
 - [~] Blueprint has more concrete settlement pressure. Acceptance: blueprint schema / prompts now ask for `ordinary_day_now`, `primary_security_baseline`, and `legacy_metric_that_now_misleads`, and these are fed forward to the stage / montage passes as locked new-normal facts.
@@ -440,7 +442,7 @@ This file is the working product contract for `econ-sim`. It turns the full conv
 - [ ] Browser screenshot QA is still flaky with the 3D scene. Acceptance: headed Chrome-for-Testing flow reaches advisor -> street -> auditorium, but `page.screenshot()` can timeout on WebGL ReadPixels / font waits; rely on live headed inspection for final visual polish until screenshot capture is made reliable.
 - [x] Live sim processes were explicitly shut down for this patch. Acceptance: backend, Vite, Chrome-for-Testing, remote-debugging Chrome, and playtest helper process sweep returned empty after cleanup.
 - [x] Active council floor decider now parses only the next speaker. Acceptance: the live council turn path uses `CouncilFloorPick`, 16 output tokens, no parsed reason / yield / contrast payload, and the frontend no longer feeds stale contrast names into the continuation loop.
-- [~] Selected council advisor drafting now spends its quality budget on one richer beat. Acceptance: the selected advisor uses full `gpt-5.4`, a 35-80 word spoken target, and a 200-token response cap; live voice QA still needs to judge whether latency remains acceptable.
+- [~] Selected council advisor drafting now spends its quality budget on one richer beat. Acceptance: the selected advisor uses full `gpt-5.5`, a concise spoken target, and a 200-token response cap; live voice QA still needs to judge whether latency remains acceptable.
 - [~] Council floor ownership is represented inside the 3D table. Acceptance: the floor owner now glows / breathes while selected or about-to-speak, and the old center-bottom `has the floor` pill has been removed from the primary scene.
 - [x] Direct live council smoke passed after the floor-pick refactor. Acceptance: real API path produced a first advisor turn in 6.56s and a continuation advisor turn in 4.46s, with two different advisors selected by the decider-first loop and no clipped `anyone using AI to...` sentence reaching the transcript.
 - [~] The primary mic/text shell is one notch quieter. Acceptance: the keyboard affordance is now icon-only with an accessible label, keeping the bottom HUD closer to “speak first, type if needed” instead of another web-button cluster.

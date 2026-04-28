@@ -20,6 +20,8 @@ export const DEFAULT_COUNCIL_ADVISORS: CouncilAdvisorSpec[] = [
   { key: "innovation", name: "Leila", role: "Innovation", voice: "marin" },
   { key: "politics", name: "Mateo", role: "Politics", voice: "ash" },
   { key: "state", name: "Amina", role: "Security", voice: "shimmer" },
+  { key: "labor", name: "Iris", role: "Labor", voice: "sage" },
+  { key: "markets", name: "Nova", role: "Markets", voice: "verse" },
 ];
 
 export const COUNCIL_ADVISORS = DEFAULT_COUNCIL_ADVISORS;

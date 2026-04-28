@@ -25,10 +25,11 @@ function resolveDefaultApiBase() {
   }
 
   const { protocol, hostname, port, origin } = window.location;
+  const isLocalHost = hostname === "127.0.0.1" || hostname === "localhost";
   if (port === "8000") {
     return origin;
   }
-  if (port === "5173" || port === "4173") {
+  if (isLocalHost && port && port !== "8000") {
     return `${protocol}//${hostname}:8000`;
   }
   return origin;
@@ -75,13 +76,6 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function asReasoning(value: unknown): SetupDraft["orchestrator_reasoning_effort"] | undefined {
-  if (value === "none" || value === "low" || value === "medium" || value === "high") {
-    return value;
-  }
-  return undefined;
 }
 
 function normalizeCouncilRoster(value: unknown): CouncilAdvisorProfile[] {
@@ -155,9 +149,6 @@ function normalizeSetupDraft(payload: unknown, fallbackDraft: SetupDraft): Setup
     persona_count: asNumber(draftSource.persona_count) ?? fallbackDraft.persona_count,
     stage_count: asNumber(draftSource.stage_count) ?? fallbackDraft.stage_count,
     visual_style: asString(draftSource.visual_style) ?? fallbackDraft.visual_style,
-    orchestrator_reasoning_effort:
-      asReasoning(draftSource.orchestrator_reasoning_effort) ?? fallbackDraft.orchestrator_reasoning_effort,
-    realtime_model: asString(draftSource.realtime_model) ?? fallbackDraft.realtime_model,
     council_roster: council_roster.length > 0 ? council_roster : fallbackDraft.council_roster,
   };
 }
@@ -237,6 +228,7 @@ function normalizeSetupGuidance(payload: unknown) {
   return {
     chamber_reply: asString(source.chamber_reply) ?? "The chamber is ready.",
     readiness: source.readiness === "needs_input" ? "needs_input" : "ready",
+    launch_now: source.launch_now === true,
     applied_updates: Array.isArray(source.applied_updates)
       ? source.applied_updates.flatMap((entry) => (typeof entry === "string" ? [entry] : []))
       : [],
@@ -760,6 +752,7 @@ export function generateCouncilTurn(
   }> = [],
   boardNotes: string[] = [],
   signal?: AbortSignal,
+  commit = true,
 ) {
   return request<CouncilTurnResponse>(`/api/simulations/${simulationId}/advisor/council-turn`, {
     method: "POST",
@@ -771,6 +764,7 @@ export function generateCouncilTurn(
       avoid_speaker: avoidSpeaker,
       provisional_turns: provisionalTurns,
       provisional_board_notes: boardNotes,
+      commit,
     }),
     signal,
   }).then((response) => {

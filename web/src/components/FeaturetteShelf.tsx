@@ -9,7 +9,10 @@ interface FeaturetteShelfProps {
   requestedFeaturetteId?: string | null;
   onRequestedFeaturetteClear?: () => void;
   onClose?: () => void;
+  onCinemaStateChange?: (active: boolean) => void;
 }
+
+const FEATURETTE_AUDIO_PLAYBACK_RATE = 1.09;
 
 function beatDurationMs(line: string) {
   const wordCount = line.trim().split(/\s+/).filter(Boolean).length;
@@ -73,6 +76,7 @@ export function FeaturetteShelf({
   requestedFeaturetteId,
   onRequestedFeaturetteClear,
   onClose,
+  onCinemaStateChange,
 }: FeaturetteShelfProps) {
   const [activeFeaturetteId, setActiveFeaturetteId] = useState<string | null>(() => requestedFeaturetteId ?? null);
   const [activeBeatIndex, setActiveBeatIndex] = useState(0);
@@ -87,10 +91,6 @@ export function FeaturetteShelf({
     () => featurettes.filter((featurette) => featurette.status === "ready").length,
     [featurettes],
   );
-  const featuretteSignature = useMemo(
-    () => featurettes.map((featurette) => `${featurette.id}:${featurette.status}:${featurette.narrative_beats.length}`).join("|"),
-    [featurettes],
-  );
   const renderPending = stage.featurettes_status !== "ready" && stage.featurettes_status !== "error";
   const lastHandledRequestRef = useRef<string | null>(null);
 
@@ -102,6 +102,7 @@ export function FeaturetteShelf({
     const audio = document.createElement("audio");
     audio.autoplay = true;
     audio.setAttribute("playsinline", "true");
+    audio.playbackRate = FEATURETTE_AUDIO_PLAYBACK_RATE;
     audio.style.display = "none";
     document.body.appendChild(audio);
     audioRef.current = audio;
@@ -135,15 +136,15 @@ export function FeaturetteShelf({
     if (requestedFeaturetteId === undefined) {
       return;
     }
-    const requestKey = `${stage.index}:${requestedFeaturetteId ?? "shelf"}:${featuretteSignature}`;
-    if (lastHandledRequestRef.current === requestKey) {
-      return;
-    }
-    lastHandledRequestRef.current = requestKey;
     const requested =
       requestedFeaturetteId
         ? featurettes.find((featurette) => featurette.id === requestedFeaturetteId) ?? null
         : null;
+    const requestKey = `${stage.index}:${requestedFeaturetteId ?? "shelf"}:${requested && isPlayable(requested) ? "ready" : "pending"}`;
+    if (lastHandledRequestRef.current === requestKey) {
+      return;
+    }
+    lastHandledRequestRef.current = requestKey;
     stopPlayback();
     setPlaybackError(null);
     if (requested && isPlayable(requested)) {
@@ -152,7 +153,7 @@ export function FeaturetteShelf({
     }
     setActiveFeaturetteId(requestedFeaturetteId);
     setActiveBeatIndex(0);
-  }, [featuretteSignature, featurettes, requestedFeaturetteId, stage.index]);
+  }, [featurettes, requestedFeaturetteId, stage.index]);
 
   useEffect(() => {
     if (activeFeaturetteId && featurettes.some((featurette) => featurette.id === activeFeaturetteId)) {
@@ -188,6 +189,16 @@ export function FeaturetteShelf({
   const activeImageUrl = toAbsoluteAssetUrl(activeBeat?.image_url);
   const showHero = variant !== "overlay";
 
+  useEffect(() => {
+    if (variant !== "overlay") {
+      return;
+    }
+    onCinemaStateChange?.(Boolean(visibleFeaturette));
+    return () => {
+      onCinemaStateChange?.(false);
+    };
+  }, [onCinemaStateChange, variant, visibleFeaturette]);
+
   function closeActiveFeaturette() {
     stopPlayback();
     setActiveFeaturetteId(null);
@@ -220,6 +231,7 @@ export function FeaturetteShelf({
         const audioUrl = toAbsoluteAssetUrl(beat.audio_url);
         if (audioUrl) {
           audio.src = audioUrl;
+          audio.playbackRate = FEATURETTE_AUDIO_PLAYBACK_RATE;
           const started = await settleAudioStart(audio.play(), 1100);
           await waitForFeaturetteAudio(audio, beatDurationMs(beat.line) + (started ? 3200 : 0));
         } else {

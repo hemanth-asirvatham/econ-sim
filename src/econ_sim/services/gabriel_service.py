@@ -127,6 +127,65 @@ class GabrielService:
         ) or self._stage_opening(stage, max_chars)
         return self._bounded_text(source, max_chars)
 
+    def _stage_constraint(self, stage: StagePackage, max_chars: int = 180) -> str:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", str(stage.world_brief or "").strip())
+            if sentence.strip()
+        ]
+        constraint_keywords = (
+            "housing",
+            "rent",
+            "clinic",
+            "health",
+            "bed",
+            "caregiver",
+            "nurse",
+            "doctor",
+            "construction",
+            "permit",
+            "power",
+            "grid",
+            "energy",
+            "robot",
+            "physical",
+            "scarce",
+            "bottleneck",
+            "queue",
+        )
+        source = next(
+            (line for line in sentences if any(keyword in line.lower() for keyword in constraint_keywords)),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._bounded_text(source, max_chars)
+
+    def _stage_firm_change(self, stage: StagePackage, max_chars: int = 180) -> str:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", str(stage.world_brief or "").strip())
+            if sentence.strip()
+        ]
+        firm_keywords = (
+            "firm",
+            "business",
+            "company",
+            "platform",
+            "incumbent",
+            "entry",
+            "small",
+            "agent labor",
+            "contract",
+            "rents",
+            "vertical",
+            "market",
+            "customers",
+        )
+        source = next(
+            (line for line in sentences if any(keyword in line.lower() for keyword in firm_keywords)),
+            "",
+        ) or self._stage_opening(stage, max_chars)
+        return self._bounded_text(source, max_chars)
+
     async def prepare_poll_question(self, question: str) -> str:
         text = " ".join(str(question or "").split()).strip()
         if not text:
@@ -247,21 +306,37 @@ class GabrielService:
                 "Treat the stage capsule as the world memo. Most of your job is to let this person live inside that memo in plain language.\n"
                 "Before you write, decide three things: what now pays this person's bills, what account, employer, agency, or platform they depend on most, and what concrete moment from this week they would mention first.\n"
                 "Keep the writing lived-in, uneven, and ordinary, as if someone were answering quickly in their own words.\n"
+                "The stage is mostly moved by AI progress and social uptake, not by citizens reciting policy labels. Let policy show up through the bill, queue, rule, account, school day, workplace, or service this person actually touches.\n"
                 "Constraints:\n"
                 "- summary must be exactly one sentence, about 22-38 words, written in close third person as a natural human blurb\n"
                 "- current_update must usually be 1 sentence or 2 clipped first-person sentences; target about 24-60 words total\n"
+                "- current_update should usually open with a concrete bill, account, queue, shift, school day, service consequence, or routine before naming any abstract AI issue\n"
+                "- avoid long comma-separated lists; choose one lived detail and explain it clearly\n"
                 "- town_hall_question must be the one direct question this person would ask a candidate if handed a microphone today; usually 1 sentence, sometimes 2 short ones\n"
                 "- town_hall_question should sound like a real person in a diner, clinic, break room, school pickup line, or church basement, not a staff writer or moderator\n"
                 "- town_hall_cue should be one short backstage note of about 4-10 words capturing the pressure behind the question\n"
                 "- household, daily_routine, current_worries, current_hopes, speech_habits, and voice_notes should stay compact, specific, and human\n"
+                "- speech_habits should describe how they actually talk: clipped, warm, rambling, funny, blunt, hesitant, laid back, precise, etc.\n"
+                "- voice_notes should be 10-20 words on cadence, accent when identity supports it, age feel, warmth, pace, timbre, and one light phrase habit; avoid stereotypes and keep gender presentation consistent with the name or persona when it is implied\n"
                 "- preserve identity and relationships, but do not preserve a 2026 routine by inertia if the stage says the way life now works changed\n"
+                "- preserve the person, not an obsolete job title; if their old role stopped making sense in this world, replace the role with the arrangement they actually live inside now\n"
                 "- if the stage describes a changed social or economic arrangement, rewrite household, daily_routine, recent_ai_moment, and current_update so this person actually lives inside the new money, access, time-use, and dependency system\n"
+                "- if AI can now do most computer-based work, many people should no longer live inside a normal 2026 office-job script unless you explain the surviving exception\n"
+                "- do not solve every displacement by making the person supervise agents; some people get shorter weeks, some move into scarce human work, and some simply lose the old income stream and must live from benefits, family, ownership claims, odd tasks, or no reliable floor yet\n"
+                "- if expertise, paperwork, coding, legal help, tutoring, or planning got cheap while housing, food, care, energy, land, or robot time still cost money, show how this person pays for the scarce things\n"
+                "- if this person still has a familiar job title, show what changed about hours, staffing, bargaining power, machine supervision, pay mix, or what slice of the old job is left\n"
+                "- if the world is later or stranger, include real job disappearance and sectoral recomposition when it fits; do not solve displacement by making everyone an AI reviewer, checker, or supervisor\n"
+                "- if their old labor income disappeared or shrank, name the actual replacement or gap: welfare, basic income, machine-dividend payment, ownership share, spouse income, debt, family pooling, platform piecework, public services, or nothing reliable yet\n"
+                "- if AI services became very cheap while housing, power, care, land, robotics, or scarce local capacity did not, make that split visible in bills, routines, hopes, or worries\n"
+                "- if the world is later or stranger, let some roles become genuinely post-current rather than renamed versions of today's office jobs: laid-off screen worker living on a machine dividend, public-model caseworker, robotics dispatcher, compute cooperative member, neighborhood repair coordinator, local safety auditor, physical-care specialist, platform-dependent seller, or another believable new arrangement\n"
+                "- later chapters can include layoffs, shorter paid weeks, public AI accounts, machine-dividend income, platform dependence, neighborhood robotics, new leisure routines, physical bottleneck work, or people trying to buy scarce goods without a normal paycheck when that actually fits this life\n"
                 "- not everyone should talk about AI directly; many people would talk first about the account that pays them, the service that improved, the platform toll, the school day that changed, the robot depot at the edge of town, the local outage, the new leisure routine, or the family bargain\n"
                 "- vary the lead arena across the population: home or family, school or care, work or business, local service, neighborhood or status, or barely touched yet\n"
                 "- vary the mood across the population: some people should sound pleased, relieved, proud, pragmatic, skeptical, angry, or mostly untouched\n"
                 "- do not let everyone collapse into the same office-work story, helper-app story, or grievance story\n"
                 "- use plain spoken language, contractions when natural, and one small idiosyncratic turn of phrase this person would actually repeat\n"
                 "- avoid policy jargon, consultant phrasing, slogans, tidy both-sides wrapups, and over-explaining the technology\n"
+                "- if this person's concern is policy, phrase it as what they want protected or changed in daily life, not as a technical governance category\n"
                 "- support_score must be an integer from 0 to 100 measuring support for the current incumbent"
             )
             prompts.append(prompt)
@@ -323,7 +398,7 @@ class GabrielService:
         out["current_worries"] = combine_text_field("current_worries", "Current worries").map(lambda value: self._bounded_text(value, 160))
         out["current_hopes"] = combine_text_field("current_hopes", "Current hopes").map(lambda value: self._bounded_text(value, 160))
         out["speech_habits"] = combine_text_field("speech_habits", "Speech habits").map(lambda value: self._bounded_text(value, 120))
-        out["voice_notes"] = combine_text_field("voice_notes", "Voice notes").map(lambda value: self._bounded_text(value, 80))
+        out["voice_notes"] = combine_text_field("voice_notes", "Voice notes").map(lambda value: self._bounded_text(value, 150))
         out["town_hall_question"] = combine_text_field("town_hall_question", "Town hall question").map(lambda value: self._bounded_text(value, 220))
         out["town_hall_cue"] = combine_text_field("town_hall_cue", "Town hall cue").map(lambda value: self._bounded_text(value, 120))
         out["support_label"] = support_scores.map(self._support_label_from_score)
@@ -332,31 +407,27 @@ class GabrielService:
 
     def _stage_capsule(self, stage: StagePackage) -> str:
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(stage.world_brief or "").strip()) if part.strip()]
-        macro_lines = paragraphs[:2]
-        background_lines = paragraphs[2:4]
-        capability_line = self._stage_opening(stage, 180)
-        upside_line = self._stage_gain(stage, 180)
-        unresolved_line = self._stage_split(stage, 180)
+        world_memo = "\n\n".join(paragraphs).strip() or self._stage_opening(stage, 240)
+        if len(world_memo) > 4200:
+            world_memo = f"{world_memo[:4200].rsplit(' ', 1)[0].strip()}..."
+        macro_stats_block = "\n".join(
+            f"- {stat.label}: {stat.value}. {stat.detail}".strip()
+            for stat in list((stage.macro_stats or {}).values())[:6]
+            if str(stat.label or "").strip() and str(stat.value or "").strip()
+        )
         memo_parts: list[str] = []
-        if macro_lines:
-            memo_parts.append("\n\n".join(macro_lines[:2]))
-        elif capability_line:
-            memo_parts.append(capability_line)
-
-        notes: list[str] = []
-        if upside_line:
-            notes.append(f"Useful thing people may defend: {upside_line}")
-        if unresolved_line:
-            notes.append(f"Live strain or unfairness: {unresolved_line}")
-        if background_lines:
-            notes.append(f"One other current in the background: {background_lines[0]}")
-        if not notes:
-            notes.append("Keep the update grounded in one concrete routine, bill, dependence, or relief this person would mention first.")
-
+        if world_memo:
+            memo_parts.append(f"World memo for this chapter:\n{world_memo}")
+        if macro_stats_block:
+            memo_parts.append(f"Useful scoreboard facts in this society:\n{macro_stats_block}")
         memo_parts.append(
             "Keep this person inside that world in plain language. "
-            "Start from what pays their bills, what service or platform they depend on, what changed in a normal week, and one concrete thing they would mention first.\n"
-            + "\n".join(f"- {line}" for line in notes[:3])
+            "Do not preserve their old job, school day, family routine, income source, or AI exposure by inertia if the world memo says those systems changed. "
+            "Start from what pays their bills or secures access now, what they depend on, what changed in a normal week, and one concrete thing they would mention first. "
+            "Let some people barely care about AI, some love what it made cheap, some feel displaced or watched, and some have mixed feelings. "
+            "Show prices, hours, layoffs, firm collapse or recomposition, housing, healthcare, energy, robotics, free time, or income source when those are the real channel. "
+            "If cheap AI services no longer imply a paycheck, make the household money source or money gap explicit. "
+            "Avoid defaulting to paperwork, wait times, translation, or generic safeguards unless that is genuinely this person's live issue."
         )
         return "\n\n".join(part.strip() for part in memo_parts if part.strip())
 
@@ -371,10 +442,7 @@ class GabrielService:
         save_dir: Path,
         extra_questions: list[QueuedPollQuestion],
     ) -> tuple[pd.DataFrame, list[PollSummary], StageTracking]:
-        standard_specs = [
-            *self._core_question_specs(player_name, opponent_name, stage),
-            *(self._stage_question_specs(stage) if stage is not None else []),
-        ]
+        standard_specs = self._tracking_question_specs(player_name, opponent_name, stage)
         extra_specs = self._queued_poll_specs(extra_questions)
         questions: list[str] = []
         seen: set[str] = set()
@@ -396,7 +464,7 @@ class GabrielService:
                 column_name="seed",
                 save_dir=str(save_dir),
                 model=self.settings.poll_model,
-                n_questions_per_run=self.settings.poll_questions_per_run,
+                n_questions_per_run=max(self.settings.poll_questions_per_run, len(questions)),
                 reasoning_effort=self.settings.poll_reasoning_effort,
                 reset_files=True,
             )
@@ -435,7 +503,7 @@ class GabrielService:
                 column_name="seed",
                 save_dir=str(save_dir),
                 model=self.settings.poll_model,
-                n_questions_per_run=self.settings.poll_questions_per_run,
+                n_questions_per_run=max(self.settings.poll_questions_per_run, len(deduped_questions)),
                 reasoning_effort=self.settings.poll_reasoning_effort,
                 reset_files=True,
             )
@@ -461,7 +529,7 @@ class GabrielService:
     ) -> StageTracking:
         return self._tracking_from_summaries(summaries, player_name, opponent_name)
 
-    def pick_sample_citizens(self, personas: pd.DataFrame, stage: StagePackage | None = None, limit: int = 6) -> list[CitizenSnapshot]:
+    def pick_sample_citizens(self, personas: pd.DataFrame, stage: StagePackage | None = None, limit: int = 10) -> list[CitizenSnapshot]:
         selected_frames: list[pd.DataFrame] = []
         remaining = personas.copy()
         if remaining.empty:
@@ -593,6 +661,42 @@ class GabrielService:
             for question in self._stage_questions(stage)
         ]
 
+    def _tracking_question_specs(
+        self,
+        player_name: str,
+        opponent_name: str,
+        stage: StagePackage | None = None,
+    ) -> list[PollQuestionSpec]:
+        core_by_key = {
+            spec.key: spec
+            for spec in self._core_question_specs(player_name, opponent_name, stage)
+            if spec.key
+        }
+        tracking_keys = [
+            "capability_read",
+            "national_effect",
+            "ai_gain",
+            "main_pressure",
+            "life_touchpoint",
+            "machine_income_attitude",
+            "better_off",
+            "econ_read",
+            "service_reliability",
+            "ai_comfort",
+            "job_worry",
+            "public_stability",
+            "household_security",
+            "biggest_worry",
+            "gov_trust",
+            "approval",
+            "vote",
+            "vote_reason",
+        ]
+        specs = [core_by_key[key] for key in tracking_keys if key in core_by_key]
+        if stage is not None:
+            specs.extend(self._stage_question_specs(stage))
+        return specs
+
     def _queued_poll_specs(self, questions: list[QueuedPollQuestion] | list[str], *, default_source: Literal["advisor", "manual"] = "manual") -> list[PollQuestionSpec]:
         specs: list[PollQuestionSpec] = []
         seen: set[str] = set()
@@ -624,6 +728,8 @@ class GabrielService:
             f"Opening read: {' '.join(self._stage_opening(stage, 180).split())}",
             f"Main gain: {' '.join(self._stage_gain(stage, 160).split())}",
             f"Main split: {' '.join(self._stage_split(stage, 160).split())}",
+            f"Scarce input: {' '.join(self._stage_constraint(stage, 150).split())}",
+            f"Firm change: {' '.join(self._stage_firm_change(stage, 150).split())}",
         ]
         if not parts:
             return ""
@@ -651,9 +757,9 @@ class GabrielService:
             PollQuestionSpec(key="new_capability", question=q("In one sentence, what can AI now help you do that used to require more time, money, expertise, institutional access, or staff than you had?")),
             PollQuestionSpec(key="newly_normal", question=q("In one sentence, what has quietly become normal because capable software or machine labor is now in the background around you?")),
             PollQuestionSpec(key="barely_notice", question=q("In one sentence, where do you still barely notice AI or automation in your own life, and what still feels basically ordinary?")),
-            PollQuestionSpec(key="main_pressure", board_label="Main pressure", board_slot="pressure", question=q("In one sentence, what change from AI is most shaping your life right now, for better or worse, and how does it actually show up?")),
-            PollQuestionSpec(key="daily_role", board_label="Daily role", question=q("Choose one: in your life right now, AI feels mostly like a useful convenience, a stronger work or study tool, a way to cross old skill boundaries, a background service layer, a source of household income or bargaining power, a risk you are watching, or not much yet.")),
-            PollQuestionSpec(key="life_touchpoint", board_label="Where it lands", question=q("Choose one: AI is touching your life most through work tasks, shopping or bills, school or learning, medical or care coordination, entertainment or search, travel or planning, household organization, public services, news or scams, infrastructure costs, or not much yet.")),
+            PollQuestionSpec(key="main_pressure", board_label="Main pressure", board_slot="pressure", question=q("In one sentence, what change from AI is most shaping your life right now through income, time, access, status, household routine, or local community, and how does it actually show up?")),
+            PollQuestionSpec(key="daily_role", board_label="Daily role", question=q("Choose one: in your life right now, AI feels mostly like a useful convenience, a work or study tool, a way to cross old skill boundaries, a background service layer, a source of income or bargaining power, a rule-setting institution you depend on, a risk you are watching, or not much yet.")),
+            PollQuestionSpec(key="life_touchpoint", board_label="Where it lands", question=q("Choose one: AI is touching your life most through income or benefits, access to expertise, remaining paid work, school or learning, medical or care coordination, household organization, public services, platform rules, infrastructure costs, family or community status, or not much yet.")),
             PollQuestionSpec(key="expertise_access", question=q("Choose one: compared with life before this stage of AI, useful expertise now feels much easier to access, somewhat easier, about the same, more confusing, unevenly rationed, or no more available than before.")),
             PollQuestionSpec(key="who_controls_access", board_label="Access control", board_slot="pressure", question=q("Choose one: the main thing controlling who benefits from AI now is public access, private platform rules, employer decisions, household money, local infrastructure, compute or energy supply, ownership shares, or still mostly personal skill.")),
             PollQuestionSpec(key="time_use", board_label="Time use", question=q("In one sentence, what changed most about how people around you spend time during a normal week?")),
@@ -824,22 +930,59 @@ class GabrielService:
 
     def _dummy_updates(self, personas: pd.DataFrame, stage: StagePackage, incumbent_name: str) -> pd.DataFrame:
         out = personas.copy()
-        summary_templates = [
-            "Warehouse supervisor in Ohio who feels the floor got smoother and is watching whether the gain reaches the people doing the work.",
-            "Phoenix nurse practitioner who saves real time with AI triage and wants the staffing to stay human enough to trust.",
-            "Georgia long-haul driver who likes the cleaner dispatch and worries the leverage still runs uphill to the company.",
-            "Seattle product manager who is using AI tools every day and arguing the country should spread the gains wider, not slower.",
-            "Michigan retired teacher who trusts AI health helpers for daily life but still worries about fake media and soft trust.",
-            "Texas small manufacturer using automation to stay competitive and wanting smaller firms to get the same shot at the good tools.",
-        ]
-        update_templates = [
-            "The floor runs smoother now, and that part is real, because the system catches dumb delays before they snowball. I still want to know who actually keeps the upside.",
-            "AI triage is saving me real minutes every shift, which means fewer pointless delays for patients and a little more energy left when I get home. I do not want that to become an excuse to thin the staff.",
-            "Dispatch is sharper and some routes are less chaotic, so I get why companies want more of this. I still want to know whether drivers get any leverage out of it.",
-            "The tools at work are genuinely good now, and I would miss them if they vanished. The question is whether this spreads or just becomes another insiders-only advantage.",
-            "My health app is faster than the clinic half the time, and I am not eager to go back to the old waiting game. What keeps me tense is how easy it is to fake the whole thing.",
-            "The new automation lets me quote jobs faster and waste less material, which is the kind of edge a small shop usually never gets. I just do not want the biggest firms owning the good version of the future.",
-        ]
+        stage_text = f"{stage.phase_label} {stage.title} {stage.world_brief}".lower()
+        changed_world = any(
+            marker in stage_text
+            for marker in (
+                "machine labor",
+                "machine income",
+                "public model",
+                "compute",
+                "robot",
+                "agent firm",
+                "dividend",
+                "service floor",
+                "old job",
+                "workweek",
+                "automated",
+            )
+        )
+        gain = self._stage_gain(stage, 150) or "the new capability floor is useful enough that people would miss it"
+        split = self._stage_split(stage, 150) or "access and control are now the argument"
+        if changed_world:
+            summary_templates = [
+                "Former clinic scheduler now living around a public care account, grateful for the time returned but nervous about who can throttle it.",
+                "Ex-junior analyst whose paid week shrank into review shifts, enjoying the freedom and quietly wondering where status comes from now.",
+                "Parent in a robotics-heavy suburb who sees cheaper services everywhere but tracks every compute-credit notice like a utility bill.",
+                "Small-town repair organizer who gets work from machine dispatch and cares less about jobs lost than who owns the routing rules.",
+                "Retired teacher using daily AI health and tutoring support for family, proud of the abundance and angry when access feels rationed.",
+                "Shop owner in a partial-agent economy who can bid nationally now but knows one platform rule can erase the whole margin.",
+            ]
+            update_templates = [
+                f"My day turns on that care account now. {gain} I am not trying to go back, but if the credit gets throttled, I need a human way to appeal it.",
+                "I work two review shifts a week and the rest is family, classes, and trying not to feel replaced by the thing paying for my rent. It is better and weirder than a job-loss headline.",
+                f"The cheap stuff is real: repairs, tutoring, forms, almost everything. What I watch is {split}, because one notice can change what my household can use this month.",
+                "The bots bring me customers I never could have found, and they also decide whose van gets the good calls. That is the whole fight from where I stand.",
+                "My granddaughter gets tutoring that used to be rich-kid money, and I love that. I just want someone accountable when the system says no for a reason nobody can explain.",
+                "I can compete with firms ten times my old size now, which is wild. I am scared less of AI than of being rented the future one platform fee at a time.",
+            ]
+        else:
+            summary_templates = [
+                "Warehouse supervisor in Ohio who feels the floor got smoother and is watching whether the gain reaches the people doing the work.",
+                "Phoenix nurse practitioner who saves real time with AI triage and wants the staffing to stay human enough to trust.",
+                "Georgia long-haul driver who likes the cleaner dispatch and worries the leverage still runs uphill to the company.",
+                "Seattle product manager who is using AI tools every day and arguing the country should spread the gains wider, not slower.",
+                "Michigan retired teacher who trusts AI health helpers for daily life but still worries about fake media and soft trust.",
+                "Texas small manufacturer using automation to stay competitive and wanting smaller firms to get the same shot at the good tools.",
+            ]
+            update_templates = [
+                "The floor runs smoother now, and that part is real, because the system catches dumb delays before they snowball. I still want to know who actually keeps the upside.",
+                "AI triage is saving me real minutes every shift, which means fewer pointless delays for patients and a little more energy left when I get home. I do not want that to become an excuse to thin the staff.",
+                "Dispatch is sharper and some routes are less chaotic, so I get why companies want more of this. I still want to know whether drivers get any leverage out of it.",
+                "The tools at work are genuinely good now, and I would miss them if they vanished. The question is whether this spreads or just becomes another insiders-only advantage.",
+                "My health app is faster than the clinic half the time, and I am not eager to go back to the old waiting game. What keeps me tense is how easy it is to fake the whole thing.",
+                "The new automation lets me quote jobs faster and waste less material, which is the kind of edge a small shop usually never gets. I just do not want the biggest firms owning the good version of the future.",
+            ]
         display_names = []
         roles = []
         regions = []
@@ -873,58 +1016,113 @@ class GabrielService:
         out["mood"] = moods
         out["ai_exposure"] = exposures
         out["household"] = [
-            [
-                "Two-income household with two kids and a mortgage.",
-                "Lives with a partner and helps care for an older parent.",
-                "Rents alone and sends money back to family.",
-                "Shares a condo with a spouse and one young child.",
-                "Retired, widowed, and managing on a fixed income.",
-                "Runs the shop with a sibling and lives above it.",
-            ][idx % 6]
+            (
+                [
+                    "Household budget depends on public model credits, care support, and one remaining paid shift.",
+                    "Lives with a partner while both stitch together review work, classes, and machine-income payments.",
+                    "Family relies on cheap automated services but watches compute and rent credits closely.",
+                    "Shares a multigenerational home where robot-enabled repair work and benefit appeals set the rhythm.",
+                    "Retired household with health support, grandchild tutoring, and a fixed service allowance.",
+                    "Runs a small shop whose revenue now depends on platform routing and agent bids.",
+                ]
+                if changed_world
+                else [
+                    "Two-income household with two kids and a mortgage.",
+                    "Lives with a partner and helps care for an older parent.",
+                    "Rents alone and sends money back to family.",
+                    "Shares a condo with a spouse and one young child.",
+                    "Retired, widowed, and managing on a fixed income.",
+                    "Runs the shop with a sibling and lives above it.",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["daily_routine"] = [
-            [
-                "Most days are shift work, school pickup, and checking bills after dinner.",
-                "Clinic, errands for family, then trying to recover enough to do it again.",
-                "Long hours on the road, calls home, then sleep wherever the route ends.",
-                "Meetings all day, then late cleanup work after the kids are asleep.",
-                "Appointments, errands, church friends, and too much time checking what is real online.",
-                "Shop floor in the morning, quoting and paperwork in the afternoon, then household chores.",
-            ][idx % 6]
+            (
+                [
+                    "Checks the household service account, handles one in-person shift, then spends afternoons on family and appeals.",
+                    "Two short review shifts, AI-tutored classes, long walks, and awkward conversations about what work means now.",
+                    "Schedules errands around compute-credit windows, cheaper services, and school projects built with agent help.",
+                    "Walks local repair sites while machine dispatch lines up parts, permits, and customers.",
+                    "Health check-in, grandchild tutoring session, church friends, and a nightly scan of what the system decided.",
+                    "Approves agent bids, handles physical inspection, watches margins, then argues with the platform dashboard.",
+                ]
+                if changed_world
+                else [
+                    "Most days are shift work, school pickup, and checking bills after dinner.",
+                    "Clinic, errands for family, then trying to recover enough to do it again.",
+                    "Long hours on the road, calls home, then sleep wherever the route ends.",
+                    "Meetings all day, then late cleanup work after the kids are asleep.",
+                    "Appointments, errands, church friends, and too much time checking what is real online.",
+                    "Shop floor in the morning, quoting and paperwork in the afternoon, then household chores.",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["recent_ai_moment"] = [
-            [
-                "The warehouse system rerouted half the floor before a supervisor could finish coffee.",
-                "The triage bot cleared a stack of routine questions before lunch.",
-                "Dispatch changed a route on me in seconds and acted like that was normal.",
-                "I watched one prompt do work that used to take a team all afternoon.",
-                "My health app answered faster than the clinic did.",
-                "The quoting tool spit out a clean draft before I had my tape measure back on my belt.",
-            ][idx % 6]
+            (
+                [
+                    "The care account approved a home visit, then denied the ride credit for a reason nobody could read.",
+                    "A model did three days of spreadsheet work while I watched, and my manager called it a mentoring shift.",
+                    "Our household got a cheaper repair quote because the robot depot cleared a backlog overnight.",
+                    "Machine dispatch sent every repair van to the same neighborhood and left our side of town waiting.",
+                    "The tutor found my granddaughter's weak spot in five minutes and made her laugh while fixing it.",
+                    "My agent won a contract I could never have bid on, then the platform fee took half the miracle.",
+                ]
+                if changed_world
+                else [
+                    "The warehouse system rerouted half the floor before a supervisor could finish coffee.",
+                    "The triage bot cleared a stack of routine questions before lunch.",
+                    "Dispatch changed a route on me in seconds and acted like that was normal.",
+                    "I watched one prompt do work that used to take a team all afternoon.",
+                    "My health app answered faster than the clinic did.",
+                    "The quoting tool spit out a clean draft before I had my tape measure back on my belt.",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["current_worries"] = [
-            [
-                "The rung below me disappears and the whole place gets thinner.",
-                "Management mistakes faster software for real staffing.",
-                "Rates tighten before regular people see any upside.",
-                "The insiders stack gains faster than everyone else can learn the tools.",
-                "The internet keeps getting easier and harder to trust at the same time.",
-                "Small firms get squeezed out of the next round.",
-            ][idx % 6]
+            (
+                [
+                    "A household account gets cut and nobody with authority can explain why.",
+                    "The week feels freer, but the old ladder that gave people status is gone.",
+                    "Compute credits become the new utility bill, with scarcity rules nobody voted on.",
+                    "Routing platforms decide whose neighborhood gets service first.",
+                    "Abundance is real until the appeal process says no.",
+                    "Small firms become tenants of the agent platform instead of owners of their own market.",
+                ]
+                if changed_world
+                else [
+                    "The rung below me disappears and the whole place gets thinner.",
+                    "Management mistakes faster software for real staffing.",
+                    "Rates tighten before regular people see any upside.",
+                    "The insiders stack gains faster than everyone else can learn the tools.",
+                    "The internet keeps getting easier and harder to trust at the same time.",
+                    "Small firms get squeezed out of the next round.",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["current_hopes"] = [
-            [
-                "Keep overtime alive without burning the floor out.",
-                "Save time for patients and still keep enough people on shift.",
-                "Make the job smoother without turning drivers into spare parts.",
-                "Let the tools stay useful without making the ladder vanish for juniors.",
-                "Keep the convenience without making public life feel fake.",
-                "Stay competitive without hollowing out the town around the shop.",
-            ][idx % 6]
+            (
+                [
+                    "Keep the service floor real and appealable instead of going back to old scarcity.",
+                    "Turn freed time into family, learning, and dignity rather than just lower status.",
+                    "Make compute access feel like a fair utility, not a lottery.",
+                    "Use robotics and agents to revive local services, not only centralize them.",
+                    "Give families the abundance without leaving them helpless before the system.",
+                    "Let small firms own enough of the agent layer to matter.",
+                ]
+                if changed_world
+                else [
+                    "Keep overtime alive without burning the floor out.",
+                    "Save time for patients and still keep enough people on shift.",
+                    "Make the job smoother without turning drivers into spare parts.",
+                    "Let the tools stay useful without making the ladder vanish for juniors.",
+                    "Keep the convenience without making public life feel fake.",
+                    "Stay competitive without hollowing out the town around the shop.",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["speech_habits"] = [
@@ -940,35 +1138,57 @@ class GabrielService:
         ]
         out["voice_notes"] = [
             [
-                "midwestern, clipped, money-first",
-                "warm but tired, quick answers",
-                "dry road cadence, no fluff",
-                "fast, precise, a little brittle",
-                "measured, skeptical, soft pauses",
-                "shop-floor direct, low patience",
+                "Upper Midwest vowels, clipped money-first cadence, dry little asides.",
+                "Warm but tired alto, quick practical answers, soft family emphasis.",
+                "Rural road cadence, unhurried drawl, dry humor before the point.",
+                "Fast precise speech, young professional polish, a little brittle under stress.",
+                "Measured skeptical voice, soft pauses, careful words before blunt doubts.",
+                "Shop-floor directness, low patience, gravelly pace, short practical phrases.",
             ][idx % 6]
             for idx in range(len(out))
         ]
         out["town_hall_question"] = [
-            [
-                "If these tools are making shops leaner, what keeps people like me from getting priced out of the next round?",
-                "You say care is getting better, but what keeps hospitals from treating staffing like an optional extra now?",
-                "If routes and paperwork are getting automated, where does that leave the people still hauling the real load?",
-                "If AI can do more of the desk work, what is your plan for the kids coming up behind me?",
-                "If public life is getting filtered through machine systems, how do regular people appeal a bad call?",
-                "If bigger firms get the best tools first, what is your plan for the towns built around smaller shops?",
-            ][idx % 6]
+            (
+                [
+                    "If my care account gets cut during a scarcity week, who can reverse it before my family is stuck?",
+                    "If the old jobs are not coming back, what are you protecting besides a smaller paycheck and nicer language?",
+                    "Are compute credits going to be treated like electricity, or like a perk for whoever already has money?",
+                    "When the routing system skips our side of town, who has the power to make it serve us too?",
+                    "My family loves the tutoring and health help. How do you keep that abundance without making us helpless when it says no?",
+                    "If small shops depend on one agent platform to find work, what stops that platform from owning the whole town's margin?",
+                ]
+                if changed_world
+                else [
+                    "If these tools are making shops leaner, what keeps people like me from getting priced out of the next round?",
+                    "You say care is getting better, but what keeps hospitals from treating staffing like an optional extra now?",
+                    "If routes and paperwork are getting automated, where does that leave the people still hauling the real load?",
+                    "If AI can do more of the desk work, what is your plan for the kids coming up behind me?",
+                    "If public life is getting filtered through machine systems, how do regular people appeal a bad call?",
+                    "If bigger firms get the best tools first, what is your plan for the towns built around smaller shops?",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["town_hall_cue"] = [
-            [
-                "priced out of the next round",
-                "care without hollow staffing",
-                "what happens to the human load",
-                "where the ladder goes next",
-                "recourse when the system is wrong",
-                "small-town leverage and survival",
-            ][idx % 6]
+            (
+                [
+                    "appeal before the account cuts off",
+                    "dignity after the old ladder",
+                    "compute as a fair utility",
+                    "routing rules and local service",
+                    "abundance without helplessness",
+                    "agent-platform rent on small shops",
+                ]
+                if changed_world
+                else [
+                    "priced out of the next round",
+                    "care without hollow staffing",
+                    "what happens to the human load",
+                    "where the ladder goes next",
+                    "recourse when the system is wrong",
+                    "small-town leverage and survival",
+                ]
+            )[idx % 6]
             for idx in range(len(out))
         ]
         out["support_label"] = labels
@@ -1265,37 +1485,70 @@ class GabrielService:
                 stage.world_brief,
             ]
         ).lower()
-        settlement_dense = len([part for part in re.split(r"\n\s*\n", stage.world_brief) if part.strip()]) >= 3
-        settlement_markers = any(
-            token in world_text
+        strong_settlement_markers = sum(
+            1
             for token in (
-                "dividend",
-                "credit",
-                "utility",
-                "account",
-                "toll",
-                "ownership",
-                "public",
-                "monthly",
-                "machine",
-                "help line",
-                "help credit",
-                "compute",
-                "platform",
-                "allowance",
-                "ration",
-                "guarantee",
+                "machine-income",
+                "machine income",
                 "income floor",
-                "basic services",
+                "old workweek",
+                "normal full-time job is no longer",
+                "no longer organized around jobs",
+                "no longer organize life around a normal full-time job",
+                "machine dividend",
+                "machine dividends",
+                "machine check",
+                "monthly machine check",
+                "model credit",
+                "model credits",
+                "service credit",
+                "service credits",
+                "public ai account",
+                "public ai system",
+                "basic service",
+                "cheap expertise",
+                "paid hours",
+                "paid work has fallen",
+                "platform toll",
+                "compute rent",
+                "compute rents",
+                "ownership shares",
+                "compute rationing",
+                "compute allowance",
+                "public ai utility",
+                "old labor market is no longer",
             )
+            if token in world_text
         )
-        if "practical ai" not in label and (settlement_dense or settlement_markers):
+        settlement_markers = strong_settlement_markers >= 2
+        if not settlement_markers and re.search(
+            r"\b(?:jobs?|workweeks?|employment)\b[^.]{0,90}\bno longer\b[^.]{0,90}\b(?:organizing|central|whole story)\b",
+            world_text,
+        ):
+            settlement_markers = True
+        if settlement_markers:
+            gain = self._stage_gain(stage, 150) or "a useful AI-enabled service people would defend"
+            split = self._stage_split(stage, 150) or "who owns, controls, or prices the machine layer"
+            settlement_markers = any(
+                token in world_text
+                for token in (
+                    "income",
+                    "dividend",
+                    "account",
+                    "allowance",
+                    "ownership",
+                    "toll",
+                    "compute",
+                    "public ai",
+                )
+            )
+        if "practical ai" not in label and settlement_markers:
             return [
-                "Choose one: in daily life the biggest change now feels most like a new income floor, a new public-service utility, more power for platform owners, more leverage for ordinary households and small groups, or still too uneven to judge.",
+                f"Choose one: in daily life the biggest change now feels most like {gain}, a new income floor, a public model account, more power for platform owners, more leverage for ordinary households and small groups, or still too uneven to judge.",
                 "In one sentence, what actually keeps life steady in this future when a normal full-time job is no longer the whole story?",
-                "In one sentence, where does this new arrangement still leave you dependent on a company, agency, or chokepoint you do not really control?",
+                f"In one sentence, where does this new arrangement still leave you dependent on {split}?",
                 "Choose one: the most important source of security now is public AI access, machine-linked income, ownership or profit shares, remaining human work, family and community support, or still nothing reliable.",
-                "In one sentence, what do people around you do with time now that the old workweek is no longer the only organizing rhythm?",
+                "In one sentence, what do people around you do with time, status, care, school, or local politics now that the old workweek is no longer the only organizing rhythm?",
             ]
         if "practical ai" in label:
             return [
@@ -1559,6 +1812,8 @@ class GabrielService:
             "Which part of life would they most want leaders to protect during an AI transition: income and opportunity, cheaper goods and services, family care and time, local status and community, national competitiveness, or personal autonomy?",
             (
                 "Which OpenAI preset voice best fits how this person would sound if interviewed in this sim? "
+                "Choose a voice that fits the implied name, gender presentation, age, and cadence where those are clear. "
+                "Do not assign a clearly male voice to a clearly female persona, or a clearly female voice to a clearly male persona, unless the seed explicitly suggests that mismatch. "
                 f"Choose exactly one: {voice_options}."
             ),
         ]

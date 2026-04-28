@@ -1,7 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { ReasoningEffort, SetupDraft, SetupSessionState } from "../types";
-
-const REASONING_OPTIONS: ReasoningEffort[] = ["none", "low", "medium", "high"];
+import type { SetupDraft, SetupSessionState } from "../types";
 
 interface BrowserSpeechRecognitionEvent {
   results: ArrayLike<ArrayLike<{ transcript: string }>>;
@@ -317,16 +315,6 @@ export function SetupChamber({
                 <label>
                   <span>Stage count</span>
                   <input type="number" min={3} max={8} value={session?.draft.stage_count ?? 5} onChange={(event) => onDraftFieldChange("stage_count", Number(event.target.value))} />
-                </label>
-                <label>
-                  <span>Reasoning</span>
-                  <select value={session?.draft.orchestrator_reasoning_effort ?? "low"} onChange={(event) => onDraftFieldChange("orchestrator_reasoning_effort", event.target.value as ReasoningEffort)}>
-                    {REASONING_OPTIONS.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
                 </label>
               </div>
             </section>

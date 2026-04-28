@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +25,14 @@ from econ_sim.models import (
     SetupSessionTurnRequest,
     SimulationStatus,
     SimulationState,
+    StageResolution,
     StagePackage,
     StageProgress,
     new_id,
 )
 
 
-def _stage_payload(stage: StagePackage, *, include_featurettes: bool) -> dict[str, Any]:
+def _stage_payload(stage: StagePackage, *, include_featurettes: bool, timings: dict[str, float] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "index": stage.index + 1,
         "phase_label": stage.phase_label,
@@ -50,6 +53,10 @@ def _stage_payload(stage: StagePackage, *, include_featurettes: bool) -> dict[st
             for beat in stage.narrative_beats
         ],
     }
+    if stage.resolution:
+        payload["resolution"] = stage.resolution.model_dump(mode="json")
+    if timings:
+        payload["timings"] = timings
     if include_featurettes:
         payload["featurettes"] = [
             {
@@ -70,10 +77,19 @@ def _stage_payload(stage: StagePackage, *, include_featurettes: bool) -> dict[st
     return payload
 
 
-def _print_stage(stage: StagePackage, *, include_featurettes: bool) -> None:
+def _print_stage(stage: StagePackage, *, include_featurettes: bool, timings: dict[str, float] | None = None) -> None:
     print(f"\n=== Stage {stage.index + 1}: {stage.title} ===")
     print(f"{stage.phase_label} | {stage.year_label}")
     print(stage.montage_logline)
+    if timings:
+        print(
+            f"[timing] compose {timings.get('compose_seconds', 0.0):.1f}s"
+            + (
+                f" | featurettes {timings.get('featurettes_seconds', 0.0):.1f}s"
+                if include_featurettes and "featurettes_seconds" in timings
+                else ""
+            )
+        )
     print("\n[world brief]")
     print(stage.world_brief)
     if stage.macro_stats:
@@ -172,9 +188,11 @@ async def _compose_stages(
     count: int,
     *,
     include_featurettes: bool,
+    resolutions: list[str],
     stream_output: bool,
-) -> list[StagePackage]:
+) -> tuple[list[StagePackage], list[dict[str, float]]]:
     stages: list[StagePackage] = []
+    stage_timings: list[dict[str, float]] = []
     for stage_index in range(count):
         if stream_output:
             print(f"\n>>> composing stage {stage_index + 1}/{count}", flush=True)
@@ -182,6 +200,7 @@ async def _compose_stages(
         previous_stage = stages[-1] if stages else None
         tracking = previous_stage.tracking if previous_stage else None
         prior_polls = previous_stage.poll_summaries if previous_stage else []
+        compose_started = time.perf_counter()
         stage = await director.orchestrator.compose_stage(
             state=state,
             previous_stage=previous_stage,
@@ -189,16 +208,69 @@ async def _compose_stages(
             poll_summaries=prior_polls,
             queued_poll_questions=[],
         )
+        timings = {
+            "compose_seconds": round(time.perf_counter() - compose_started, 2),
+        }
         if include_featurettes:
+            featurette_started = time.perf_counter()
             stage.featurettes = await director.orchestrator.compose_stage_featurettes(
                 state=state,
                 stage=stage,
             )
+            timings["featurettes_seconds"] = round(time.perf_counter() - featurette_started, 2)
+        if stage_index < len(resolutions):
+            resolution = _resolution_from_lab_text(resolutions[stage_index], state=state, stage=stage)
+            stage.resolution = resolution
+            if not stage.policy_notes and resolution.player_agenda_points:
+                stage.policy_notes = list(resolution.player_agenda_points[:5])
+            if stream_output:
+                print("\n[lab resolution injected]")
+                print(f"Winner: {resolution.winner}")
+                print(f"Enacted agenda: {resolution.enacted_agenda}")
+                if resolution.public_mandate:
+                    print(f"Mandate: {resolution.public_mandate}")
         stages.append(stage)
+        stage_timings.append(timings)
         state.stages = list(stages)
         if stream_output:
-            _print_stage(stage, include_featurettes=include_featurettes)
-    return stages
+            _print_stage(stage, include_featurettes=include_featurettes, timings=timings)
+    return stages, stage_timings
+
+
+def _resolution_from_lab_text(text: str, *, state: SimulationState, stage: StagePackage) -> StageResolution:
+    parts = [part.strip() for part in str(text or "").split("|")]
+    winner = parts[0] if parts and parts[0] else state.config.player_name
+    enacted_agenda = parts[1] if len(parts) > 1 and parts[1] else (parts[0] if parts else "")
+    mandate = (
+        parts[2]
+        if len(parts) > 2 and parts[2]
+        else "Lab-injected election result for testing whether the next stage inherits and reacts to the winning platform."
+    )
+    if winner == enacted_agenda:
+        winner = state.config.player_name
+    player_points = _agenda_points(enacted_agenda)
+    return StageResolution(
+        player_platform="; ".join(stage.policy_notes) or enacted_agenda,
+        player_agenda_points=player_points,
+        opponent_agenda_points=[],
+        winner=winner,
+        enacted_agenda=enacted_agenda,
+        public_mandate=mandate,
+        election_takeaway=mandate,
+        pre_debate_vote_share_player=0.5,
+        pre_debate_vote_share_opponent=0.5,
+        post_debate_vote_share_player=0.54 if winner == state.config.player_name else 0.46,
+        post_debate_vote_share_opponent=0.46 if winner == state.config.player_name else 0.54,
+    )
+
+
+def _agenda_points(text: str) -> list[str]:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return []
+    candidates = re.split(r"\s*(?:;|\n|\.\s+)\s*", normalized)
+    points = [candidate.strip(" -") for candidate in candidates if candidate.strip(" -")]
+    return points[:5] or [normalized[:180]]
 
 
 async def _run_council_lab(
@@ -268,11 +340,12 @@ async def _run(args: argparse.Namespace) -> int:
     director = await _build_director(args)
     config, session = await _config_from_setup(director, args)
     state = _empty_state(director, config)
-    stages = await _compose_stages(
+    stages, stage_timings = await _compose_stages(
         director,
         state,
         args.stages,
         include_featurettes=args.featurettes,
+        resolutions=args.resolution,
         stream_output=not args.json,
     )
     council_stage_index = args.council_stage - 1 if args.council_stage > 0 else len(stages) - 1
@@ -294,8 +367,8 @@ async def _run(args: argparse.Namespace) -> int:
             "config": config.model_dump(mode="json"),
         },
         "stages": [
-            _stage_payload(stage, include_featurettes=args.featurettes)
-            for stage in stages
+            _stage_payload(stage, include_featurettes=args.featurettes, timings=timings)
+            for stage, timings in zip(stages, stage_timings, strict=False)
         ],
         "council": council_transcript,
     }
@@ -356,6 +429,15 @@ def _parser() -> argparse.ArgumentParser:
         "--featurettes",
         action="store_true",
         help="Also generate the optional side reels for each composed stage.",
+    )
+    parser.add_argument(
+        "--resolution",
+        action="append",
+        default=[],
+        help=(
+            "Inject an election result after each composed stage before the next stage is written. "
+            "Format: winner|enacted agenda|public mandate. Repeat for multiple stages."
+        ),
     )
     parser.add_argument(
         "--json",

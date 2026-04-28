@@ -370,7 +370,7 @@ export function SetupRoomViewport({
       ),
     [themeMode, themeProfile],
   );
-  const headline = session?.draft.title?.trim() || "AGI Transition Command";
+  const headline = session?.draft.title?.trim() || "Orchestrator will title the run";
   const subline = session
     ? `${session.draft.country || "United States"} · ${session.draft.persona_count} citizens · ${session.draft.stage_count} stages`
     : "Booting setup chamber";

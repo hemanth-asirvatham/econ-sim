@@ -30,8 +30,16 @@ export function stageWorldOpening(stage?: Pick<StagePackage, "world_brief"> | nu
     return "";
   }
   const firstParagraph = worldBrief.split(/\n\s*\n/)[0]?.trim() || worldBrief;
-  const firstTwoSentences = firstParagraph.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").trim() || firstParagraph;
-  return clippedLine(firstTwoSentences, maxChars);
+  const sentences = firstParagraph.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+  const firstSentence = sentences[0] || firstParagraph;
+  if (firstSentence.length > maxChars) {
+    return clippedLine(firstSentence, maxChars);
+  }
+  const firstTwoSentences = sentences.slice(0, 2).join(" ").trim();
+  if (firstTwoSentences && firstTwoSentences.length <= maxChars) {
+    return firstTwoSentences;
+  }
+  return firstSentence;
 }
 
 export function stageGain(stage?: Pick<StagePackage, "world_brief"> | null, maxChars = 140) {
@@ -55,6 +63,22 @@ export function stageGain(stage?: Pick<StagePackage, "world_brief"> | null, maxC
     /new routine/,
     /part time human work/,
     /machine systems/,
+    /machine[- ]linked income/,
+    /machine[- ]income/,
+    /machine checks?/,
+    /machine surplus/,
+    /service floor/,
+    /public[- ]service utility/,
+    /public capacity/,
+    /capability account/,
+    /model credits?/,
+    /compute credits?/,
+    /shorter paid weeks?/,
+    /paid hours/,
+    /old workweek/,
+    /time dividend/,
+    /expert help/,
+    /service guarantee/,
     /cheap/,
     /cheaper/,
     /purchasing power/,
@@ -75,10 +99,17 @@ export function stageSplit(
       /toll road/,
       /platform toll/,
       /platform royalty/,
+      /machine surplus/,
+      /machine[- ]linked income/,
+      /service floor/,
+      /public[- ]service utility/,
       /who gets/,
       /who owns/,
       /who controls/,
       /who gets compute/,
+      /who pays/,
+      /who captures/,
+      /who rents/,
       /priority lane/,
       /ration/,
       /queue/,
@@ -89,6 +120,10 @@ export function stageSplit(
       /membership/,
       /protocol/,
       /public desk/,
+      /public model/,
+      /ownership share/,
+      /productive floor/,
+      /machine account/,
     ])
     || stageWorldOpening(stage, maxChars);
   return clippedLine(source, maxChars);
@@ -105,6 +140,10 @@ export function stageConstraint(
       /chips?/,
       /grid/,
       /transmission/,
+      /datacenter/,
+      /data center/,
+      /interconnect/,
+      /energy/,
       /housing/,
       /water/,
       /substation/,
@@ -113,12 +152,20 @@ export function stageConstraint(
       /warehouse/,
       /port/,
       /robot depot/,
+      /robotics depot/,
+      /model queue/,
+      /compute queue/,
+      /queue rule/,
       /bottleneck/,
       /scarcity/,
       /dependence/,
       /queue/,
       /premium/,
       /paywall/,
+      /license/,
+      /licensing/,
+      /platform toll/,
+      /ownership concentration/,
     ])
     || stageWorldOpening(stage, maxChars);
   return clippedLine(source, maxChars);
@@ -128,26 +175,7 @@ export function stagePolicyAxes(
   stage?: Pick<StagePackage, "policy_notes" | "world_brief"> | null,
   limit = 4,
 ) {
-  const worldText = (stage?.world_brief || "").toLowerCase();
-  const worldDerived = [
-    /public ai account|public model account|household|small firm|school|clinic|access/.test(worldText)
-      ? "Keep broad AI access open for households, schools, clinics, and small firms."
-      : "",
-    /platform|ownership|chokepoint|toll|rent|queue|priority/.test(worldText)
-      ? "Break chokepoints and spread ownership of the AI upside."
-      : "",
-    /machine check|dividend|productivity rebate|income|household floor|security/.test(worldText)
-      ? "Turn machine gains into a visible household floor."
-      : "",
-    /power|grid|compute|chip|transmission|substation|water|housing|logistics/.test(worldText)
-      ? "Speed grid, compute, and deployment buildout."
-      : "",
-    /fraud|scam|appeal|liability|records|benefits|infrastructure/.test(worldText)
-      ? "Require audits and appeals where AI can move money, records, benefits, or infrastructure."
-      : "",
-  ].filter(Boolean);
-  const source = stage?.policy_notes?.length ? stage.policy_notes : worldDerived;
-  return source
+  return (stage?.policy_notes ?? [])
     .map((entry) => entry.trim())
     .filter(Boolean)
     .slice(0, limit);

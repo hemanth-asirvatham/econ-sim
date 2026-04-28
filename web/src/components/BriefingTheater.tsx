@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toAbsoluteAssetUrl } from "../lib/api";
 import { stageRoomBrief, stageWorldOpening } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
-import type { StagePackage } from "../types";
+import type { NarrativeBeat, StagePackage } from "../types";
 
 interface BriefingTheaterProps {
   stage: StagePackage;
@@ -11,6 +11,8 @@ interface BriefingTheaterProps {
   themeProfile?: CountryThemeProfile;
   onEnterWarRoom?: () => void;
 }
+
+const BRIEFING_AUDIO_PLAYBACK_RATE = 1.09;
 
 export function BriefingTheater({
   stage,
@@ -29,7 +31,27 @@ export function BriefingTheater({
   const audioGuardTimerRef = useRef<number | null>(null);
   const previousImageTimerRef = useRef<number | null>(null);
   const playbackGenerationRef = useRef(0);
-  const beat = stage.narrative_beats[activeBeat] ?? stage.narrative_beats[0];
+  const activeBeatRef = useRef(0);
+  const loadedImageUrlRef = useRef<string | null>(null);
+  const beats = useMemo<NarrativeBeat[]>(() => {
+    if (stage.narrative_beats.length > 0) {
+      return stage.narrative_beats;
+    }
+    const fallbackLine =
+      stageWorldOpening(stage, 220) || stage.montage_logline || stageRoomBrief(stage) || "The room waits for the world to resolve.";
+    return [
+      {
+        id: `${stage.index}-fallback-beat`,
+        line: fallbackLine,
+        image_prompt: "",
+        image_path: null,
+        image_url: null,
+        audio_path: null,
+        audio_url: null,
+      },
+    ];
+  }, [stage]);
+  const beat = beats[activeBeat] ?? beats[0];
   const imageUrl = toAbsoluteAssetUrl(beat?.image_url);
   const audioUrl = toAbsoluteAssetUrl(beat?.audio_url);
 
@@ -62,6 +84,7 @@ export function BriefingTheater({
 
   function settleLoadedImage(nextImageUrl: string | null) {
     setLoadedImageUrl(nextImageUrl);
+    loadedImageUrlRef.current = nextImageUrl;
     if (previousImageTimerRef.current) {
       window.clearTimeout(previousImageTimerRef.current);
     }
@@ -83,7 +106,7 @@ export function BriefingTheater({
       return;
     }
     const nextIndex = index + 1;
-    if (nextIndex >= stage.narrative_beats.length) {
+    if (nextIndex >= beats.length) {
       queueEnterWarRoom();
       return;
     }
@@ -140,13 +163,13 @@ export function BriefingTheater({
     playbackGenerationRef.current += 1;
     const playbackGeneration = playbackGenerationRef.current;
     clearPlayback();
-    setShowTitleCard(false);
-    const nextBeat = stage.narrative_beats[index];
+    const nextBeat = beats[index];
     const nextImageUrl = toAbsoluteAssetUrl(nextBeat?.image_url) ?? null;
     const nextAudioUrl = toAbsoluteAssetUrl(nextBeat?.audio_url);
     const audio = nextAudioUrl ? new Audio(nextAudioUrl) : null;
     if (audio) {
       audio.preload = "auto";
+      audio.playbackRate = BRIEFING_AUDIO_PLAYBACK_RATE;
     }
     await preloadBeatAssets(nextImageUrl, audio);
     if (playbackGenerationRef.current !== playbackGeneration) {
@@ -154,14 +177,16 @@ export function BriefingTheater({
       audio && (audio.currentTime = 0);
       return;
     }
-    const priorImageUrl = toAbsoluteAssetUrl(stage.narrative_beats[activeBeat]?.image_url) ?? null;
+    const priorImageUrl = loadedImageUrlRef.current ?? toAbsoluteAssetUrl(beats[activeBeatRef.current]?.image_url) ?? null;
     if (priorImageUrl && priorImageUrl !== nextImageUrl) {
       setPreviousImageUrl(priorImageUrl);
     } else {
       setPreviousImageUrl(null);
     }
+    setShowTitleCard(false);
     setReadyToEnter(false);
     setActiveBeat(index);
+    activeBeatRef.current = index;
     settleLoadedImage(nextImageUrl);
     await new Promise((resolve) => window.setTimeout(resolve, 240));
     if (playbackGenerationRef.current !== playbackGeneration) {
@@ -174,6 +199,7 @@ export function BriefingTheater({
         return;
       }
       audioRef.current = audio;
+      audio.playbackRate = BRIEFING_AUDIO_PLAYBACK_RATE;
       void audio.play().catch(() => undefined);
       return;
     }
@@ -184,6 +210,7 @@ export function BriefingTheater({
       return;
     }
     audioRef.current = audio;
+    audio.playbackRate = BRIEFING_AUDIO_PLAYBACK_RATE;
     audio.onended = () => {
       if (audioGuardTimerRef.current) {
         window.clearTimeout(audioGuardTimerRef.current);
@@ -228,21 +255,30 @@ export function BriefingTheater({
   }
 
   useEffect(() => {
+    activeBeatRef.current = activeBeat;
+  }, [activeBeat]);
+
+  useEffect(() => {
+    loadedImageUrlRef.current = loadedImageUrl;
+  }, [loadedImageUrl]);
+
+  useEffect(() => {
     playbackGenerationRef.current += 1;
     clearPlayback();
     setActiveBeat(0);
+    activeBeatRef.current = 0;
     setReadyToEnter(false);
     setShowTitleCard(variant === "cinematic");
     setLoadedImageUrl(null);
+    loadedImageUrlRef.current = null;
     setPreviousImageUrl(null);
-    if (variant === "cinematic" && stage.narrative_beats.length > 0) {
+    if (variant === "cinematic" && beats.length > 0) {
       timerRef.current = window.setTimeout(() => {
-        setShowTitleCard(false);
         void playBeat(0);
       }, 2600);
     }
     return clearPlayback;
-  }, [stage.index, variant]);
+  }, [stage.index, stage.generated_at, variant]);
 
   if (!beat) {
     return null;
@@ -359,7 +395,7 @@ export function BriefingTheater({
         </div>
       </div>
       <div className="briefing__beats">
-        {stage.narrative_beats.map((entry, index) => (
+        {beats.map((entry, index) => (
           <button
             key={entry.id}
             className={`briefing__beat ${index === activeBeat ? "briefing__beat--active" : ""}`}

@@ -10,6 +10,10 @@ from typing import Iterator, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
+try:
+    from json_repair import repair_json
+except Exception:  # pragma: no cover - optional recovery dependency
+    repair_json = None
 
 from ..config import AppSettings
 
@@ -36,6 +40,7 @@ class OpenAIGateway:
         max_output_tokens: int = 2400,
         verbosity: str | None = None,
         max_attempts: int = 2,
+        use_fallback_repair: bool = True,
     ) -> tuple[ParsedModel, str | None]:
         if not self.live:
             raise RuntimeError("Structured parse is unavailable in dummy mode")
@@ -86,6 +91,11 @@ class OpenAIGateway:
             except Exception as exc:
                 last_error = exc
                 effort = "medium" if effort == "high" else effort
+        if not use_fallback_repair:
+            detail = str(last_error) if last_error else "no parse detail available"
+            if max_attempts <= 1:
+                raise RuntimeError(f"Structured parse failed on first attempt: {detail}") from last_error
+            raise RuntimeError(f"Structured parse failed after {max_attempts} attempts: {detail}") from last_error
         try:
             return await asyncio.to_thread(
                 self._fallback_parse,
@@ -104,19 +114,94 @@ class OpenAIGateway:
             cause = exc if last_error is None else exc
             raise RuntimeError("Structured parse failed after retries") from cause
 
+    async def strict_json(
+        self,
+        *,
+        model: str,
+        instructions: str,
+        input_text: str,
+        text_format: type[ParsedModel],
+        schema_text: str | None = None,
+        reasoning_effort: str | None = None,
+        previous_response_id: str | None = None,
+        prompt_cache_key: str | None = None,
+        max_output_tokens: int = 2400,
+        verbosity: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[ParsedModel, str | None]:
+        if not self.live:
+            raise RuntimeError("Strict JSON generation is unavailable in dummy mode")
+
+        effort = self._normalize_reasoning_effort(reasoning_effort)
+        service_tier = self._normalize_service_tier(self.settings.service_tier)
+        schema = schema_text or json.dumps(text_format.model_json_schema(), ensure_ascii=True)
+        timeout = timeout_seconds or self.settings.openai_response_timeout_seconds
+
+        def _call() -> tuple[ParsedModel, str | None]:
+            response = self.client.with_options(
+                timeout=timeout,
+            ).responses.create(
+                model=model,
+                instructions=(
+                    f"{instructions}\n\n"
+                    "Return only one valid JSON object that matches the schema exactly. "
+                    "No markdown. No prose outside the JSON object."
+                ),
+                input=f"{input_text}\n\nSchema:\n{schema}",
+                reasoning={"effort": effort} if effort else None,
+                previous_response_id=previous_response_id,
+                prompt_cache_key=prompt_cache_key,
+                max_output_tokens=max_output_tokens,
+                service_tier=service_tier,
+                text={"verbosity": verbosity} if verbosity else None,
+            )
+            output_text = response.output_text or ""
+            if getattr(response, "status", None) != "completed":
+                raise RuntimeError(
+                    f"response status={response.status} incomplete={response.incomplete_details} "
+                    f"text_len={len(output_text)} preview={output_text[:320]!r}"
+                )
+            try:
+                parsed = self._coerce_text_to_model(
+                    output_text,
+                    text_format,
+                    allow_repair=False,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"response status={response.status} incomplete={response.incomplete_details} "
+                    f"text_len={len(output_text)} preview={output_text[:320]!r}"
+                ) from exc
+            return parsed, response.id
+
+        try:
+            return await asyncio.to_thread(_call)
+        except Exception as exc:
+            raise RuntimeError(f"Strict JSON generation failed on first attempt: {exc}") from exc
+
     async def render_image(self, *, prompt: str, output_path: Path) -> None:
         if not self.live:
+            digest = base64.b16encode(prompt.encode("utf-8", errors="ignore"))[:24].decode("ascii").lower()
+            hue_a = f"#{(digest + '8f6b45')[:6]}"
+            hue_b = f"#{(digest[6:] + '2f241d')[:6]}"
+            hue_c = f"#{(digest[12:] + 'd8b46e')[:6]}"
             svg = (
-                "<svg xmlns='http://www.w3.org/2000/svg' width='1536' height='1024'>"
+                "<svg xmlns='http://www.w3.org/2000/svg' width='1536' height='1024' viewBox='0 0 1536 1024'>"
                 "<defs><linearGradient id='g' x1='0' x2='1' y1='0' y2='1'>"
-                "<stop stop-color='#24170f' offset='0'/>"
-                "<stop stop-color='#60412c' offset='1'/>"
-                "</linearGradient></defs>"
-                "<rect width='100%' height='100%' fill='url(#g)'/>"
-                "<text x='64' y='150' font-size='52' fill='#f6d7a8' font-family='Georgia'>"
-                "econ-sim preview frame"
-                "</text>"
-                f"<text x='64' y='240' font-size='28' fill='#ead0ab' font-family='Georgia'>{prompt[:120]}</text>"
+                "<stop stop-color='#21160f' offset='0'/>"
+                f"<stop stop-color='{hue_a}' offset='0.55'/>"
+                "<stop stop-color='#d9c09a' offset='1'/>"
+                "</linearGradient>"
+                "<filter id='soft'><feGaussianBlur stdDeviation='18'/></filter></defs>"
+                "<rect width='1536' height='1024' fill='url(#g)'/>"
+                f"<path d='M0 706 C236 624 432 656 656 718 C928 793 1148 750 1536 650 L1536 1024 L0 1024 Z' fill='{hue_b}' opacity='0.45'/>"
+                f"<circle cx='302' cy='280' r='210' fill='{hue_c}' opacity='0.22' filter='url(#soft)'/>"
+                "<circle cx='1204' cy='224' r='184' fill='#f0d594' opacity='0.18' filter='url(#soft)'/>"
+                f"<rect x='170' y='472' width='372' height='176' rx='34' fill='{hue_c}' opacity='0.24' transform='rotate(-6 356 560)'/>"
+                "<rect x='620' y='352' width='360' height='280' rx='42' fill='#ead0a4' opacity='0.18'/>"
+                f"<rect x='1038' y='438' width='310' height='190' rx='34' fill='{hue_b}' opacity='0.22' transform='rotate(7 1192 532)'/>"
+                "<path d='M0 770 C280 690 540 742 786 782 C1032 822 1230 808 1536 724' stroke='#f4d58e' stroke-width='28' opacity='0.18' fill='none'/>"
+                "<path d='M88 260 C286 196 426 216 612 258 C848 312 1016 286 1258 204' stroke='#ffffff' stroke-width='20' opacity='0.08' fill='none'/>"
                 "</svg>"
             )
             output_path.write_text(svg, encoding="utf-8")
@@ -135,7 +220,7 @@ class OpenAIGateway:
             }
             if output_format in {"jpeg", "webp"}:
                 generate_kwargs["output_compression"] = self.settings.image_output_compression
-            response = self.client.images.generate(
+            response = self.client.with_options(timeout=self.settings.image_timeout_seconds).images.generate(
                 **generate_kwargs,
             )
             first = response.data[0].model_dump()
@@ -147,13 +232,13 @@ class OpenAIGateway:
             if image_url:
                 import httpx
 
-                image_response = httpx.get(image_url, timeout=120)
+                image_response = httpx.get(image_url, timeout=self.settings.image_timeout_seconds)
                 image_response.raise_for_status()
                 output_path.write_bytes(image_response.content)
                 return
             raise RuntimeError("Image generation returned neither b64_json nor url")
 
-        await self._run_with_retries(_call)
+        await self._run_with_retries(_call, attempts=max(1, self.settings.image_max_attempts))
 
     async def synthesize(self, *, text: str, output_path: Path) -> None:
         if not self.live:
@@ -397,12 +482,15 @@ class OpenAIGateway:
                     "output": {
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "voice": selected_voice,
-                        "speed": 1.0,
+                        "speed": 1.08,
                     },
                 },
                 "tools": tools,
                 "tool_choice": "auto",
             }
+            reasoning = self._realtime_reasoning_payload(selected_model)
+            if reasoning:
+                session_payload["reasoning"] = reasoning
             if max_output_tokens is not None:
                 session_payload["max_output_tokens"] = max_output_tokens
             return session_payload, selected_model
@@ -448,6 +536,18 @@ class OpenAIGateway:
             return None
         normalized = effort.strip().lower()
         return None if normalized in {"", "none"} else normalized
+
+    def _realtime_reasoning_payload(self, model: str) -> dict[str, str] | None:
+        effort = self._normalize_reasoning_effort(self.settings.realtime_reasoning_effort)
+        if not effort:
+            return None
+        normalized_model = model.strip().lower()
+        if (
+            normalized_model.startswith("gpt-realtime-alpha-dolphin")
+            or normalized_model in {"gpt-realtime-2", "gpt-realtime-2.0"}
+        ):
+            return {"effort": effort}
+        return None
 
     def _normalize_service_tier(self, tier: str | None) -> str | None:
         if tier is None:
@@ -529,7 +629,13 @@ class OpenAIGateway:
             parsed = self._coerce_text_to_model(repair_response.output_text, text_format)
             return parsed, repair_response.id
 
-    def _coerce_text_to_model(self, text: str, text_format: type[ParsedModel]) -> ParsedModel:
+    def _coerce_text_to_model(
+        self,
+        text: str,
+        text_format: type[ParsedModel],
+        *,
+        allow_repair: bool = True,
+    ) -> ParsedModel:
         candidates: list[str] = []
         stripped = text.strip()
         if stripped:
@@ -541,6 +647,11 @@ class OpenAIGateway:
         end = stripped.rfind("}")
         if start != -1 and end != -1 and end > start:
             candidates.append(stripped[start : end + 1])
+        if allow_repair:
+            for candidate in list(candidates):
+                repaired_candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+                if repaired_candidate != candidate and repaired_candidate not in candidates:
+                    candidates.append(repaired_candidate)
         for candidate in candidates:
             try:
                 return text_format.model_validate_json(candidate)
@@ -548,5 +659,11 @@ class OpenAIGateway:
                 try:
                     return text_format.model_validate(json.loads(candidate))
                 except Exception:
-                    continue
+                    if not allow_repair or repair_json is None:
+                        continue
+                    try:
+                        repaired = repair_json(candidate, return_objects=True)
+                        return text_format.model_validate(repaired)
+                    except Exception:
+                        continue
         raise RuntimeError(f"Could not coerce response text into {text_format.__name__}")

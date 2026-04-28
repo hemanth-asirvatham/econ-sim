@@ -19,20 +19,22 @@ const EMPTY_PRESENCE: ScenePresence = {
 };
 
 function setupLaunchIntent(prompt: string) {
-  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, "");
-  if (/^(?:go|start|launch|begin|i['’]?m ready|im ready|ready to go|get going|go ahead|go for it|use the default(?: broad)?(?: u\.?s\.?)?(?: run| setup)?|broad setup is fine|start it|start the run|start the sim|start simulation|start the simulation|launch it|launch the run|launch the sim|launch simulation|launch the simulation|let's begin|lets begin)$/.test(normalized)) {
-    return true;
-  }
+  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
+  const directCommand =
+    "(?:go|go ahead|go for it|do it|kick it off|get going|start|start it|start this|start from here|start the run|start the sim|start simulation|start the simulation|launch|launch it|launch this|launch the run|launch the sim|launch simulation|launch the simulation|run it|run this|begin|begin it|let's begin|lets begin)";
   if (
-    /\b(?:i['’]?m ready|im ready|ready to go|get going|go ahead|go for it|start|launch|begin|start it|start the run|start the sim|start simulation|start the simulation|launch it|launch the run|launch the sim|launch simulation|launch the simulation|let's begin|lets begin)\b/.test(
+    new RegExp(
+      `^(?:ok(?:ay)?|yeah|yes|yep|sure|alright|all right|cool|great|please|now|then|so)[, ]+${directCommand}(?:[, ]*(?:please|now))?$`,
+    ).test(normalized) ||
+    new RegExp(`^${directCommand}(?:[, ]*(?:please|now))?$`).test(normalized) ||
+    new RegExp(`^(?:i['’]?m ready|im ready|ready to go|broad setup is fine|use the default(?: broad)?(?: u\\.?s\\.?)?(?: run| setup)?)(?:[, ]+${directCommand})?$`).test(
       normalized,
-    )
+    ) ||
+    new RegExp(`^(?:let's|lets|we should|i think we should|i guess we should)\\s+(?:launch|start|begin|run)\\s+(?:it|this|the run|the sim|the simulation)$`).test(normalized)
   ) {
     return true;
   }
-  return /^(?:that(?:'| i)?s good|sounds good|looks good),?\s+(?:go|start(?: it| the run| the sim)?|launch it)$/.test(
-    normalized,
-  );
+  return new RegExp(`^(?:that(?:'| i)?s good|sounds good|looks good|default looks good|default is fine),?\\s+${directCommand}$`).test(normalized);
 }
 
 function makeId(prefix: string) {
@@ -365,7 +367,7 @@ export function useSetupRealtimeSession({
     const nextSession = await sendSetupPrompt(activeSession, text);
     sessionRef.current = nextSession;
     onSessionSync(nextSession);
-    if (onAutoLaunch && setupLaunchIntent(text) && nextSession.status === "ready") {
+    if (onAutoLaunch && nextSession.guidance?.launch_now === true && nextSession.status === "ready") {
       await onAutoLaunch(nextSession, text);
     }
   });

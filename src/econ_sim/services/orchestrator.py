@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -25,6 +27,8 @@ from ..models import (
 )
 from .council import COUNCIL_VOICE_POOL
 from .openai_client import OpenAIGateway
+
+logger = logging.getLogger(__name__)
 
 COUNCIL_FEMININE_HINTS = {
     "aisha",
@@ -81,10 +85,70 @@ COUNCIL_MASCULINE_HINTS = {
 COUNCIL_FEMININE_VOICES = ("marin", "shimmer", "sage")
 COUNCIL_MASCULINE_VOICES = ("cedar", "ash", "verse")
 
+_ONES_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+}
+_TEEN_WORDS = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS_WORDS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_NUMBER_WORD_PATTERN = (
+    r"(?:"
+    r"one|two|three|four|five|six|seven|eight|nine|"
+    r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"thirty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"forty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"fifty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"sixty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"seventy(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"eighty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+    r"ninety(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?"
+    r")"
+)
+
 
 class OrchestratorBeat(BaseModel):
     line: str
     image_prompt: str
+
+
+class OrchestratorStageBeat(BaseModel):
+    line: str
+    image_prompt: str
+
+
+class OrchestratorMacroStat(BaseModel):
+    key: str = ""
+    label: str = ""
+    value: str = ""
+    detail: str = ""
 
 
 class OrchestratorStageOutput(BaseModel):
@@ -92,8 +156,8 @@ class OrchestratorStageOutput(BaseModel):
     title: str = ""
     montage_logline: str = ""
     world_brief: str = ""
-    macro_stats: dict[str, MacroStatistic] = Field(default_factory=dict)
-    narrative_beats: list[OrchestratorBeat] = Field(default_factory=list)
+    macro_stats: list[OrchestratorMacroStat] = Field(default_factory=list)
+    narrative_beats: list[OrchestratorStageBeat] = Field(default_factory=list)
 
 
 class OrchestratorFeaturetteOutput(BaseModel):
@@ -101,7 +165,7 @@ class OrchestratorFeaturetteOutput(BaseModel):
     question: str = Field(min_length=12)
     title: str = Field(min_length=4)
     logline: str = Field(min_length=16)
-    narrative_beats: list[OrchestratorBeat] = Field(default_factory=list, min_length=3, max_length=4)
+    narrative_beats: list[OrchestratorBeat] = Field(default_factory=list, min_length=4, max_length=5)
 
 
 class OrchestratorFeaturetteSetOutput(BaseModel):
@@ -122,7 +186,7 @@ class DebateImpactOutput(BaseModel):
 
 
 class CouncilRosterOutput(BaseModel):
-    council_roster: list[CouncilAdvisorProfile] = Field(default_factory=list, min_length=3, max_length=5)
+    council_roster: list[CouncilAdvisorProfile] = Field(default_factory=list, min_length=3, max_length=6)
 
 
 class OrchestratorService:
@@ -134,26 +198,28 @@ class OrchestratorService:
         lowered = " ".join(str(text or "").split()).lower()
         if not lowered:
             return None
-        word_years = {
-            "four": 4,
-            "five": 5,
-            "six": 6,
-            "seven": 7,
-            "eight": 8,
-            "nine": 9,
-            "ten": 10,
-            "eleven": 11,
-            "twelve": 12,
-            "thirteen": 13,
-            "fourteen": 14,
-            "fifteen": 15,
-            "sixteen": 16,
-            "seventeen": 17,
-            "eighteen": 18,
-            "nineteen": 19,
-            "twenty": 20,
-        }
-        word_year_pattern = "|".join(word_years)
+        if re.search(r"\bhalf(?:\s+a)?\s+century\b", lowered):
+            return 50
+        if re.search(
+            r"\b(?:a\s+)?century\s+(?:from now|ahead|in the future|later|down the line|down the road)\b|\bin\s+a\s+century\b",
+            lowered,
+        ):
+            return 100
+        if re.search(r"\bmid[- ]century\b", lowered):
+            return 24
+        if re.search(r"\bearly\s+2040s\b", lowered):
+            return 15
+        if re.search(r"\blate\s+2030s\b", lowered):
+            return 13
+        if re.search(r"\blate\s+2040s\b", lowered):
+            return 22
+        if re.search(r"\bnext\s+decade\b", lowered):
+            return 10
+        if decade_count := re.search(
+            rf"\b(\d{{1,2}}|{_NUMBER_WORD_PATTERN})\s+decades?\s+(?:from now|ahead|in the future|later|down the line|down the road)\b",
+            lowered,
+        ):
+            return self._parse_future_horizon_number(decade_count.group(1)) * 10
         numeric_match = re.search(
             r"\b(?:in\s+)?(\d{1,2})(?:\s*(?:-|to)\s*(\d{1,2}))?\s+years?\s+(?:from now|ahead|in the future|after|out|later|down the line|down the road)\b|\bin\s+(\d{1,2})\s+years?\b",
             lowered,
@@ -162,16 +228,41 @@ class OrchestratorService:
             upper = numeric_match.group(3) or numeric_match.group(2) or numeric_match.group(1)
             return int(upper)
         word_match = re.search(
-            rf"\b(?:in\s+)?({word_year_pattern})"
-            rf"(?:\s*(?:-|to)\s*({word_year_pattern}))?"
+            rf"\b(?:in\s+)?({_NUMBER_WORD_PATTERN})"
+            rf"(?:\s*(?:-|to)\s*({_NUMBER_WORD_PATTERN}))?"
             r"\s+years?\s+(?:from now|ahead|in the future|after|out|later|down the line|down the road)\b"
-            rf"|\bin\s+({word_year_pattern})\s+years?\b",
+            rf"|\bin\s+({_NUMBER_WORD_PATTERN})\s+years?\b",
             lowered,
         )
         if word_match:
             upper = word_match.group(3) or word_match.group(2) or word_match.group(1)
-            return word_years.get(upper)
+            return self._parse_future_horizon_number(upper)
+        if year_match := re.search(r"\b(20[3-9]\d|21\d{2})\b", lowered):
+            explicit_year = int(year_match.group(1))
+            return max(0, explicit_year - 2026)
+        if decade_match := re.search(r"\b(20[3-9])0s\b", lowered):
+            decade_year = int(decade_match.group(1) + "5")
+            return max(0, decade_year - 2026)
+        if re.search(r"\bdecades?\s+(?:ahead|out|later|down the line|down the road)\b", lowered):
+            return 20
         return None
+
+    def _parse_future_horizon_number(self, value: str | None) -> int:
+        token = " ".join(str(value or "").replace("-", " ").split()).lower()
+        if not token:
+            return 0
+        if token.isdigit():
+            return int(token)
+        if token in _ONES_WORDS:
+            return _ONES_WORDS[token]
+        if token in _TEEN_WORDS:
+            return _TEEN_WORDS[token]
+        if token in _TENS_WORDS:
+            return _TENS_WORDS[token]
+        parts = token.split()
+        if len(parts) == 2 and parts[0] in _TENS_WORDS and parts[1] in _ONES_WORDS:
+            return _TENS_WORDS[parts[0]] + _ONES_WORDS[parts[1]]
+        return 0
 
     def _advanced_capability_signal(self, text: str | None) -> bool:
         lowered = " ".join(str(text or "").split()).lower()
@@ -238,13 +329,16 @@ class OrchestratorService:
                     "start later",
                     "far future",
                     "radical future",
+                    "radical agi future",
+                    "radical ai future",
+                    "structurally transformed future",
                     "stranger future",
                     "stranger agi society",
                     "much stranger",
                     "deeply transformed",
                     "different economy",
                     "different world",
-                    "radically different",
+                    "structurally different",
                     "new settlement",
                     "machine dividends",
                     "compute rationing",
@@ -308,7 +402,7 @@ class OrchestratorService:
             input_text=prompt,
             text_format=CouncilRosterOutput,
             reasoning_effort=config.orchestrator_reasoning_effort,
-            prompt_cache_key=f"council-roster:{config.country.lower().replace(' ', '-')}",
+            prompt_cache_key=f"council-roster:{hashlib.sha1(prompt.encode('utf-8')).hexdigest()[:12]}",
             max_output_tokens=1100,
             verbosity="low",
         )
@@ -342,9 +436,19 @@ class OrchestratorService:
         if any(
             cue in lowered
             for cue in (
+                "far future",
+                "further future",
+                "deep future",
+                "way further in the future",
+                "much further in the future",
+                "well into the future",
+                "decades ahead",
                 "radical future",
                 "radical agi future",
                 "radical ai future",
+                "structurally transformed future",
+                "deeply changed agi future",
+                "deeply changed ai future",
                 "well after the transition",
                 "after the transition",
                 "new settlement",
@@ -425,13 +529,18 @@ class OrchestratorService:
     def _starting_phase_anchor(self, *texts: str | None) -> int:
         return max((self._phase_anchor_from_text(text) for text in texts), default=0)
 
-    def _setup_implies_later_settlement(self, config: SimulationConfig) -> bool:
+    def _config_phase_anchor(self, config: SimulationConfig) -> int:
         return self._starting_phase_anchor(
             config.premise,
             config.topic_lens,
             config.stakes,
             config.population_description,
-        ) > 0 or self._text_wants_later_world(
+            config.region_focus,
+            config.country,
+        )
+
+    def _setup_implies_later_settlement(self, config: SimulationConfig) -> bool:
+        return self._config_phase_anchor(config) > 0 or self._text_wants_later_world(
             " ".join(
                 part.strip()
                 for part in (
@@ -439,6 +548,8 @@ class OrchestratorService:
                     str(config.stakes or ""),
                     str(config.topic_lens or ""),
                     str(config.population_description or ""),
+                    str(config.region_focus or ""),
+                    str(config.country or ""),
                 )
                 if str(part).strip()
             )
@@ -446,21 +557,53 @@ class OrchestratorService:
 
     def _macro_cue_line(self, *, later_world_requested: bool) -> str:
         return (
-            "- macro_stats: a small JSON object of 3 to 6 flexible dashboard facts that make this particular world legible. "
-            "Choose the stats to fit the run, not a fixed template. For a national economy, this will usually include rough unemployment, labor force participation, inflation, real GDP growth, and one capability, compute, defense, infrastructure, or household-access stat. "
-            "For a school board or ministry, choose education stats instead. Each stat should have label, value, and a short plain-English detail. Avoid false precision.\n"
+            "- macro_stats: a small JSON object of 4 to 7 flexible dashboard facts that make this particular world legible. "
+            "Choose the stats people in this society would actually watch, not a fixed template. "
+            "In a broad national run, default to unemployment, labor force participation, inflation, and real output unless this society has plainly moved past those markers. "
+            "If classic macro numbers like unemployment, labor force participation, inflation, or GDP still organize public life, use them. "
+            "If they no longer do, replace them with the real scoreboard now: compute access, machine-income floor, average paid hours, power buildout, clinic capacity, school time, household security, allied dependence, queue length, ownership concentration, or whatever this world actually treats as decisive. "
+            "Include at least one quantity, price, or capacity stat when relevant: clinic throughput, rent burden, housing completions, energy price, robot deployment, firm formation, paid hours, small-business output, model-credit price, or service wait time. "
+            "For a school board or ministry, choose education stats instead. Each stat should have label, value, and a short plain-English detail. Keep labels short enough to fit on a whiteboard, usually 1 to 4 words. Avoid false precision.\n"
+        )
+
+    def _stage_output_shape_hint(self) -> str:
+        return (
+            "{"
+            '"year_label": string, '
+            '"title": string, '
+            '"montage_logline": string, '
+            '"world_brief": string, '
+            '"macro_stats": ['
+            '{"key": string, "label": string, "value": string, "detail": string}'
+            "], "
+            '"narrative_beats": ['
+            '{"line": string, "image_prompt": string}'
+            "]"
+            "}"
         )
 
     def _clean_macro_stats(
         self,
-        macro_stats: dict[str, MacroStatistic] | None,
+        macro_stats: list[OrchestratorMacroStat] | dict[str, MacroStatistic] | None,
         *,
         config: SimulationConfig,
         stage_index: int,
     ) -> dict[str, MacroStatistic]:
         cleaned: dict[str, MacroStatistic] = {}
-        for raw_key, stat in (macro_stats or {}).items():
-            key = re.sub(r"[^a-z0-9_]+", "_", str(raw_key or "").strip().lower()).strip("_")
+        if isinstance(macro_stats, dict):
+            entries = [
+                OrchestratorMacroStat(
+                    key=str(raw_key or ""),
+                    label=str(stat.label or ""),
+                    value=str(stat.value or ""),
+                    detail=str(stat.detail or ""),
+                )
+                for raw_key, stat in macro_stats.items()
+            ]
+        else:
+            entries = list(macro_stats or [])
+        for stat in entries:
+            key = re.sub(r"[^a-z0-9_]+", "_", str(stat.key or "").strip().lower()).strip("_")
             label = " ".join(str(stat.label or "").split())
             value = " ".join(str(stat.value or "").split())
             detail = " ".join(str(stat.detail or "").split())
@@ -469,9 +612,9 @@ class OrchestratorService:
             if not key or not label or not value:
                 continue
             cleaned[key[:42]] = MacroStatistic(
-                label=self._trim_without_ellipsis(label, 44),
+                label=self._trim_without_ellipsis(label, 58),
                 value=self._trim_without_ellipsis(value, 24),
-                detail=self._clip(detail, 92) if detail else "",
+                detail=self._trim_with_sentence_fallback(detail, 132, slack=18) if detail else "",
             )
             if len(cleaned) >= 6:
                 break
@@ -486,8 +629,9 @@ class OrchestratorService:
                 config.country,
                 config.region_focus,
                 config.topic_lens,
-                config.population_description,
                 config.premise,
+                config.stakes,
+                config.player_role,
             )
             if part
         )
@@ -498,15 +642,28 @@ class OrchestratorService:
                 "screen_time": MacroStatistic(label="AI screen time", value="3.4 h/day", detail="Families argue over helpful practice versus dependency."),
                 "public_trust": MacroStatistic(label="Parent trust", value="mixed", detail="Approval turns on transparency and child safety."),
             }
+        if self._setup_implies_later_settlement(config):
+            output_growth = 4.4 + stage_index * 0.8
+            machine_income = 18 + stage_index * 6
+            compute_access = min(94, 46 + stage_index * 8)
+            power_buildout = 9 + stage_index * 4
+            labor_force = max(43, 61 - stage_index * 2)
+            return {
+                "real_output_growth": MacroStatistic(label="Real output", value=f"+{output_growth:.1f}%", detail="Machine labor keeps pushing up capacity even where institutions lag."),
+                "labor_force_participation": MacroStatistic(label="Labor force", value=f"{labor_force:.0f}%", detail="Share of adults still depending on ordinary paid work as the main anchor of household security."),
+                "machine_income_floor": MacroStatistic(label="Machine income floor", value=f"${machine_income}k", detail="Typical adult access to public or quasi-public machine gains before private earnings."),
+                "household_compute_access": MacroStatistic(label="Household compute access", value=f"{compute_access:.0f}%", detail="Share of households with reliable access to a strong public or cheap private model layer."),
+                "power_buildout": MacroStatistic(label="Power buildout", value=f"+{power_buildout:.0f} GW", detail="New generation and transmission are the practical limit more often than software talent."),
+            }
         growth = 2.8 + stage_index * 0.7
-        unemployment = max(3.2, 4.8 + stage_index * 0.5)
-        participation = max(59.0, 62.4 - stage_index * 0.4)
-        inflation = max(1.6, 3.2 - stage_index * 0.25)
+        unemployment = max(3.2, 4.5 + stage_index * 0.35)
+        participation = max(58.6, 62.1 - stage_index * 0.35)
+        inflation = max(1.6, 3.1 - stage_index * 0.22)
         return {
-            "unemployment": MacroStatistic(label="Unemployment", value=f"{unemployment:.1f}%", detail="Screen-work churn is visible before new income forms settle."),
-            "labor_force_participation": MacroStatistic(label="Labor force", value=f"{participation:.1f}%", detail="Some adults leave old ladders for care, study, ventures, or waiting."),
-            "real_gdp_growth": MacroStatistic(label="Real GDP", value=f"+{growth:.1f}%", detail="Cheap digital labor lifts output, but physical bottlenecks still bite."),
-            "inflation": MacroStatistic(label="Inflation", value=f"{inflation:.1f}%", detail="Services ease while power, housing, and hardware stay tight."),
+            "unemployment": MacroStatistic(label="Unemployment", value=f"{unemployment:.1f}%", detail="Old job markets are shifting fast enough that this number only tells part of the story."),
+            "labor_force_participation": MacroStatistic(label="Labor force", value=f"{participation:.1f}%", detail="Some adults stay in the formal labor market; others move into care, retraining, or self-directed AI work."),
+            "real_gdp_growth": MacroStatistic(label="Real GDP", value=f"+{growth:.1f}%", detail="Cheap digital labor lifts output, but energy, housing, and permitting still slow the physical economy."),
+            "inflation": MacroStatistic(label="Inflation", value=f"{inflation:.1f}%", detail="Software-heavy services cheapen faster than housing, power, and scarce hardware."),
         }
 
     async def compose_stage(
@@ -525,11 +682,7 @@ class OrchestratorService:
         phase = self._phase_brief(
             state.active_stage_index,
             state.config.stage_count,
-            self._starting_phase_anchor(
-                state.config.premise,
-                state.config.topic_lens,
-                state.config.stakes,
-            ),
+            self._config_phase_anchor(state.config),
         )
         if progress_callback:
             await progress_callback(
@@ -542,6 +695,7 @@ class OrchestratorService:
             stage_index=state.active_stage_index,
             stage_count=state.config.stage_count,
             phase=phase,
+            prior_stages=state.stages[: state.active_stage_index],
             previous_stage=previous_stage,
             tracking=tracking,
             poll_summaries=poll_summaries,
@@ -549,17 +703,18 @@ class OrchestratorService:
             incumbent_name=state.incumbent_name,
             queued_poll_questions=queued_poll_questions,
         )
-        parsed, response_id = await self.gateway.parse(
+        parsed, response_id = await self.gateway.strict_json(
             model=self.settings.orchestrator_model,
             instructions=self._stage_instructions(state.config),
             input_text=prompt,
             text_format=OrchestratorStageOutput,
+            schema_text=self._stage_output_shape_hint(),
             reasoning_effort=self._content_reasoning_effort(state.config),
             previous_response_id=None,
-            prompt_cache_key=f"{state.simulation_id}:orchestrator-stage-v4",
-            max_output_tokens=1800,
+            prompt_cache_key=f"{state.simulation_id}:orchestrator-stage-v6",
+            max_output_tokens=10000,
             verbosity="low",
-            max_attempts=1,
+            timeout_seconds=max(self.settings.openai_response_timeout_seconds, 180.0),
         )
         if progress_callback:
             await progress_callback(
@@ -567,11 +722,22 @@ class OrchestratorService:
                 "Reusing the same chapter draft for the reel, briefing, and room context.",
                 50,
             )
-        world_brief = self._normalize_summary_prose(parsed.world_brief, max_paragraphs=5)
+        world_brief = self._normalize_summary_prose(parsed.world_brief, max_paragraphs=8)
+        if len(world_brief.split()) < 80:
+            world_brief = self._fallback_world_brief(state.config, state.active_stage_index, phase["label"])
+        narrative_beats = self._stage_narrative_beats(
+            parsed.narrative_beats,
+            world_brief=world_brief,
+            visual_style=state.config.visual_style,
+        )
         stage_package = StagePackage(
             index=state.active_stage_index,
             phase_label=phase["label"],
-            year_label=parsed.year_label or self._fallback_year_label(previous_stage, state.active_stage_index),
+            year_label=parsed.year_label or self._fallback_year_label(
+                previous_stage,
+                state.active_stage_index,
+                config=state.config,
+            ),
             title=parsed.title or self._fallback_stage_title(phase["label"], state.active_stage_index),
             montage_logline=self._normalize_sentence(
                 parsed.montage_logline or self._fallback_montage_logline(world_brief),
@@ -580,13 +746,7 @@ class OrchestratorService:
             ),
             world_brief=world_brief,
             room_briefing="",
-            narrative_beats=[
-                NarrativeBeat(
-                    line=self._normalize_narration_line(beat.line),
-                    image_prompt=self._polish_image_prompt(state.config.visual_style, beat.image_prompt),
-                )
-                for beat in parsed.narrative_beats
-            ],
+            narrative_beats=narrative_beats,
             sample_citizens=[],
             tracking=tracking or self._neutral_tracking(),
             macro_stats=self._clean_macro_stats(
@@ -619,7 +779,7 @@ class OrchestratorService:
         setup_direction = self._setup_direction_block(config)
         prompt = (
             "Current setup draft:\n"
-            f"- title: {config.title}\n"
+            f"- title: {config.title.strip() or '(let the opening chapter title the run)'}\n"
             f"- country: {config.country}\n"
             f"- player_name: {config.player_name}\n"
             f"- player_role: {config.player_role}\n"
@@ -634,17 +794,19 @@ class OrchestratorService:
             f"- persona_count: {config.persona_count}\n"
             f"- stage_count: {config.stage_count}\n"
             f"- visual_style: {config.visual_style}\n"
-            f"- orchestrator_reasoning_effort: {config.orchestrator_reasoning_effort}\n"
-            f"- realtime_model: {config.realtime_model}\n\n"
+            "\n"
             f"Recent setup turns:\n{turn_block}\n\n"
             f"Latest user message:\n{user_text}\n\n"
             "Return a short chamber reply in a conductor-like tone. "
+            "Set launch_now true only when the latest user message is an immediate instruction to begin the simulation now, such as 'launch it', 'go for it', 'start the sim', or 'the default is fine, go'. "
+            "Set launch_now false when the user is planning, qualifying, or discussing launch hypothetically, such as 'when we launch it, make X true', 'before we launch', or 'if we launch later'. "
             "If you changed fields, speak naturally in one short sentence; do not expose internal field names or field -> value fragments in chamber_reply. "
             "Only include config_updates for changes the user actually requested. "
             "If the user asked to tighten, rewrite, or restyle an existing field, put the rewritten field value directly into config_updates instead of talking around it. "
             "If the user asks to change the advisor panel, return a complete council_roster array rather than a partial note. "
             "Each council_roster entry should include key, name, room_role, country_role, remit, voice, and viewpoint. "
             "Set readiness to ready when the draft is launchable as-is, and needs_input only when a requested change is blocked by a missing detail. "
+            "launch_now is an action flag, not a conversational phrase detector. It should mean: the user clearly wants the app to call the start action now. "
             "If you apply any changes, mirror them in applied_updates using field -> value form for structured bookkeeping only. "
             "If you still need something, put only the blocking points in open_questions and keep next_actions short and practical. "
             "Ask at most two follow-up questions, and only when a missing detail blocks a requested change. "
@@ -682,6 +844,9 @@ class OrchestratorService:
             str(merged_updates.get("premise") or ""),
             str(merged_updates.get("topic_lens") or ""),
             str(merged_updates.get("stakes") or ""),
+            str(merged_updates.get("population_description") or ""),
+            str(merged_updates.get("region_focus") or ""),
+            str(merged_updates.get("country") or ""),
         )
         removed_auto_fields: list[str] = []
         explicit_topic_lens = self._extract_labeled_value(user_text, "topic_lens")
@@ -768,8 +933,8 @@ class OrchestratorService:
             input_text=prompt,
             text_format=OrchestratorFeaturetteSetOutput,
             reasoning_effort=self._content_reasoning_effort(state.config),
-            prompt_cache_key=f"{state.simulation_id}:featurettes:{stage.index}",
-            max_output_tokens=2200,
+            prompt_cache_key=f"{state.simulation_id}:featurettes:{stage.index}:v3",
+            max_output_tokens=3000,
             verbosity="medium",
             max_attempts=2,
         )
@@ -794,7 +959,7 @@ class OrchestratorService:
                             line=self._normalize_narration_line(beat.line),
                             image_prompt=self._polish_image_prompt(state.config.visual_style, beat.image_prompt),
                         )
-                        for beat in entry.narrative_beats[:4]
+                        for beat in entry.narrative_beats[:5]
                         if self._normalize_narration_line(beat.line)
                     ],
                 )
@@ -816,7 +981,6 @@ class OrchestratorService:
         asset_dir: Path,
         prefix: str,
     ) -> None:
-        image_semaphore = asyncio.Semaphore(3)
         audio_semaphore = asyncio.Semaphore(6)
 
         async def _render_beat(index: int, beat: NarrativeBeat) -> None:
@@ -827,21 +991,64 @@ class OrchestratorService:
                 image_suffix = "jpg" if output_format in {"jpeg", "jpg"} else output_format
             image_path = asset_dir / f"{prefix}-{index:02d}.{image_suffix}"
             audio_path = asset_dir / f"{prefix}-{index:02d}.mp3"
+            resolved_image_path = image_path
 
             async def _render_image() -> None:
-                async with image_semaphore:
-                    await self.gateway.render_image(prompt=beat.image_prompt, output_path=image_path)
+                nonlocal resolved_image_path
+                try:
+                    image_timeout = max(0.0, self.settings.image_timeout_seconds)
+                    render_timeout = 0.5 if image_timeout <= 0.5 else image_timeout + 15.0
+                    await asyncio.wait_for(
+                        self.gateway.render_image(prompt=beat.image_prompt, output_path=image_path),
+                        timeout=render_timeout,
+                    )
+                except Exception as exc:
+                    fallback_path = asset_dir / f"{prefix}-{index:02d}-fallback.svg"
+                    self._write_fallback_frame(fallback_path, beat.image_prompt)
+                    resolved_image_path = fallback_path
+                    logger.warning(
+                        "Falling back to local stage art for %s-%02d after image render failure: %s",
+                        prefix,
+                        index,
+                        repr(exc),
+                    )
 
             async def _render_audio() -> None:
                 async with audio_semaphore:
-                    await self.gateway.synthesize(text=beat.line, output_path=audio_path)
+                    try:
+                        await self.gateway.synthesize(text=beat.line, output_path=audio_path)
+                    except Exception as exc:
+                        logger.warning("Skipping narration audio for %s-%02d after synthesis failure: %s", prefix, index, exc)
 
             await asyncio.gather(_render_image(), _render_audio())
-            beat.image_path = str(image_path)
+            beat.image_path = str(resolved_image_path) if resolved_image_path.exists() else None
             beat.audio_path = str(audio_path) if audio_path.exists() else None
 
         asset_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.gather(*[_render_beat(idx, beat) for idx, beat in enumerate(beats)])
+
+    def _write_fallback_frame(self, output_path: Path, prompt: str) -> None:
+        digest = hashlib.sha1(prompt.encode("utf-8")).hexdigest()
+        palette = [
+            f"#{digest[0:6]}",
+            f"#{digest[6:12]}",
+            f"#{digest[12:18]}",
+            f"#{digest[18:24]}",
+        ]
+        svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024" viewBox="0 0 1536 1024">
+  <rect width="1536" height="1024" fill="{palette[0]}"/>
+  <rect x="0" y="612" width="1536" height="412" fill="{palette[1]}" opacity="0.78"/>
+  <circle cx="282" cy="254" r="186" fill="{palette[2]}" opacity="0.42"/>
+  <circle cx="1268" cy="212" r="164" fill="{palette[3]}" opacity="0.35"/>
+  <rect x="128" y="468" width="396" height="188" rx="18" fill="{palette[2]}" opacity="0.3" transform="rotate(-6 326 562)"/>
+  <rect x="1018" y="452" width="308" height="172" rx="18" fill="{palette[3]}" opacity="0.28" transform="rotate(8 1172 538)"/>
+  <rect x="536" y="356" width="452" height="268" rx="28" fill="{palette[0]}" opacity="0.22"/>
+  <path d="M0 704 C220 642, 418 642, 612 708 S1016 792, 1536 676 L1536 1024 L0 1024 Z" fill="{palette[3]}" opacity="0.36"/>
+  <path d="M0 742 C262 676, 520 726, 764 770 S1208 832, 1536 732" stroke="{palette[2]}" stroke-width="24" opacity="0.24" fill="none"/>
+</svg>
+""".strip()
+        output_path.write_text(svg, encoding="utf-8")
 
     async def build_debate_reply(
         self,
@@ -852,16 +1059,17 @@ class OrchestratorService:
         player_rebuttal: str | None,
     ) -> DebateReply:
         if self.settings.dummy_openai:
+            gain = self._stage_upside_hint(current_stage.world_brief) or "the useful new capability people would hate to lose"
+            split = self._stage_split_hint(current_stage.world_brief) or "who controls access to the new productive floor"
+            constraint = self._stage_constraint_hint(current_stage.world_brief) or "which bottleneck still makes the settlement fragile"
             return DebateReply(
                 opponent_opening=(
-                    "My opponent wants to steer every shock from Washington. I am arguing that families need "
-                    "more upside, faster deployment, and a cleaner bargain for those who lose ground."
+                    f"The gain is real: {gain}. My case is that we keep that moving while making the live bargain explicit: {split}."
                 ),
                 opponent_rebuttal=(
-                    "The administration keeps promising balance, but households can feel when opportunity is "
-                    "moving elsewhere and when daily life is still too expensive."
+                    f"The missing piece in that answer is {constraint}. I would govern that choke point directly instead of turning every useful system into a permission slip."
                 ),
-                analyst_take="The argument is over who can widen the gains without letting the transition spin out of public control.",
+                analyst_take=f"The argument is over {split}, not whether the technology matters.",
             )
 
         setup_premise = self._setup_field_or_default(
@@ -875,10 +1083,11 @@ class OrchestratorService:
         player_lane = self._player_debate_lane(player_platform, current_stage.policy_notes)
         opponent_lane = self._opponent_debate_lane(player_lane)
         flagship_move = self._opponent_flagship_move(player_lane, current_stage, player_platform)
+        stage_context = self._debate_stage_context(current_stage)
         prompt = (
             f"Stage title: {current_stage.title}\n"
             f"Stage phase: {current_stage.phase_label}\n"
-            f"World summary: {current_stage.world_brief}\n"
+            f"World context:\n{stage_context}\n"
             f"Player role: {state.config.player_role}\n"
             f"Opponent role: {state.config.opponent_role}\n"
             f"Setup premise: {setup_premise}\n"
@@ -897,6 +1106,7 @@ class OrchestratorService:
             f"One gain the player would slow: {self._stage_upside_hint(current_stage.world_brief) or 'a real gain voters already notice'}\n"
             f"One constituency wanting more AI: {self._stage_constituency_hint(current_stage.world_brief) or 'people already benefiting from faster adoption'}\n"
             "The opponent should make the sharpest credible contrast for this stage and electorate, not a softened mirror of the player.\n"
+            "The rival can win by being more abundance-minded than the player. If the player over-focuses on redistribution, licensing, caps, or brakes, argue concretely for faster diffusion, cheaper services, new firm entry, a free public AI baseline, or physical buildout.\n"
             "Write a short opening statement for the opponent that includes 1-2 concrete policy planks and one clear governing principle, "
             "a short rebuttal that challenges the player while advancing a distinct alternative philosophy, "
             "and a one-sentence analyst framing of the difference. Keep the rhetoric plausible for an actual national campaign."
@@ -907,6 +1117,7 @@ class OrchestratorService:
                 "You are writing a sharp but credible campaign debate exchange in an AGI transition simulation. "
                 "Stay realistic, do not sermonize, and keep each speech brief enough for quick TTS. "
                 "The opponent should sound like a serious rival with an actual governing theory, not a generic attack machine. "
+                "They should speak to voters as a candidate, not advise the player or merge into the player's coalition. "
                 "Have them return to a durable coalition and set of priorities, not a new persona each turn. "
                 "Start from the player's actual platform and the electorate pressure points, not a canned incumbency script. "
                 "Concede the strongest popular piece of the player's case in a few words when it is real, then argue for a sharper alternative that answers the top voter mood. "
@@ -914,9 +1125,12 @@ class OrchestratorService:
                 "Steelman the player's case before you oppose it: say the strongest version of their concern in plain words, then answer it. "
                 "Do not echo the player's remedies unless you are explicitly narrowing, replacing, or rejecting them. "
                 "Make the sharpest credible contrast for this stage and electorate. That contrast may turn on pace, concentration, public provision, competition, household payoff, bargaining power, resilience, or legitimacy. "
+                "Treat AI progress as the central background fact. The opponent's policy should be a proportional answer to the world: small policy has modest effects, big enforceable policy can redirect the settlement, and only extreme policy credibly arrests broad diffusion. "
+                "Avoid comma-stuffed policy inventories. Each speech should explain one major changed fact, one public consequence, and one governing move in plain language. "
                 "If the player proposes a broad brake, one plausible contrast is narrower rules, more competition, or faster diffusion, but only if the stage evidence supports that case. "
                 "If the player proposes speed-first diffusion, one plausible contrast is visible household payoff, bargaining leverage, or public recourse, but only if that is the live pressure. "
                 "If the player is restrictive, make the strongest case for useful capability, open access, or faster diffusion that their line would slow, and then explain the smallest guardrail that would still protect the public. "
+                "Every speech should include one economic claim: what gets cheaper, what remains scarce, what firms do differently, what happens to workers' bargaining power, or why housing, healthcare, energy, or robotics still bind. "
                 "If the player already sounds mixed, find the missing governing choice instead of forcing a prefab opposite lane. "
                 "Name one gain the player's approach could endanger, one constituency your rival case is protecting, and one governing move that sounds visibly different from the player's board. "
                 "Do not lapse into vague balance talk or mirror the player in softer words. "
@@ -964,10 +1178,11 @@ class OrchestratorService:
             state.config.stakes,
             "No extra setup stake is locked; infer the live political argument from public conditions.",
         )
+        stage_context = self._debate_stage_context(current_stage)
         prompt = (
             f"Stage title: {current_stage.title}\n"
             f"Stage phase: {current_stage.phase_label}\n"
-            f"State of the world: {current_stage.world_brief}\n"
+            f"World context:\n{stage_context}\n"
             f"Player role: {state.config.player_role}\n"
             f"Opponent role: {state.config.opponent_role}\n"
             f"Setup stakes: {setup_stakes}\n"
@@ -990,7 +1205,7 @@ class OrchestratorService:
             instructions=(
                 "You are evaluating a realistic election debate inside an AGI transition simulation. "
                 "Be skeptical about giant swings. Reward clarity, relevance to lived conditions, affordability, service quality, credible upside, distributional credibility, legitimacy, and strategic seriousness. "
-                "Do not reward generic applause lines or vague attacks."
+            "Do not reward generic applause lines or vague attacks."
             ),
             input_text=prompt,
             text_format=DebateImpactOutput,
@@ -1000,6 +1215,25 @@ class OrchestratorService:
             verbosity="low",
         )
         return parsed
+
+    def _debate_stage_context(self, stage: StagePackage) -> str:
+        macro_lines = [
+            f"- {stat.label}: {stat.value}. {stat.detail}".strip()
+            for stat in list((stage.macro_stats or {}).values())[:6]
+            if stat.label and stat.value
+        ]
+        parts = [
+            "World essay:",
+            self._clip(stage.world_brief, 2600),
+        ]
+        if stage.room_briefing:
+            parts.extend(["Command-room read:", self._clip(stage.room_briefing, 700)])
+        if macro_lines:
+            parts.extend(["Dashboard facts:", "\n".join(macro_lines)])
+        poll_lines = self._salient_poll_lines(stage.poll_summaries, limit=5)
+        if poll_lines and poll_lines != "- none yet":
+            parts.extend(["Public read:", poll_lines])
+        return "\n".join(part for part in parts if part).strip()
 
     def _setup_instructions(self) -> str:
         return (
@@ -1031,7 +1265,8 @@ class OrchestratorService:
             "Only change fields that the user clearly requested or strongly implied. "
             "If the user asked to rewrite an existing field, return the rewritten value directly in config_updates. "
             "If the user says to use the default setup, keep the current draft and say it is ready rather than inventing new changes. "
-            "If the user says things like go, get going, start it, launch it, or I'm ready, leave config_updates empty and say the run is ready to launch now. "
+            "If the user says things like go, get going, start it, start the simulation, launch it, launch the sim, do it, or I'm ready, leave config_updates empty, set launch_now true, and say the run is ready to launch now. "
+            "If the user merely talks about launch timing or says what should happen when launch eventually occurs, keep launch_now false and treat the content as setup guidance. "
             "If the user asks how to play or what happens next, answer simply: launch the run, hear the documentary intro, workshop ideas with advisors, run polls, talk to citizens, debate, then face the vote. "
             "If the user is ambiguous, leave config_updates empty and ask a concise follow-up question instead of inventing details. "
             "Do not give generic encouragement, vague summaries, or next-step filler when a direct edit can be applied now. "
@@ -1049,7 +1284,7 @@ class OrchestratorService:
         )
         return (
             "You are designing the advisory table for an AGI transition political simulation. "
-            "Return a complete council_roster array with 3 to 5 advisors. Four is the normal default unless the setting clearly wants fewer or more. "
+            "Return a complete council_roster array with 3 to 6 advisors. For a broad national run, five or six advisors is usually better than four because the room needs real disagreement without crowding. "
             "This is a private working table, not a television panel. The cast should feel like real people the player would actually want in the room for this specific country, institution, and future. "
             "Use the setup context to decide the specialties, names, and points of view. Do not fall back to the same stock U.S. presidential quartet unless the context genuinely calls for it. "
             "If the setting is a default U.S. run, keep the roster grounded in that context; if the player points to another country, state, city, ministry, school system, university, or hospital, let that setting shape the cast. "
@@ -1073,21 +1308,17 @@ class OrchestratorService:
 
     def _setup_story_memo(self, config: SimulationConfig) -> str:
         parts: list[str] = []
-        if str(config.region_focus or "").strip():
-            parts.append(f"Regional emphasis: {config.region_focus}.")
-        if str(config.topic_lens or "").strip():
-            parts.append(f"Topic emphasis: {config.topic_lens}.")
         if str(config.premise or "").strip():
-            parts.append(f"Player premise: {config.premise} Treat that as a live creative prior, not background flavor.")
+            parts.append(f"Creative prior: {config.premise}")
         if str(config.stakes or "").strip():
-            parts.append(f"Political stakes: {config.stakes}.")
-        if getattr(config, "council_roster", None):
-            roster_summary = "; ".join(
-                f"{advisor.name} on {advisor.room_role.lower()} ({advisor.country_role})"
-                for advisor in config.council_roster[:6]
-            )
-            if roster_summary:
-                parts.append(f"Advisory cast in frame: {roster_summary}.")
+            parts.append(f"Political stakes: {config.stakes}")
+        focus_bits = [
+            value.strip()
+            for value in (str(config.region_focus or ""), str(config.topic_lens or ""))
+            if value.strip()
+        ]
+        if focus_bits:
+            parts.append(f"Focus: {'; '.join(focus_bits[:2])}")
         if not parts:
             parts.append("The setup stays broad and national unless the player narrows it.")
         return " ".join(parts)
@@ -1164,7 +1395,7 @@ class OrchestratorService:
             used_keys.add(key)
             used_names.add(normalized_name)
             used_voices.add(voice)
-        return normalized[:5]
+        return normalized[:6]
 
     def _dummy_council_roster(self, config: SimulationConfig) -> list[CouncilAdvisorProfile]:
         anchor = " ".join(
@@ -1177,7 +1408,7 @@ class OrchestratorService:
             )
             if part and part.strip()
         )
-        phase_anchor = self._starting_phase_anchor(config.premise, config.topic_lens, config.stakes)
+        phase_anchor = self._config_phase_anchor(config)
         education_mode = any(token in anchor for token in ("school", "education", "student", "teacher", "learning"))
         local_state_mode = any(token in anchor for token in ("state", "governor", "city", "municipal", "local"))
         names = self._dummy_council_names(config)
@@ -1187,6 +1418,7 @@ class OrchestratorService:
                 ("families", names[1], "Families", "family and equity advisor", "tracks who gets help at home, who falls behind, what parents trust, and where machine help changes homework, discipline, or child care", "cares most about whether ordinary families can actually use the new tools without being sorted by money or time"),
                 ("operations", names[2], "Operations", "school operations and finance advisor", "tracks procurement, staffing, device access, transport, and which promises can really be delivered across uneven schools", "starts from what the system can actually execute this year rather than what sounds inspiring"),
                 ("politics", names[3], "Politics", "public mandate advisor", "tracks coalition mood, legitimacy, union pressure, parent trust, and which lines the player can defend in public", "likes visible gains but punishes anything that sounds fake, rushed, or unfair"),
+                ("innovation", names[4], "Innovation", "education technology advisor", "tracks where tutoring, assessment, and project tools genuinely raise mastery or free teacher time", "defends useful classroom diffusion when rules would freeze the gains before families see them"),
             ]
         elif local_state_mode:
             seed = [
@@ -1194,6 +1426,7 @@ class OrchestratorService:
                 ("services", names[1], "Services", "public service delivery advisor", "tracks schools, care, permits, benefits, dispatch, and whether citizens see the state as more capable or just more automated", "backs practical upgrades but distrusts brittle rollouts and fake savings"),
                 ("infrastructure", names[2], "Infrastructure", "infrastructure and resilience advisor", "tracks grid, water, logistics, housing, disaster readiness, and the physical bottlenecks software cannot wish away", "pushes buildout and redundancy before elegant policy promises"),
                 ("politics", names[3], "Politics", "political strategy advisor", "tracks coalition mood, legitimacy, regional identity, and how ordinary people read machine gains against local winners and losers", "cares about whether the story sounds fair, concrete, and locally believable"),
+                ("industry", names[4], "Industry", "local industry advisor", "tracks factories, depots, contractors, small employers, and which machine tools let local firms actually expand", "leans toward market access and buildout before complicated allocation schemes"),
             ]
         elif phase_anchor >= 3:
             seed = [
@@ -1201,6 +1434,8 @@ class OrchestratorService:
                 ("capacity", names[1], "Capacity", "productive systems advisor", "tracks compute, power, robotics rollout, industrial expansion, and where faster buildout still creates visible gains people would fight to keep", "leans pro-diffusion when abundance is real and broadly felt"),
                 ("state", names[2], "State", "state capacity and security advisor", "tracks procurement, strategic dependence, allied supply, coercion risk, and which institutions can still secure essential systems in the altered settlement", "starts from resilience and execution but will favor openness when it makes the polity stronger"),
                 ("politics", names[3], "Politics", "political coalition advisor", "tracks legitimacy, class settlement, resentment, and how voters read the new order when daily life no longer resembles the old labor market", "wants a settlement people can narrate as fair, durable, and worth defending"),
+                ("markets", names[4], "Markets", "market structure advisor", "tracks platform tolls, firm entry, ownership claims, and whether new abundance becomes competition or rents", "often argues for opening markets before building a new rationing state"),
+                ("security", names[5], "Security", "strategic security advisor", "tracks military dependence, sabotage, critical infrastructure, and foreign machine blocs", "will trade some speed for defensible control when the national risk is real"),
             ]
         else:
             seed = [
@@ -1208,6 +1443,8 @@ class OrchestratorService:
                 ("innovation", names[1], "Innovation", "innovation and frontier systems advisor", "tracks research speed, capability diffusion, tooling access, robotics rollout, and whether smaller firms and public institutions can actually use the frontier", "pushes capability forward first but dislikes chokepoints and cartelized access"),
                 ("politics", names[2], "Politics", "political strategy advisor", "tracks coalition mood, public tolerance for change, rhetorical traps, and which lines the player can defend in public without sounding evasive or bloodless", "sharp on voter mood and willing to defend speed when people can see the gain"),
                 ("state", names[3], "Security", "state capacity and national resilience advisor", "tracks infrastructure, strategic dependence, resilience, war risk, and what the state can truly procure, secure, or defend in practice", "starts from resilience and execution, then asks what openness makes the country stronger"),
+                ("labor", names[4], "Labor", "labor market advisor", "tracks hiring, layoffs, bargaining power, career ladders, and what households do when machine services undercut old income", "does not pretend every worker becomes a reviewer; asks how people buy scarce goods afterward"),
+                ("markets", names[5], "Markets", "competition and markets advisor", "tracks firm formation, incumbent defense, platform tolls, and whether useful AI reaches small businesses", "often says leave working markets alone unless a real bottleneck or tollgate appears"),
             ]
         roster = [
             CouncilAdvisorProfile(
@@ -1241,8 +1478,6 @@ class OrchestratorService:
         applied_updates = [f"{field} -> {value}" for field, value in update_payload.items()]
         missing = self._setup_missing_fields(preview_config)
         readiness = "ready" if not missing else "needs_input"
-        normalized = user_text.lower()
-        launch_cues = ("i'm ready", "im ready", "ready to go", "go", "get going", "start it", "start the run", "launch it")
         if applied_updates:
             reply = self._setup_chamber_reply_for_updates(
                 update_payload,
@@ -1251,9 +1486,12 @@ class OrchestratorService:
                     str(update_payload.get("premise") or ""),
                     str(update_payload.get("topic_lens") or ""),
                     str(update_payload.get("stakes") or ""),
+                    str(update_payload.get("population_description") or ""),
+                    str(update_payload.get("region_focus") or ""),
+                    str(update_payload.get("country") or ""),
                 ),
             )
-        elif any(cue in normalized for cue in launch_cues):
+        elif self._direct_setup_launch_intent(user_text):
             reply = "The broad default run still holds. It is ready to launch now."
         else:
             reply = "The broad default run still holds."
@@ -1271,10 +1509,29 @@ class OrchestratorService:
         return SetupChamberGuidance(
             chamber_reply=reply,
             readiness=readiness,
+            launch_now=self._direct_setup_launch_intent(user_text) and readiness == "ready" and not applied_updates,
             applied_updates=applied_updates,
             open_questions=open_questions,
             next_actions=next_actions,
             config_updates=updates,
+        )
+
+    def _direct_setup_launch_intent(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().replace("’", "'").split()).rstrip(".!?")
+        if not normalized:
+            return False
+        direct_command = (
+            r"(?:go|go ahead|go for it|do it|kick it off|get going|start|start it|start this|start from here|"
+            r"start the run|start the sim|start simulation|start the simulation|launch|launch it|launch this|"
+            r"launch the run|launch the sim|launch simulation|launch the simulation|run it|run this|begin|begin it|"
+            r"let's begin|lets begin)"
+        )
+        return bool(
+            re.match(rf"^(?:ok(?:ay)?|yeah|yes|yep|sure|alright|all right|cool|great|please|now|then|so)[, ]+{direct_command}(?:[, ]*(?:please|now))?$", normalized)
+            or re.match(rf"^{direct_command}(?:[, ]*(?:please|now))?$", normalized)
+            or re.match(rf"^(?:i'm ready|im ready|ready to go|broad setup is fine|use the default(?: broad)?(?: u\.?s\.?)?(?: run| setup)?)(?:[, ]+{direct_command})?$", normalized)
+            or re.match(r"^(?:let's|lets|we should|i think we should|i guess we should)\s+(?:launch|start|begin|run)\s+(?:it|this|the run|the sim|the simulation)$", normalized)
+            or re.match(rf"^(?:that's good|that is good|sounds good|looks good|default looks good|default is fine),?\s+{direct_command}$", normalized)
         )
 
     def _dummy_setup_patch_from_text(self, text: str) -> SetupSessionPatchRequest:
@@ -1315,8 +1572,6 @@ class OrchestratorService:
             persona_count=self._extract_int_value(text, "persona_count", r"(\d+)\s*(?:personas?|agents?|citizens?|people)"),
             stage_count=self._extract_int_value(text, "stage_count", r"(\d+)\s*(?:-\s*)?stages?"),
             visual_style=visual_style,
-            orchestrator_reasoning_effort=self._extract_reasoning_effort(text),
-            realtime_model=self._extract_labeled_value(text, "realtime_model"),
         )
 
     def _extract_labeled_value(self, text: str, label: str) -> str | None:
@@ -1339,16 +1594,6 @@ class OrchestratorService:
         if match:
             return int(match.group(1))
         return None
-
-    def _extract_reasoning_effort(self, text: str) -> str | None:
-        labeled = self._extract_labeled_value(text, "orchestrator_reasoning_effort") or self._extract_labeled_value(
-            text,
-            "reasoning",
-        )
-        if labeled is None:
-            return None
-        normalized = labeled.lower()
-        return normalized if normalized in {"none", "low", "medium", "high"} else None
 
     def _extract_future_setup_brief(self, text: str) -> str | None:
         sentences = self._sentence_split(text)
@@ -1373,14 +1618,20 @@ class OrchestratorService:
             "substrate of the economy",
             "advanced ai world",
             "advanced ai future",
-            "radical future",
-            "radical agi future",
-            "radical ai future",
+            "structurally transformed future",
+            "deeply changed agi future",
+            "deeply changed ai future",
             "far future",
             "future economy",
             "different economy",
             "different world",
             "deeply transformed",
+            "mid-century",
+            "mid century",
+            "2040s",
+            "2050s",
+            "thirty years from now",
+            "thirty years in the future",
             "much farther in the future",
             "10 years in the future",
             "15 years in the future",
@@ -1398,13 +1649,7 @@ class OrchestratorService:
         picked: list[str] = []
         for sentence in sentences:
             lowered = sentence.lower()
-            if any(cue in lowered for cue in cue_phrases) or self._advanced_capability_signal(lowered) or re.search(
-                r"\b(?:in\s+)?(?:\d{1,2}|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
-                r"(?:\s*(?:-|to)\s*(?:\d{1,2}|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty))?"
-                r"\s+years?\s+(?:from now|ahead|in the future|after|out|later|down the line|down the road)\b"
-                r"|\bin\s+(?:\d{1,2}|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+years?\b",
-                lowered,
-            ):
+            if any(cue in lowered for cue in cue_phrases) or self._advanced_capability_signal(lowered) or self._future_year_signal(lowered) is not None:
                 picked.append(" ".join(sentence.split()))
         if not picked:
             return None
@@ -1463,6 +1708,8 @@ class OrchestratorService:
             "substrate of the economy",
             "radical ai",
             "radical agi",
+            "structurally changed ai",
+            "deeply changed agi",
             "structurally remade",
             "different economy",
             "different world",
@@ -1590,7 +1837,6 @@ class OrchestratorService:
 
     def _setup_missing_fields(self, config: SimulationConfig) -> list[str]:
         required_fields = [
-            "title",
             "country",
             "player_name",
             "player_role",
@@ -1606,19 +1852,188 @@ class OrchestratorService:
         return normalized or fallback
 
     def _natural_start_point_note(self, config: SimulationConfig) -> str:
-        phase_anchor = self._starting_phase_anchor(
-            config.premise,
-            config.topic_lens,
-            config.stakes,
-        )
+        phase_anchor = self._config_phase_anchor(config)
         if phase_anchor >= 3:
             return "The setup points toward a later and more structurally changed AI society; begin from that altered settlement rather than easing in from the present, and make the new baseline of income, access, daily routine, ownership, and political order legible immediately."
         if phase_anchor >= 1:
             return "The setup points later into the transition, with deeper AI diffusion and institutional change already underway; do not retreat to a timid near-present frame once the player asked for a later world."
-        return "Even the broad default run should begin at the first unmistakably changed settlement, not at a barely-updated 2026. Let the opening chapter show a real break in capability, prices, staffing, daily routine, and political conflict before you narrow to any local vignette."
+        return "The broad default run opens near the present, around 2026 or 2027. Keep the economy and state recognizable: uneven adoption, familiar institutions, and normal labor markets with visible pressure. AI can autonomously complete substantial knowledge-work tasks inside bounded workflows, but it is not yet running full jobs, teams, or whole institutions. Put AI in leading firms, households, vendors, pilots, back offices, and early public experiments, not everywhere at once. Show the first signs of service repricing, staffing pressure, and political conflict before narrowing to any local vignette."
+
+    def _year_guidance_note(
+        self,
+        config: SimulationConfig,
+        *,
+        stage_index: int,
+        stage_count: int,
+    ) -> str:
+        texts = [
+            config.premise,
+            config.topic_lens,
+            config.stakes,
+            config.region_focus,
+            config.population_description,
+        ]
+        explicit_years = max(
+            (years for text in texts if (years := self._future_year_signal(text)) is not None),
+            default=None,
+        )
+        anchor = self._starting_phase_anchor(*texts)
+        if explicit_years is not None:
+            stride = 1 if explicit_years < 6 else 2 if explicit_years < 14 else 3
+            target_year = 2026 + explicit_years + stage_index * stride
+            return (
+                f"The setup explicitly points about {explicit_years} years ahead. "
+                f"Chapter {stage_index + 1} should normally sit around {target_year} or nearby. "
+                "Do not slide back toward 2030 or 2031 unless the player clearly asked for a near-term run."
+            )
+        if anchor >= 4:
+            base_year, stride = 2045, 4
+        elif anchor >= 3:
+            base_year, stride = 2040, 3
+        elif anchor >= 2:
+            base_year, stride = 2034, 2
+        elif anchor >= 1:
+            base_year, stride = 2030, 1
+        else:
+            base_year, stride = 2027, 1
+        target_year = self._default_stage_year(stage_index, stage_count) if anchor == 0 else base_year + stage_index * stride
+        if anchor >= 2:
+            return (
+                f"The setup implies a materially later settlement. "
+                f"Chapter {stage_index + 1} should usually feel like roughly {target_year} or later, not a near-present 2030-ish world by reflex."
+            )
+        if anchor >= 1:
+            return (
+                f"The opening chapter should already feel like a changed early settlement, closer to roughly {target_year} than to 2026, with real social and economic rearrangement already visible."
+            )
+        if anchor == 0 and stage_index == 0:
+            return (
+                "The default opening chapter should sit near 2026 or 2027. "
+                "Keep labor markets, institutions, prices, and politics recognizable. AI can do substantial autonomous knowledge-work tasks in bounded workflows, but not full jobs, durable teams, or whole administrative shops yet. Public institutions may pilot or procure it, but they should not broadly run on it."
+            )
+        if anchor == 0:
+            target_year = self._default_stage_year(stage_index, stage_count)
+            if stage_index == 1:
+                return (
+                    f"Chapter {stage_index + 1} in the default run should generally sit about four years after the opening, roughly {target_year}, unless continuity gives the orchestrator a better reason to vary it. "
+                    "This should feel like a good bit further along: more dependable agentic workflows, stronger firm restructuring, clearer labor-market pressure, and early institutional responses."
+                )
+            if stage_index == 2:
+                return (
+                    f"Chapter {stage_index + 1} in the default run should usually move to roughly {target_year} or nearby, about six years after chapter two unless continuity argues otherwise. "
+                    "Let the world become less like a normal office economy: some services may be near-free, some jobs may disappear, scarce physical goods may dominate household anxiety, and new income or ownership arrangements may become politically central."
+                )
+            return (
+                f"Chapter {stage_index + 1} in the default run should usually move to roughly {target_year} or nearby, with gaps after chapter three widening as capability, politics, and crises accelerate. "
+                "Let the world become less like a normal office economy: some services may be near-free, some jobs may disappear, scarce physical goods may dominate household anxiety, and new income or ownership arrangements may become politically central."
+            )
+        if stage_count >= 4 and stage_index >= 2:
+            return (
+                f"By chapter {stage_index + 1}, the year can plausibly be around {target_year} if capability has advanced. "
+                "Let the social order change with the technology: some sectors may collapse or recompose, some services may become very cheap, and household security may depend on transfers, ownership, scarce goods, or machine-linked income rather than ordinary jobs alone."
+            )
+        return (
+            "After the near-present opening, keep advancing the default run with capability. Do not hold every chapter in a recognizable office-work economy once AI can do much of that work."
+        )
+
+    def _requested_start_year(self, config: SimulationConfig) -> int:
+        texts = [
+            config.premise,
+            config.topic_lens,
+            config.stakes,
+            config.region_focus,
+            config.population_description,
+        ]
+        explicit_years = max(
+            (years for text in texts if (years := self._future_year_signal(text)) is not None),
+            default=None,
+        )
+        if explicit_years is not None:
+            return 2026 + explicit_years
+        anchor = self._starting_phase_anchor(*texts)
+        if anchor >= 4:
+            return 2045
+        if anchor >= 3:
+            return 2040
+        if anchor >= 2:
+            return 2034
+        if anchor >= 1:
+            return 2030
+        return 2027
+
+    def _default_stage_year(self, stage_index: int, stage_count: int) -> int:
+        if stage_index <= 0:
+            return 2027
+        offsets = [0, 4, 10, 17, 25, 34, 44, 55]
+        if stage_index < len(offsets):
+            return 2027 + offsets[stage_index]
+        extra_index = stage_index - (len(offsets) - 1)
+        return 2027 + offsets[-1] + extra_index * 12
 
     def _setup_direction_block(self, config: SimulationConfig) -> str:
         return self._setup_story_memo(config)
+
+    def _continuity_capsule(self, stage: StagePackage) -> str:
+        parts = [
+            f"{stage.title} ({stage.year_label}, {stage.phase_label}).",
+            self._clip(self._stage_opening_paragraph(stage.world_brief) or stage.montage_logline or stage.room_briefing, 280),
+        ]
+        if stage.resolution:
+            enacted = self._clip(stage.resolution.enacted_agenda, 180)
+            mandate = self._clip(stage.resolution.public_mandate, 140)
+            if enacted:
+                parts.append(f"Winner: {stage.resolution.winner}. Enacted agenda: {enacted}")
+            elif mandate:
+                parts.append(f"Winner: {stage.resolution.winner}. Mandate: {mandate}")
+            else:
+                parts.append(f"Winner: {stage.resolution.winner}.")
+        return " ".join(part.strip() for part in parts if part.strip())
+
+    def _settlement_ledger(self, stage: StagePackage) -> str:
+        opening = self._stage_capability_hint(stage.world_brief) or self._stage_opening_paragraph(stage.world_brief)
+        public_service, household, access = self._stage_settlement_hints(stage.world_brief)
+        firm, ownership = self._stage_institution_hints(stage.world_brief)
+        constraint = self._stage_constraint_hint(stage.world_brief)
+        split = self._stage_split_hint(stage.world_brief)
+        stat_lines = []
+        for stat in list(stage.macro_stats.values())[:6]:
+            detail = f" ({self._clip(stat.detail, 90)})" if stat.detail else ""
+            stat_lines.append(f"{stat.label}: {stat.value}{detail}")
+        rows = [
+            ("capability baseline", self._clip(opening, 260)),
+            ("household security", self._clip(household, 220)),
+            ("access rule", self._clip(access, 220)),
+            ("firms or work", self._clip(firm, 220)),
+            ("ownership or rents", self._clip(ownership, 220)),
+            ("public services", self._clip(public_service, 220)),
+            ("binding bottleneck", self._clip(constraint, 220)),
+            ("political fork", self._clip(split, 220)),
+            ("watched stats", "; ".join(stat_lines)),
+        ]
+        compact = [f"- {label}: {value}" for label, value in rows if value]
+        return "\n".join(compact) or "- No durable prior settlement has been established yet."
+
+    def _prior_resolution_block(self, stage: StagePackage | None) -> str:
+        if stage is None or stage.resolution is None:
+            return "- No prior election has selected an enacted agenda yet."
+        resolution = stage.resolution
+        lines = [
+            f"- winner: {resolution.winner}",
+            f"- enacted agenda: {self._clip(resolution.enacted_agenda, 420)}",
+        ]
+        if resolution.public_mandate:
+            lines.append(f"- public mandate: {self._clip(resolution.public_mandate, 260)}")
+        if resolution.player_agenda_points:
+            lines.append(
+                "- player agenda points: "
+                + "; ".join(self._clip(point, 120) for point in resolution.player_agenda_points[:5])
+            )
+        if resolution.opponent_agenda_points:
+            lines.append(
+                "- opponent agenda points: "
+                + "; ".join(self._clip(point, 120) for point in resolution.opponent_agenda_points[:5])
+            )
+        return "\n".join(line for line in lines if line.strip())
 
     def _stage_reads_like_later_settlement(self, stage: StagePackage) -> bool:
         combined = " ".join([str(stage.phase_label or ""), str(stage.world_brief or "")]).lower()
@@ -1711,10 +2126,6 @@ class OrchestratorService:
             "from",
             "at",
             "on",
-            "off",
-            "up",
-            "down",
-            "out",
         }
         words = cleaned.split()
         while len(words) > 1 and words[-1].lower() in trailing_connectors:
@@ -2070,6 +2481,13 @@ class OrchestratorService:
                 token in lowered
                 for token in (
                     "got cheaper",
+                    "near-free",
+                    "free",
+                    "cheap expertise",
+                    "expert help",
+                    "prices fell",
+                    "price fell",
+                    "costs fell",
                     "cost far less",
                     "purchasing power rose",
                     "widely defended",
@@ -2128,6 +2546,20 @@ class OrchestratorService:
                     "chokepoint",
                     "dependence",
                     "vulnerable to service rules",
+                    "housing",
+                    "rent",
+                    "clinic",
+                    "healthcare",
+                    "bed",
+                    "caregiver",
+                    "nurse",
+                    "construction",
+                    "permit",
+                    "power",
+                    "energy",
+                    "grid",
+                    "robot",
+                    "physical",
                     "rationed",
                     "harder to govern",
                     "bottleneck",
@@ -2609,83 +3041,6 @@ class OrchestratorService:
         cleaned = self._plain_language_cleanup(" ".join(str(text or "").split())).strip(" -")
         if not cleaned:
             return ""
-        rewrites = (
-            (
-                r"^A capable AI service can do almost all screen work end to end:.*$",
-                "AI services now handle most screen work end to end.",
-            ),
-            (
-                r"^Robot fleets handle a large share of .*$",
-                "Robot fleets now handle much of logistics, factory tending, and routine physical upkeep.",
-            ),
-            (
-                r"^Money usually arrives from three streams:.*$",
-                "Many households now live on a mix of machine checks, public supports, and bursts of human work.",
-            ),
-            (
-                r"^A family's money usually arrives in three streams:.*$",
-                "Many households now live on public transfers, bursts of human work, and whatever local ownership they still hold.",
-            ),
-            (
-                r"^A family[’']s money usually arrives in three streams:.*$",
-                "Many households now live on public transfers, bursts of human work, and whatever local ownership they still hold.",
-            ),
-            (
-                r"^Employment statistics still exist, but they no longer explain who feels secure\.$",
-                "Old labor metrics still exist, but they no longer explain who feels secure.",
-            ),
-            (
-                r"^Security now depends more on access than on occupation\.$",
-                "Security now depends more on access than on occupation.",
-            ),
-            (
-                r"^A handful of cloud, energy, and robotics groups control much of the productive stack, and their contracts shape what states, schools, and hospitals can actually do\.$",
-                "A few cloud, energy, and robotics groups still control the productive stack.",
-            ),
-            (
-                r"^A few companies still control much of the model training stack, chip design, cloud fabric, and agent marketplaces, while states fight to host the power and packaging that make autonomy cheap\.$",
-                "A few companies still control the model, cloud, and chip stack.",
-            ),
-            (
-                r"^They are arguing over who gets first claim on its output\.$",
-                "The fight is over who gets first claim on machine output.",
-            ),
-            (
-                r"^The other says heavy public claims will slow innovation just as China and its partners push hard on chips, industrial robotics, and strategic minerals\.$",
-                "Heavy public claims could slow innovation while rival blocs push hard on chips and industrial robotics.",
-            ),
-            (
-                r"^One side wants the machine economy treated like a public utility:.*$",
-                "One side wants the machine economy treated like a public utility.",
-            ),
-            (
-                r"^The fight is over whether compute acts like a public utility with dividends and reserved access, or like a toll road owned by a few platforms.*$",
-                "The fight is over whether compute stays a public utility or hardens into a toll road.",
-            ),
-            (
-                r"^Most adults have a public AI account, a monthly machine check, and some claim on cheap automated service even when they do not have a boss\.$",
-                "Most adults now have a public AI account and some kind of machine-income floor.",
-            ),
-            (
-                r"^Most adults have a public AI account, a monthly machine check, and some claim on cheap automated service.*$",
-                "Most adults now have a public AI account and some kind of machine-income floor.",
-            ),
-            (
-                r"^Software, accounting, tutoring, translation, claims filing, tax prep, scheduling, and basic legal drafting became so cheap that they feel more like utilities than purchases\.$",
-                "Routine digital services became so cheap they feel more like utilities than purchases.",
-            ),
-            (
-                r"^The numbers people watch are compute allowance, housing cost, utility reliability, queue priority, and whether their county still has fast access to a top-tier model\.$",
-                "People now watch compute allowance, housing cost, utility reliability, and queue priority more than old labor statistics.",
-            ),
-        )
-        for pattern, replacement in rewrites:
-            if re.match(pattern, cleaned, flags=re.IGNORECASE):
-                return replacement
-        if ":" in cleaned and len(cleaned) > 176:
-            head = cleaned.split(":", 1)[0].strip()
-            if len(head.split()) >= 6:
-                cleaned = head
         cleaned = re.sub(r"\bthat once took weeks is usually resolved the same day\b", "now clears the same day", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\bFor many households, the old office week is gone\b", "For many households, the old office week is gone", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\bThe bottleneck everyone can feel is energy and compute\b", "The felt bottleneck is energy and compute", cleaned, flags=re.IGNORECASE)
@@ -2712,6 +3067,11 @@ class OrchestratorService:
             lambda match: f" {match.group(1).upper()}",
             cleaned,
             flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(and|but|or|so)\s+(Both|This|That|These|Those|They|It)\b",
+            lambda match: f"{match.group(1)} {match.group(2).lower()}",
+            cleaned,
         )
         cleaned = re.sub(r"\bmodels data and distribution\b", "models and distribution", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\bscreen based\b", "screen-based", cleaned, flags=re.IGNORECASE)
@@ -2754,15 +3114,22 @@ class OrchestratorService:
             "You are writing optional documentary side reels for the same AGI transition chapter. "
             "Think of them as short optional mini-documentaries the player can open while the main chapter is already live. "
             "Return three reels that reveal three different parts of the world a curious player would naturally want to understand better. "
-            "Each reel should make one surprising arrangement feel graspable in 3 or 4 beats, not restate the main montage. "
+            "Each reel should make one surprising arrangement feel graspable in 4 or 5 beats, not restate the main montage. "
             "Across the set, vary the angle and rhythm. One reel might clarify household life, another who owns the gains, another how a public or physical system actually works now. "
             "If the chapter is far from the present, let at least one reel show an arrangement that would have sounded extraordinary in 2026 but feels normal here. "
             "Do not stop at office automation or faster admin when the world itself changed more deeply than that. "
+            "At least one reel should be a price-and-quantity story: what became cheap, what stayed capacity constrained, and how people adapted. "
+            "At least one reel should show firm dynamics: smaller firms, incumbent bundling, vertical integration, agent labor, platform tolls, or new entry. "
+            "Give the viewer the underlying mechanism: what got cheap, what got scarce, who now has leverage, who lost a ladder, who gained access, or what institution learned a new operating logic. "
+            "Include enough context that a general audience understands the economic mechanism without already knowing the vocabulary: what changed, what people do differently, who pays, and who is arguing for which public rule. "
+            "When policy appears, talk about public pressures or proposals under consideration, not candidate campaign stories. Explain the trade in plain words. "
             "Be plainspoken, vivid, and specific. Avoid named-place filler, memo prose, vague futurism, slogan lines, classroom stiffness, and consultant fog. "
-            "Each reel should contain one surprising claim, one lived scene, one mechanism, and one unresolved pressure. "
+            "Across 4 or 5 beats, each reel should make one surprising arrangement legible. "
             "Do not make every beat sound like a thesis sentence. Open beats with an observed fact, scene, or reversal when you can. "
             "Do not make the set feel like a curriculum. It should feel like three smart side documentaries. "
             "Explain the mechanism like you are talking to an interested friend in one pass. "
+            "Avoid comma-stuffed lines and serial category lists. A good beat usually has one subject, one verb, and one changed fact. "
+            "Do not tell candidate stories or write campaign material. The reel is about the world the candidates must govern. "
             "Titles should sound inviting without becoming theatrical. "
             "The question field must be a specific viewer-facing question in natural language. It is not an empty field and not a generic placeholder. "
             "Image prompts should stay painterly and civic, with impressionist abstraction, visible institutions, and real human activity. Lean toward a Cezanne-Monet-Matisse hybrid with thicker layered brushstrokes, softened faces, planar color, and occasional pointillist light instead of glossy realism, CGI sheen, empty hologram spectacle, or cartoon imagery."
@@ -2773,6 +3140,10 @@ class OrchestratorService:
             f"- {citizen.display_name}, {citizen.role} in {citizen.region}: {self._clip(citizen.current_update or citizen.summary, 150)}"
             for citizen in stage.sample_citizens[:4]
         ) or "- No citizen snapshots yet."
+        stat_lines = "; ".join(
+            f"{stat.label}: {stat.value}" for stat in list(stage.macro_stats.values())[:6]
+        ) or "No macro stats yet."
+        anchors = self._settlement_ledger(stage)
         return (
             f"Country: {config.country}\n"
             f"Setup direction from the player:\n{self._setup_direction_block(config)}\n"
@@ -2781,6 +3152,8 @@ class OrchestratorService:
             f"Year label: {stage.year_label}\n"
             f"Main montage logline: {stage.montage_logline}\n"
             f"World brief: {stage.world_brief}\n"
+            f"Macro stats: {stat_lines}\n"
+            f"Durable world anchors:\n{anchors}\n"
             f"Visual style: {config.visual_style}\n\n"
             "Public pressures already visible:\n"
             f"{self._salient_poll_lines(stage.poll_summaries, limit=4)}\n\n"
@@ -2789,19 +3162,31 @@ class OrchestratorService:
             "Return exactly 3 featurettes.\n"
             "Make them feel like three genuinely different reasons to click deeper, not a curriculum and not paraphrases of each other.\n"
             "At least one reel should help a player feel the baseline of the world directly: what pays the bills now, what grants access, what people do with their days, or what replaced the old week.\n"
+            "At least one reel should explain a live public-policy fight in plain terms: what people are pushing for, what rule or institution would change, what useful thing it protects, and what useful thing it might slow or distort.\n"
+            "At least one reel should explain the economy itself: where output or income now comes from, what got cheap, what stayed scarce, and why ordinary people notice.\n"
             "If the chapter is far enough from the present, let at least one reel reveal an arrangement that would have sounded extraordinary in 2026 but feels normal here.\n"
             "If one reel follows everyday life, make it about how ordinary life is actually secured now, not a bundle of handy AI chores.\n"
+            "If one reel follows the macroeconomy, make a real economic mechanism visible: prices, output, labor bargaining, ownership, energy, compute, fiscal transfers, or firm structure.\n"
+            "If the chapter is later or stranger, show the new settlement on its own terms. Do not pull every reel back to errors, wait times, paperwork, or a normal job with better software.\n"
+            "At least one reel in a changed world should make a post-2026 arrangement feel normal: machine income, model-credit rationing, cheap expert care, a school week after grading disappeared, a small firm with mostly agent labor, a public office with real-time capacity, or a household bargaining over compute access.\n"
+            "Good reel subjects include the free expert layer, the two-person firm, the clinic after diagnosis got cheap, the housing bottleneck after planning got easy, the disappearing junior ladder, the energy queue, the robot-constrained warehouse, and the public AI account people actually like.\n"
+            "Prefer subjects that name mechanisms or objects instead of categories: the account that pays rent, the permit desk that finally answers, the cheap clinic roster, the compute contract, the model-credit card, the school week after grading disappeared.\n"
             "For each featurette, provide:\n"
             "- a short subject label of 2 to 5 words\n"
             "- one short natural-language question the reel answers for the player\n"
             "- a title that sounds like a documentary chapter card\n"
             "- a logline of about 18 to 30 words\n"
-            "- 3 or 4 narrative beats in coherent order\n"
+            "- 4 or 5 narrative beats in coherent order\n"
             "- fresh prose and a fresh mechanism, not warmed-over stage summary lines\n"
             "- begin with a scene, fact, or reversal rather than a thesis sentence when possible\n"
+            "- make the question ask what changed about one concrete mechanism for one kind of person, not what this future reveals in general\n"
             "- plain, understandable detail: what changed, why it matters, and what money, access, staffing, ownership, or control channel now does the work\n"
-            "- one clear mechanism and one human consequence per beat\n"
+            "- each beat should do one job only: observed scene, changed fact, human consequence, or unresolved pressure\n"
+            "- make the prose flow like a mini documentary, not a stack of noun phrases\n"
+            "- avoid stacked mini-theses and avoid serial lists like A, B, C, and D inside a single beat\n"
+            "- use shorter sentences that explain rather than name-drop; the viewer should understand the mechanism after hearing the line once\n"
             "- at most one local vignette beat per featurette unless a place is doing real causal work\n"
+            "- do not write candidate biographies, campaign arcs, or speeches\n"
             "- often the best set includes a reel that reveals a social or economic arrangement that sounds materially post-current to a 2026 viewer, not just a stronger version of today's workflow tools"
         )
 
@@ -2809,34 +3194,45 @@ class OrchestratorService:
         later_world_requested = self._setup_implies_later_settlement(config)
         instructions = [
             "You are writing one chapter of an AGI transition simulation.",
-            "Most of the job is to write one lucid mini-essay about the world as it is now.",
-            "Treat the required fields as light wrappers around one authored chapter, not as separate chores.",
-            "Honor the player's natural-language setup directly. There is no hidden mode and no fixed staircase.",
-            "Write like future reportage in plain English, not like a briefing deck.",
-            "Start with the new baseline: what capable systems can broadly do now, what became ordinary, and what stopped being the main thing people organize life around.",
-            "Then show how households, firms, schools, clinics, public offices, and politics actually live inside that baseline.",
-            "Five to ten years ahead should often feel materially unlike 2026. If AI can do most screen work, let professions, middle layers, household routine, public services, and geopolitics change accordingly.",
-            "Assume a fast AI timeline by default. Do not retreat to mild tool-improvement stories unless the player's setup clearly demands a slower world.",
-            "Lead with a real gain before the strain so the audience understands why adoption kept going.",
-            "Explain arrangements plainly: how people get money, access, expertise, schooling, care, permits, status, or security now.",
-            "If older metrics like unemployment or the normal job week no longer organize life, say what people watch instead.",
-            "By later chapters, do not keep replaying the same transfer-and-queue story unless it is still plainly the core of the country. Advance the arrangement into class structure, regional growth, ownership, public-service form, family routine, or geopolitical leverage.",
-            "If a chapter repeats a prior motif, make the repetition meaningful by showing what institution, class map, or daily routine formed around it.",
-            "A later chapter should often make a 2026 reader feel that the social order itself moved, not just the workflow tools.",
-            "Use rough numbers only when they clarify. Avoid consultant fog, slogan writing, and comma-heavy inventories.",
-            "Do not reuse the same opening formula from chapter to chapter. Avoid stock openers like 'The new baseline is...' unless it is genuinely the strongest sentence that time.",
-            "Avoid house abstractions like settlement, bottleneck, live split, or causal story unless someone in the world would naturally say them.",
-            "Prefer concrete subjects: bills, compute allowance, queue rights, staffing ratios, depot shifts, permit delays, clinic capacity, school time, ownership claims, monthly transfers.",
-            "Write complete spoken sentences. Advisors, citizens, boards, and reels will inherit this chapter.",
+            "The main job is one strong world_brief: a compact free-form essay about the world. Everything else should support that essay cleanly.",
+            "Honor the player's natural-language setup directly. There is no hidden world-mode or transformation-mode parameter.",
+            "Write like clear future reportage, not a memo, not a deck, and not a list of trends.",
+            "Assume a fast but staged AI timeline by default. The opening chapter of the broad default should stay close to the present. Five to ten years ahead can look materially unlike 2026 when capability and adoption justify it.",
+            "Be flexible across horizons: a 2026 or 2027 opening can have stronger agents but should still show early adoption, normal institutions, partial pilots, and many unchanged routines. Later chapters or an explicitly future setup can be radically different.",
+            "The main engine of chapter-to-chapter change is AI progress and social uptake: what models, agents, robots, firms, states, and households can newly do. Policy usually changes the path around that engine, not the engine itself.",
+            "Make policy impact proportional. A small or symbolic policy should have small, partial effects. A huge, enforceable policy can redirect markets or institutions. Only truly overwhelming policy should stop broad capability diffusion.",
+            "The technology is wild enough that later worlds may sometimes move in discontinuous directions: breakthroughs, institutional collapse, wars, fiscal crises, new ownership settlements, local abundance, new forms of leisure, or public systems that suddenly work. Use these when the setup, stage, or prior choices make them plausible, not as random spectacle.",
+            "For the broad default run, chapter one should be near-present and economically recognizable, roughly 2026 or 2027: AI can autonomously complete substantial knowledge-work tasks, but it is not yet running full jobs, teams, or institutions end to end. Public institutions may pilot or procure it, but they should not broadly run on it yet. Chapter two should usually be roughly four years later, and chapter three roughly six years after that, with later gaps widening when the orchestrator judges that capability, politics, or crisis has accelerated the world.",
+            "Before writing, do one first-principles economic pass: if digital or machine labor is now cheap and capable at this stage, what happens to quantities, prices, firm structure, bargaining power, ownership claims, household time, and state capacity?",
+            "Privately build a production ledger before writing: which cognitive or service goods became cheap, which physical goods stayed scarce, where layoffs or job disappearance are real, which sectors collapse or recompose, what new human scarcities remain, how firm entry or incumbent defense changed, how housing or healthcare responds, and what abundance object people now like.",
+            "Do not treat inequality as the default master frame. Foreground distribution only when you can name the mechanism: price, quantity, ownership, bargaining, queue, permit, insurance rule, compute contract, service floor, or power bill.",
+            "When capable AI becomes the substrate for screen work, do not merely say workflows are faster. Rebuild the social arrangement around cheap expertise, software agents, machine-owned output, compute rents, model access, service guarantees, and the new meaning of a work week.",
+            "Start by locating the chapter's capability baseline: what systems broadly do now, what they still cannot do, what remains scarce or trusted only with people, and what the economy is reorganizing around.",
+            "Do not repair every displaced job by turning the worker into an AI reviewer. Review, legitimacy, taste, moral judgment, local trust, and governance can remain human niches, but in later stages many systems may self-check well enough that whole occupations simply shrink or vanish.",
+            "Treat layoffs and job disappearance as real possible channels, especially as digital services get cheap. Shorter weeks are one adjustment path, not the whole labor-market story.",
+            "When labor income weakens, make the household budget concrete: what buys rent, food, care, energy, transport, robot time, or other scarce goods that did not cheapen as fast as expertise?",
+            "Be willing to make the macro picture strange when the world is strange: conventional unemployment, participation, wage ladders, and GDP may become misleading or politically contested rather than stable background wallpaper.",
+            "Then make that changed fact touch something named and ordinary: a rent account, permit desk, clinic roster, school day, power contract, benefits portal, model-credit account, depot, union hall, farm co-op, or small firm.",
+            "Then explain how households get money, access, care, expertise, schooling, or security now; what people do with their week; what institution changed shape; and what political struggle matters. If labor income no longer clearly covers scarce goods, say what fills the gap: welfare, basic income, machine dividends, ownership shares, family support, public services, platform dependence, or nothing reliable yet. Choose the pieces that fit this scenario instead of forcing every category.",
+            "Lead with a real gain before the strain so the reader understands why adoption kept going.",
+            "Make the gains imaginative and concrete, not token optimism: cheaper expertise, more free time, tiny organizations doing big things, faster public services, better health or learning, new art and companionship, local production, or households receiving capability that used to belong only to firms.",
+            "Do not make the emotional weather reflexively grim. In every plausible chapter, show who is plainly better off, what they would hate to lose, and why heavy-handed restriction would anger some people.",
+            "The hard parts should arise because the gains are large enough to reorganize life, not because every paragraph needs a warning label.",
+            "If AI can do most screen work, do not leave the world full of ordinary 2026 office jobs by inertia. Say what replaced the old ladder and what people watch instead if classic labor metrics stopped carrying the story.",
+            "Avoid making the central story 'humans catch the edge cases' unless that is genuinely the binding economic constraint. A transformed world may instead be about cheap expertise, changed ownership, new public-service capacity, machine income, compute rents, energy buildout, robotics bottlenecks, sovereign capability blocs, or a new normal for leisure and status.",
+            "Let policy matter, but let technology diffusion and social uptake move the world more than policy unless policy is overwhelming.",
+            "Use rough numbers only when they clarify. Avoid buzzwords, consultant fog, and comma-heavy inventories. Prefer a few important mechanisms over a tour of everything. When a sentence starts to become a list, choose the one mechanism that matters and explain it.",
+            "Do not write a category tour or obey this prompt as a checklist. Choose the few causal mechanisms that matter for this chapter and make them coherent.",
+            "When policy restricts capability, show the useful thing people lose or the foreign benchmark they envy. When policy lets change run, show both the real gains and the real adjustment or capture risk.",
+            "Do not write candidate platforms or campaign arcs into the world. The player and opponent create those later.",
+            "Write complete sentences in plain English. Advisors, citizens, boards, and reels will inherit this chapter.",
         ]
         if later_world_requested:
             instructions.extend(
                 [
                     "Start from an already changed world.",
-                    "If the setup points later or stranger, let the opening sound materially post-current rather than like the present with louder adjectives.",
-                    "Make the altered baseline easy to feel early: how money arrives, how access is mediated, what many adults do with their time, and what power struggle matters most.",
-                    "Do not default to unemployment or hiring as the headline unless those older metrics still organize security here.",
-                    "The first paragraph should make the changed baseline easy to picture before it narrows.",
+                    "Make the opening paragraph materially post-current rather than the present with louder adjectives.",
+                    "In that opening paragraph, make clear what displaced the old job ladder, what now carries household security or access, and one institution that no longer runs on 2026 logic.",
                 ]
             )
         return " ".join(instructions)
@@ -2848,6 +3244,7 @@ class OrchestratorService:
         stage_index: int,
         stage_count: int,
         phase: dict[str, str],
+        prior_stages: list[StagePackage] | None = None,
         previous_stage: StagePackage | None,
         tracking: StageTracking | None,
         poll_summaries: list[PollSummary],
@@ -2856,127 +3253,131 @@ class OrchestratorService:
         queued_poll_questions: list[str],
     ) -> str:
         setup_direction = self._setup_direction_block(config)
-        later_world_requested = self._setup_implies_later_settlement(config)
-        continuity_block = (
-            "This is the opening chapter. Build directly from the user's setup language and the natural starting note. "
-            f"Natural opening note: {self._natural_start_point_note(config)}."
-        )
-        if previous_stage:
-            previous_resolution = previous_stage.resolution
-            transition_lines = self._transition_lines(previous_stage)
-            binding_constraint = self._binding_constraint(previous_stage)
-            prior_gain = self._stage_upside_hint(previous_stage.world_brief) or transition_lines
-            prior_split = self._stage_split_hint(previous_stage.world_brief) or (
-                "how the gains are spreading and who controls them"
-            )
-            continuity_block = (
-                f"The last chapter was {previous_stage.title} ({previous_stage.phase_label}, {previous_stage.year_label}). "
-                f"Since then, these changes are plainly visible: {transition_lines}. "
-                f"One gain that stuck is {prior_gain}. "
-                f"What still binds is {binding_constraint}. "
-                f"The live unresolved question now is {prior_split}. "
-            )
-            if previous_resolution:
-                player_won_last_election = previous_resolution.winner == config.player_name
-                continuity_block += (
-                    f"{previous_resolution.winner} emerged from the last election with {previous_resolution.public_mandate}. "
-                    f"{'Voters rewarded the player with office or another term.' if player_won_last_election else 'Voters turned toward the opponent or kept the player out of office.'} "
-                    f"The agenda that actually took effect was: {previous_resolution.enacted_agenda}. "
-                    f"Election takeaway: {previous_resolution.election_takeaway or 'No special takeaway was recorded.'} "
-                    "Treat policy as background unless it clearly changed access, prices, institutions, or geopolitical posture in ordinary life."
-                )
-        tracking_block = ", ".join(f"{metric.label} {metric.display}" for metric in tracking.as_list()) if tracking else "no prior tracking yet"
-        poll_block = self._salient_poll_lines(poll_summaries, limit=5) or "no prior polls yet"
-        policy_notes_block = (
-            "; ".join(previous_stage.policy_notes[:6])
+        public_memo = ", ".join(f"{metric.label} {metric.display}" for metric in tracking.as_list()) if tracking else "No tracked mood yet."
+        poll_memo = self._salient_poll_lines(poll_summaries, limit=4) or "No prior polls yet."
+        board_memo = (
+            "; ".join(previous_stage.policy_notes[:5])
             if previous_stage and previous_stage.policy_notes
-            else "none yet"
+            else "No standing policy board yet."
         )
-        chapter_guardrails = []
-        if stage_index == 0 and not later_world_requested:
-            chapter_guardrails.extend(
-                [
-                    "- this is the opening stage of the default run, so stay near-term but not timid: the capability break should already feel socially and economically real",
-                    "- do not jump straight to collapse or universal robot saturation, but do show a genuine shift in leverage, access, and lived routine",
-                ]
+        continuity_source = prior_stages or []
+        if continuity_source:
+            continuity_block = "\n".join(
+                f"- Chapter {index}: {self._continuity_capsule(stage)}"
+                for index, stage in enumerate(continuity_source, start=1)
             )
-        elif stage_index == 0 and later_world_requested:
-            chapter_guardrails.extend(
-                [
-                    "- the setup already points later into the transition, so do not ease back toward the present out of caution",
-                    "- make at least one changed social or economic norm legible immediately: income, access, staffing, routine, public service, ownership, or geopolitics",
-                ]
+        else:
+            continuity_block = (
+                "Opening chapter.\n"
+                f"Starting note: {self._natural_start_point_note(config)}\n"
             )
-        if stage_index >= 1:
-            chapter_guardrails.extend(
-                [
-                    "- by chapter two onward, the world should already move beyond a normal office-week baseline unless the earlier chapter clearly kept that world intact",
-                    "- name the new order plainly: what pays bills, how people get access, what replaced old staffing ladders, and what bottleneck or power fight now matters",
-                ]
-            )
-        if stage_index >= max(1, stage_count - 2):
-            chapter_guardrails.extend(
-                [
-                    "- by this point the world may be radically different from 2026 if the mechanism supports it; let changed institutions and daily routines show up plainly",
-                    "- do not preserve a normal office-world baseline by inertia once the chapter has moved past it",
-                ]
-            )
-        chapter_guardrail_block = "\n".join(chapter_guardrails)
-        public_memo = (
-            f"Current public read: {tracking_block}. "
-            f"Recent polling cues: {poll_block}. "
-            f"Prior working board: {policy_notes_block}. "
-            f"Queued custom poll interests: {'; '.join(queued_poll_questions) if queued_poll_questions else 'none'}."
+        prior_settlement = (
+            self._settlement_ledger(previous_stage)
+            if previous_stage is not None
+            else "- Opening chapter: no prior settlement yet. Establish the baseline plainly."
         )
-        setup_memo = (
-            f"This run is set in {config.country}. "
-            f"The player is {config.player_name}, {config.player_role}, facing {config.opponent_name}, {config.opponent_role}. "
-            f"The sampled population is {config.population_description}. "
-            f"The player's setup direction was: {setup_direction}."
+        prior_resolution = (
+            self._prior_resolution_block(previous_stage)
+            if previous_stage is not None
+            else "No prior election has selected an enacted agenda yet."
         )
-        chapter_memo = (
-            f"This is chapter {stage_index + 1} of {stage_count}. "
-            f"The chapter posture is {phase['label']}. {phase['brief']}"
+        year_guidance = self._year_guidance_note(
+            config,
+            stage_index=stage_index,
+            stage_count=stage_count,
         )
+        later_world_requested = self._setup_implies_later_settlement(config) or (
+            previous_stage is not None and self._stage_reads_like_later_settlement(previous_stage)
+        )
+        state_of_play = (
+            f"Public mood: {public_memo}\n"
+            f"Polling cues: {poll_memo}\n"
+            f"Policy board: {board_memo}\n"
+            f"Queued custom poll interests: {'; '.join(queued_poll_questions) if queued_poll_questions else 'none'}"
+        )
+        title_line = f"Simulation title: {config.title.strip()}\n\n" if config.title.strip() else ""
         return (
-            f"Simulation title: {config.title}\n\n"
-            f"{setup_memo}\n\n"
-            f"{chapter_memo}\n\n"
-            f"Continuity before this chapter:\n{continuity_block}\n\n"
-            f"Public mood before this chapter:\n{public_memo}\n\n"
-            f"Visual style memo: {config.visual_style}\n\n"
-            "Write the next stage as one clean chapter. The backend mainly needs a strong title, year_label, montage_logline, one strong world_brief, and the opening reel beats. Put almost all of the intelligence into the world_brief.\n\n"
-            "Write the world_brief like a short future-history dispatch from inside the country. Open with the most important changed fact in the world, phrased plainly and freshly. Then show how households, firms, public institutions, and politics live inside it. End with the live struggle over power, access, money, time, or legitimacy.\n"
-            "Move the world materially from the prior stage or, in chapter one, from the setup baseline. If the setup already starts later in the transition, do not walk back toward the present out of caution.\n"
-            "Do not force stock AGI arrangements. Name only the rails that are truly live in this world, whether they are stranger or more ordinary than expected. If AI now does most screen work, say what replaced the old junior routes, middle layers, and service queues. If old labor metrics no longer explain security, say what people watch instead. Let policy matter, but let technology diffusion and social uptake do most of the world-moving unless policy is overwhelming.\n"
-            "If the prior chapter already established one organizing metric or pressure, do not merely restate it. Show what social class, institution, routine, geography, or ownership pattern formed around it by now.\n"
-            "Do not let every later chapter collapse into the same monthly transfer plus human queue framing unless the whole point is that those two numbers now govern the country. Even then, show what that did to class structure, family life, business form, or political geography.\n"
-            "This should read like living economic history in motion, not a caution memo and not a list of trends. Use 1 or 2 rough numbers only when they clarify. Avoid buzzwords, slogan writing, consultant fog, and comma-heavy inventories. Write complete declarative sentences only.\n"
-            f"{chapter_guardrail_block}\n\n"
-            "Return only:\n"
-            "- title: a short evocative stage title\n"
-            "- year_label: the year or time marker\n"
-            "- montage_logline: one sentence of about 16-28 words naming the chapter's causal story\n"
-            "- world_brief: 3 to 5 short paragraphs, usually about 320-620 words total, written as one free-flowing essay about what the world is like now\n"
+            f"{title_line}"
+            f"Country: {config.country}\n"
+            f"Population frame: {config.population_description}\n"
+            f"Player: {config.player_name} ({config.player_role})\n"
+            f"Opponent: {config.opponent_name} ({config.opponent_role})\n"
+            f"Player setup direction:\n{setup_direction}\n\n"
+            f"Chapter: {stage_index + 1} of {stage_count}\n"
+            f"Pacing note: {phase['brief']}\n"
+            f"Year guidance: {year_guidance}\n\n"
+            f"Continuity:\n{continuity_block}\n"
+            f"Prior settlement ledger:\n{prior_settlement}\n"
+            f"Prior enacted agenda:\n{prior_resolution}\n"
+            f"State of play:\n{state_of_play}\n\n"
+            "Return one valid JSON object only.\n"
+            "Put most of the intelligence into world_brief.\n"
+            "world_brief is a compact mini-essay, not a schema dump. Use whatever natural paragraph count fits the chapter, usually 500 to 950 words.\n"
+            "The policy board in state_of_play is political context and a draft platform, not a deterministic force on the world. Treat it as enacted only when the prior stage resolution says that platform won and became the enacted agenda.\n"
+            "Default temporal baseline: chapter one in the broad U.S. run should usually be near 2026 or 2027. Keep the economy and institutions recognizable. AI may complete substantial knowledge-work tasks, but it should not yet be portrayed as reliably running full jobs, durable teams, whole agencies, or firms end to end. Adoption is still uneven: pilots, vendor tools, bounded workflows, private-sector experiments, early procurement, and many ordinary routines. Chapter two should usually be roughly four years later, chapter three roughly six years after chapter two, and later gaps can widen at the orchestrator's discretion. Later chapters should advance materially with capability, adoption, robotics, and policy consequences.\n"
+            "Stage progression law: AI progress, social uptake, and physical deployment are the default drivers of change. Policy modulates speed, distribution, legitimacy, ownership, bottlenecks, and failure modes. Small policy should not magically reshape the whole economy; huge policy can, especially if it changes compute, energy, liability, property rights, borders, procurement, or coercive state capacity.\n"
+            "Do not keep the world safely linear. If capability, adoption, geopolitical rivalry, market structure, or public legitimacy plausibly crosses a threshold, the next chapter can include a major invention, fiscal break, institutional failure, regional boom, social collapse, military crisis, or surprisingly good new settlement. Explain the causal chain plainly.\n"
+            "Before you write the essay, privately decide four anchors for this chapter: what pays households, what grants access to capability, what institution or market no longer works like 2026, and what bottleneck or ownership claim shapes the politics. Make those anchors visible in natural prose through named routines, accounts, offices, contracts, or queues.\n"
+            "The essay should answer the production-economics question in plain English: what is now effectively abundant or near-free, what stayed scarce, what new firms can do, how incumbents defend themselves, where layoffs or job disappearance are real, how workers react, and why housing, energy, healthcare, robotics, or local capacity may not get cheap just because expertise did. In early chapters this may be modest. In later chapters it can become the central social settlement.\n"
+            "Start broad before you zoom in. The opening should state what AI can broadly do now, what it still cannot do, what got cheap, what stayed scarce, what the economy is reorganizing around, and one or two rough facts people would cite.\n"
+            "If the setup asks for a later or more changed world, make that opening materially post-current: name what displaced old screen-work ladders, what now carries household security or access, and one institution running on a different logic.\n"
+            "The essay should make a player understand the new economic baseline before any vignette: where output growth comes from, how households receive income or services, what role ordinary employment still plays, who owns or rents capability, and where politics has real leverage.\n"
+            "Make the upside vivid and economically serious. Some people should be getting more choice, help, leisure, care, learning, or productive reach than they could get before; the question is who gets it, how reliably, and at what bottleneck.\n"
+            "Do not let risk language crowd out abundance. A good chapter can still be tense, but the technology should often be visibly making things people want newly possible.\n"
+            "Labor-market guidance: include both adjustment paths when the chapter supports them. Some people may work shorter weeks or move into legitimacy, taste, governance, relationship, care, physical, or local-status niches. Others may simply lose the income stream because whole tasks, firms, or sectors no longer need them. Do not make everybody an AI overseer.\n"
+            "Income-and-scarcity guidance: if AI services get very cheap while rent, energy, healthcare capacity, land, robots, or scarce physical goods still cost money, explain how households without old labor income buy those things. The answer may be basic income, welfare, machine dividends, public services, ownership claims, family pooling, platform dependence, debt, migration, or social instability.\n"
+            "Self-checking guidance: in later chapters, capable systems may audit, test, and improve their own work better than ordinary human reviewers. Humans should remain central where legitimacy, law, moral authority, taste, relationship, local knowledge, or physical presence actually matters, not as a universal edge-case catcher.\n"
+            "After the broad opening, pick one concrete changed routine and explain the new rule around it. For example: which account pays rent, which portal grants expert help, which contract meters model access, which office can reverse a cutoff, or which school/work week no longer resembles 2026.\n"
+            "Move the world materially from the prior stage or, in chapter one, from the setup baseline.\n"
+            "When there is a prior settlement ledger, preserve each durable item unless you explicitly explain why it changed. The next chapter must inherit at least one concrete institution or routine from the prior chapter, then show what scaled, broke, got captured, or became normal.\n"
+            "When there is a prior enacted agenda, show at least one concrete consequence of it in the next chapter. The consequence can be helpful, costly, captured, partially evaded, or overtaken by technology, but it should be visible as an institution, price, queue, access rule, public habit, or foreign comparison.\n"
+            "If the enacted agenda restricted or licensed capability, show the trade: what trust or safety it bought, and what useful service, small-firm autonomy, household convenience, or foreign benchmark people now feel they lost. If the enacted agenda widened access or loosened restrictions, show the trade: what new abundance arrived, and what bottleneck, capture risk, dependency, fraud, or local conflict became sharper.\n"
+            "Let technology diffusion and social uptake do most of the world-moving unless policy is overwhelming.\n"
+            "If the player asks to begin well into the future, do not pick a timid year or a timid economy. The requested horizon should show up in the date, the institutions, the labor bargain, and the household routine.\n"
+            "Do not flatten a later world back into 2026 jobs with one smarter app. A five-to-ten-year-ahead world can already have changed service prices, firm staffing, credential value, household bargaining power, school routines, public administration, or geopolitical capability races.\n"
+            "If AI can do most remote or computer-based work, ordinary citizens should not all keep 2026 job descriptions with an AI sidebar. Some may live from dividends, public service credits, platform rents, part-time trust work, physical bottlenecks, local status work, caregiving, ownership claims, or entirely new institutions.\n"
+            "In later chapters, it is fine if old labor-market categories become incomplete: people may work fewer paid hours, receive machine-linked income or service guarantees, supervise physical systems, bargain over compute access, or judge life by prices, time, access, status, and security more than by having a conventional job.\n"
+            "Do not default to tiny frictions, safety cliches, or 'humans check AI errors' as the whole plot. If those matter, explain the economic channel and also say what bigger transformation keeps people using the systems anyway.\n"
+            "Do not write the player's platform, the opponent's platform, or either candidate's campaign story into world_brief, montage_logline, or narrative_beats.\n"
+            "Do not name the player or opponent in the documentary chapter unless the setup specifically makes their identity itself part of the world premise.\n"
+            "If politics matters, describe the governing fork, pressure, or public argument in anonymous terms rather than assigning it to the two candidates.\n"
             f"{self._macro_cue_line(later_world_requested=later_world_requested)}"
-            "- narrative_beats: 7 or 8 short documentary lines with matching image prompts for the opening reel\n"
-            "- each narrative beat should be one complete, clean spoken line of roughly 10-22 words, not a list chopped into pieces or a thesis sentence\n"
-            "- every narrative beat must stand alone when read aloud; no dangling endings like 'where a person still' or clipped subordinate clauses\n"
-            "- across the reel, mix the changed macro picture with lived routine, institutional change, and at least one broader physical or geopolitical pressure when it matters\n"
-            "- image prompts should stay painterly, civic, and impressionist, with no readable text or dashboard numerals"
+            "narrative_beats are the documentary script. Use as many as the chapter needs to breathe, usually 10 to 12. Each beat needs line and image_prompt.\n"
+            "Give the reel a spine rather than a checklist: capability shock -> macro/economic baseline -> household routine -> money or access rule -> institution changed -> what people do with time or work -> bottleneck -> public policy argument -> human ending. Bend that order when the chapter demands it, but keep a real through-line.\n"
+            "The early beats should establish the big picture before the reel goes small: capability, prices or output, labor or income, and the core public argument. Later beats can bring in a person, institution, physical bottleneck, or foreign comparison.\n"
+            "A strong reel usually touches capability, the macro baseline, one lived routine, one bottleneck, and the public argument. Treat that as taste guidance, not a checklist. It often has one abundance beat and one concrete note about policy demands or proposals circulating in public life.\n"
+            "If the chapter is near 2026 or 2027, the reel should feel like the present with faster AI and early institutional stress, not a society already remade. If the chapter is later, let the reel show the changed settlement directly.\n"
+            "Each beat should be one clear spoken line with one main idea. It can be a little longer when the idea needs room, but avoid dangling clauses, comma-stuffed lists, and shopping lists.\n"
+            "Prefer two clean sentences over one comma chain. If a beat names three nouns joined by commas, rewrite it around one noun and one consequence.\n"
+            "A good beat sounds like documentary narration, not a spreadsheet subtitle. Let it breathe long enough to explain one mechanism clearly.\n"
+            "Across the reel, mix broad capability, macro change, lived routine, institutional change, and broader physical or geopolitical pressure when it matters.\n"
+            "Avoid comma-separated inventories. No beat may list more than two domains. A line such as 'clinics, schools, ports, and courts all...' is usually worse than naming one place and explaining what changed there.\n"
+            "Each image_prompt should be efficient and under 30 words. Make it a compact visual description only, with no style terms, no camera jargon, and no readable text or numerals. Do not depict screens with readable figures; show painted marks or unlabeled interfaces instead.\n"
         )
 
     def _fallback_stage_title(self, phase_label: str, stage_index: int) -> str:
         label = " ".join(str(phase_label or "").split()).strip()
         return label or f"Stage {stage_index + 1}"
 
-    def _fallback_year_label(self, previous_stage: StagePackage | None, stage_index: int) -> str:
+    def _fallback_year_label(
+        self,
+        previous_stage: StagePackage | None,
+        stage_index: int,
+        *,
+        config: SimulationConfig,
+    ) -> str:
+        if self._config_phase_anchor(config) == 0:
+            return str(self._default_stage_year(stage_index, config.stage_count))
         if previous_stage and str(previous_stage.year_label or "").strip():
             digits = re.search(r"(\d{4})", previous_stage.year_label)
             if digits:
                 return str(int(digits.group(1)) + 1)
             return previous_stage.year_label
-        return str(2026 + stage_index)
+        start_year = self._requested_start_year(config)
+        stride = 1
+        if self._config_phase_anchor(config) >= 3:
+            stride = 2
+        return str(start_year + stage_index * stride)
 
     def _fallback_montage_logline(self, world_brief: str) -> str:
         opening = self._stage_opening_paragraph(world_brief)
@@ -2985,6 +3386,116 @@ class OrchestratorService:
             if first_sentence:
                 return first_sentence
         return "The country is learning what this AI order now makes newly possible, newly cheap, and newly contested."
+
+    def _fallback_world_brief(self, config: SimulationConfig, stage_index: int, phase_label: str) -> str:
+        texts = [config.premise, config.topic_lens, config.stakes, config.region_focus, config.population_description]
+        setup_anchor = self._starting_phase_anchor(*texts)
+        anchor = max(
+            setup_anchor,
+            1 if stage_index >= 1 else 0,
+            2 if stage_index >= 2 else 0,
+            3 if stage_index >= 3 else 0,
+            4 if stage_index >= 4 else 0,
+        )
+        stride = 1 if anchor < 2 else 2 if anchor < 4 else 4
+        year = self._default_stage_year(stage_index, config.stage_count) if setup_anchor == 0 else self._requested_start_year(config) + stage_index * stride
+        scope = self._setup_field_or_default(config.region_focus, config.country or "the country")
+        premise = self._setup_field_or_default(
+            config.premise,
+            "AI has crossed from impressive tool into ordinary productive infrastructure",
+        )
+        stakes = self._setup_field_or_default(
+            config.stakes,
+            "politics is about who gets useful capability, who captures the surplus, and what remains genuinely human or local",
+        )
+        if anchor >= 4:
+            body = (
+                f"By about {year}, {phase_label.lower()} is not a smarter version of the old office economy. {premise}. "
+                f"Across {scope}, most routine screen work is bought as machine labor, bundled into firms, public services, households, and local cooperatives. "
+                "The old ladder from credential to salary still exists in islands, but it no longer organizes ordinary security. Some occupations have become smaller or vanished outright, while people watch compute rights, machine-income claims, service guarantees, physical bottlenecks, and ownership of the productive layer more closely than job postings.\n\n"
+                "Households live under a mixed settlement. Some receive machine-linked income, some get public service capacity directly, some own small claims on local automation, and some still sell scarce trust, care, taste, physical judgment, or social presence. "
+                "The week is stranger: fewer adults have a classic five-day screen job, more time is spent coordinating family, local projects, training robots, adjudicating disputes, or seeking status in work that cannot be cheaply copied.\n\n"
+                f"The live argument is that {stakes}. The upside is real enough that people fear losing it: expert help, faster services, cheaper coordination, stronger small organizations, and a state that can sometimes act with startling competence. "
+                "The danger is no longer just error. It is whether households without old labor income can still buy housing, power, care, robot time, and other scarce things; it is also dependency, chokepoints, energy and hardware scarcity, platform tolls, captured public systems, and foreign blocs that can offer a visibly richer machine settlement.\n\n"
+                "Politics is therefore about the shape of the new floor: who owns it, who can appeal its decisions, who gets cut off during scarcity, and which parts of life remain local, human, or deliberately slow."
+            )
+        elif anchor >= 2:
+            body = (
+                f"By about {year}, {phase_label.lower()} has moved beyond better software. {premise}. "
+                f"Across {scope}, capable agents now run whole stretches of paperwork, coding, purchasing, design, customer service, benefits navigation, scheduling, and analysis. "
+                "Firms can be smaller, services can be cheaper, and public offices can answer more questions at once. The result is visible output growth, but also a new fight over who rents the agents and who owns the customer channel.\n\n"
+                "The labor market has not disappeared, but the old middle of routine computer work has lost scarcity. Some adults supervise systems or move into physical, care, trust, and relationship work. Others have been laid off from work that no longer needs a human team and rely on shorter hours, public credits, household businesses, benefits, or platform-mediated task income. "
+                "People notice lower prices in some services before they understand what happened to status, credentials, bargaining power, and the cash flow needed for rent and other goods that did not cheapen as fast.\n\n"
+                f"The live argument is that {stakes}. Voters defend the gains because the tools make expertise feel abundant. They also notice that capability can be metered, throttled, or bundled into contracts they cannot negotiate.\n\n"
+                "Power, chips, data-center sites, housing, robotics deployment, courts, schools, and local legitimacy still bind the transition. The economy feels richer, but the institutions deciding access now matter more."
+            )
+        else:
+            body = (
+                f"By about {year}, {phase_label.lower()} is plainly visible across {scope}, but the country still feels economically recognizable. {premise}. "
+                "AI systems now complete substantial multi-step knowledge-work tasks reliably enough that households and leading firms treat them as serious help rather than experiments. Schools, clinics, and agencies are still more uneven: pilots, vendor tools, back offices, and early procurement, not whole institutions running end to end. "
+                "The first economic break is simple: some kinds of expertise and coordination are cheaper, faster, and available to people who used to wait or go without, while ordinary wages, rent, insurance, and local services still matter.\n\n"
+                "Ordinary work has not vanished, but staffing, prices, and routines are shifting. Small firms buy capability they could never hire. Families use cheap advice to contest bills, manage care, learn, repair, and start tiny ventures. "
+                "Workers in routine screen roles feel the first hiring freezes, task consolidation, and layoff risk, while people in physical, social, trust-heavy, and bottlenecked jobs gain leverage or become harder to replace.\n\n"
+                f"The live argument is that {stakes}. People want the benefits because they are useful, not because they are fashionable. They also want recourse when a platform, employer, agency, or model account quietly decides what help they can get.\n\n"
+                "The country is not deciding whether AI exists. It is deciding how fast useful capability diffuses, who captures the surplus, and which bottlenecks get solved before resentment hardens."
+            )
+        return self._normalize_summary_prose(body, max_paragraphs=4)
+
+    def _stage_narrative_beats(
+        self,
+        beats: list[OrchestratorStageBeat],
+        *,
+        world_brief: str,
+        visual_style: str,
+    ) -> list[NarrativeBeat]:
+        cleaned = [
+            NarrativeBeat(
+                line=self._normalize_narration_line(beat.line),
+                image_prompt=self._polish_image_prompt(visual_style, beat.image_prompt),
+            )
+            for beat in beats
+            if str(beat.line or "").strip()
+        ]
+        cleaned = [beat for beat in cleaned if beat.line]
+        if len(cleaned) >= 5:
+            return cleaned[:12]
+
+        fallback_lines = [
+            self._stage_capability_hint(world_brief),
+            self._stage_upside_hint(world_brief),
+            self._stage_opening_paragraph(world_brief),
+            self._stage_split_hint(world_brief),
+            self._stage_constraint_hint(world_brief),
+        ]
+        for sentence in self._world_brief_sentences(world_brief):
+            fallback_lines.append(sentence)
+        seen = {beat.line.lower() for beat in cleaned}
+        for line in fallback_lines:
+            normalized = self._normalize_narration_line(line)
+            if not normalized or normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            prompt_seed = self._trim_without_ellipsis(normalized.rstrip(".!?"), 120)
+            cleaned.append(
+                NarrativeBeat(
+                    line=normalized,
+                    image_prompt=self._polish_image_prompt(
+                        visual_style,
+                        f"Ordinary people and institutions adapting as {prompt_seed.lower()}",
+                    ),
+                )
+            )
+            if len(cleaned) >= 7:
+                break
+        return cleaned or [
+            NarrativeBeat(
+                line="The country is learning what this new machine capacity actually changes.",
+                image_prompt=self._polish_image_prompt(
+                    visual_style,
+                    "A broad civic panorama of households, public institutions, small firms, and infrastructure under a changing AI economy.",
+                ),
+            )
+        ]
 
     def _phase_brief(self, stage_index: int, stage_count: int, starting_phase_anchor: int = 0) -> dict[str, str]:
         later_start = starting_phase_anchor > 0
@@ -3002,7 +3513,7 @@ class OrchestratorService:
                 }
             return {
                 "label": "Opening Turn",
-                "brief": "Show the first chapter where the transition is plainly real in everyday life. Establish the gain, the bottleneck, and the first split without flattening the world back toward the 2020s or preserving old office norms by habit.",
+                "brief": "Open near the present, around 2026 or 2027. Keep the economy recognizable: AI can autonomously do substantial knowledge-work tasks in bounded workflows, but not full jobs or teams yet. Public-sector use is still uneven pilots, procurement, and back offices. Show the first repricing of expertise, early staffing pressure, a real bottleneck, and the political split before later chapters grow stranger.",
             }
 
         ratio = stage_index / max(stage_count - 1, 1)
@@ -3050,21 +3561,8 @@ class OrchestratorService:
     def _polish_image_prompt(self, visual_style: str, scene_prompt: str) -> str:
         return (
             f"{visual_style} Scene: {scene_prompt}. "
-            "Build a specific, atmospheric composition with a clear camera distance, strong silhouettes, layered foreground and background forms, lived-in institutions, and people actually doing something. "
-            "Keep the scene readable at first glance: daylight, warm interior light, or clear industrial light; avoid muddy underexposure, heavy vignette, and indistinct smoky darkness. "
-            "Prefer consequential civic, industrial, domestic, classroom, clinical, retail, or infrastructure scenes over generic office tableaux. "
-            "Favor wide or medium establishing shots unless the prompt explicitly asks for an intimate close-up. "
-            "Avoid defaulting to a tabletop, laptop-on-desk, or single-worker close crop when the narration is describing a national or sectoral shift. "
-            "Render it as a painterly oil-or-gouache civic impression, not literal reportage. "
-            "Lean toward a Cezanne-Monet-Matisse family: Cezanne structure, Monet atmosphere, Matisse color blocks, with occasional pointillist light. "
-            "Let different frames lean a little differently inside that family so the reel feels coherent without becoming visually repetitive. "
-            "Emphasize visible brushstrokes, thicker layered paint handling, planar color masses, softened edges, abstracted faces and hands, atmospheric light, and selective detail over photoreal texture. "
-            "Push the image toward semi-abstract impressionism: bold shapes first, human gesture second, fine literal detail last. "
-            "Make the main subject legible even without readable signs or numbers. "
-            "Let faces read as gestures and color notes rather than detailed portraits, and let architecture dissolve slightly at the edges instead of resolving into crisp realism. "
-            "If the scene includes a monitor, sign, phone, paper, dashboard, map, storefront label, chart, or control room display, render it as painterly marks or abstract shapes with no crisp readable text or precise numbers. "
-            "Never make legible UI, ticker text, spreadsheet cells, dashboard numerals, or literal screen labels the visual focus. "
-            "Avoid generic queue boards, call-center rows, anonymous cubicle farms, floating dashboards, glossy 3D render aesthetics, anime, comic-book stylization, empty hologram spectacle, sterile stock-photo staging, literal facial detail, photoreal skin texture, or ugly literalist realism unless the scene truly requires it."
+            "Thick impasto oil paint with visible brush ridges, Cezanne-like blocky structure, Matisse color planes, Monet civic light, softened faces, selective abstraction, clear silhouettes, lived-in human activity, varied composition. "
+            "No readable text, labels, charts, numbers, UI, signage, or sharp computer-screen lettering."
         )
 
     def _dummy_stage(
@@ -3078,11 +3576,7 @@ class OrchestratorService:
         phase = self._phase_brief(
             state.active_stage_index,
             state.config.stage_count,
-            self._starting_phase_anchor(
-                state.config.premise,
-                state.config.topic_lens,
-                state.config.stakes,
-            ),
+            self._config_phase_anchor(state.config),
         )
         region_focus = self._setup_field_or_default(state.config.region_focus, "different regions of the country")
         topic_lens = self._setup_field_or_default(state.config.topic_lens, "the broad AI transition")
@@ -3101,86 +3595,43 @@ class OrchestratorService:
             "AI Supply Chains Become Political",
             "The New Settlement Hardens",
         ][state.active_stage_index]
+        dummy_year = (
+            self._default_stage_year(state.active_stage_index, state.config.stage_count)
+            if self._config_phase_anchor(state.config) == 0
+            else self._requested_start_year(state.config) + state.active_stage_index * (2 if self._setup_implies_later_settlement(state.config) else 1)
+        )
+        dummy_world_brief = self._fallback_world_brief(state.config, state.active_stage_index, phase["label"])
         setup_frame = (
             f"{premise} The campaign terrain is anchored in {region_focus}. "
             f"The dominant topic lens is {topic_lens}. "
         )
+        stakes_sentence = stakes if stakes.rstrip().endswith((".", "!", "?")) else f"{stakes}."
         role_frame = (
-            f"As {state.config.player_role}, {state.config.player_name} is facing "
-            f"{state.config.opponent_role} {state.config.opponent_name}. {stakes} "
+            f"{setup_frame}{stakes_sentence} "
+        )
+        gain = self._stage_upside_hint(dummy_world_brief) or (
+            "People can now reach useful expertise and machine labor through channels that did not exist before."
+        )
+        split = self._stage_split_hint(dummy_world_brief) or (
+            "The live question is who can rely on that capability floor, who rents it back, and who is left exposed."
+        )
+        constraint = self._stage_constraint_hint(dummy_world_brief) or (
+            "Physical bottlenecks, institutional trust, and public legitimacy still move slower than software."
         )
         return StagePackage(
             index=state.active_stage_index,
             phase_label=phase["label"],
-            year_label=f"Year {2030 + state.active_stage_index}",
+            year_label=f"Year {dummy_year}",
             title=title,
             montage_logline=(
                 "Reliable AI agents become part of the country's productive floor, widening capability while exposing who controls access to the new machine surplus."
             ),
-            world_brief=(
-                f"{premise} Agentic systems now handle ordinary computer work at the scale of abundant labor. They draft, research, code, schedule, compare, purchase, and coordinate across whole workflows. Large firms moved first, but the surprising political fact is how quickly households and small organizations began treating cheap capability as part of ordinary life.\n\n"
-                f"Across {region_focus}, the economic bargain is no longer only about jobs. It is about who gets the machine account, who pays the compute bill, who owns the customer channel, and which public office can reverse a cutoff. Some prices ease because services need fewer paid hours. Some incomes wobble because old coordination jobs carry less scarcity. Many adults spend more time supervising systems, caring for family, building small ventures, learning, or waiting for access rules to settle.\n\n"
-                f"{stakes} People defend the gains because they can do more without begging scarce experts for help. They also resent dependence on platforms, employer systems, and public portals that can quietly meter capability. The politics is not simply pro-AI against anti-AI. It is a fight over whether the new productive floor becomes public capacity, private rent, or a messy mix of both.\n\n"
-                "The physical world has not vanished. Power, chips, housing, ports, robots, local trust, and public authority still bind the transition. That is why this stage can feel both richer and more fragile at once."
-            ),
+            world_brief=dummy_world_brief,
             room_briefing=(
-                role_frame
-                + "Voters can already feel cheaper expert help, stronger everyday tools, and more capable services in daily life. "
-                "What still rankles is that the gains are landing unevenly across households, firms, and places before the benefits feel durable or fair. "
-                "You can move access, public adoption rules, competitive spread, and visible cushions for exposed groups this cycle. "
-                "You cannot quickly rebuild local management capacity or physical bottlenecks, so both panic and complacency carry a cost."
+                f"{role_frame}The governing problem is not whether AI arrived; it is how the new productive floor becomes dependable. "
+                f"{gain} {split} {constraint}"
             ),
-            narrative_beats=[
-                NarrativeBeat(
-                    line="AI became cheap enough to feel like a new productive floor.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A broad national dawn montage of offices, clinics, classrooms, stores, and homes absorbing dependable AI into ordinary routines.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="A small team can now do what used to take a department.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A national montage of hospitals, freight networks, schools, municipal offices, and small firms newly workable for AI.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="People defend the tools because they make expertise feel closer.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A wide civic montage of families, patients, students, and small businesses using cheaper digital help in ordinary life.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="The bottleneck moved from advice to access.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A national economic panorama of data centers, utility buildout, service firms, and local offices running into physical and institutional bottlenecks.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="The new fight is who owns the channel that meters capability.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A wide sectoral montage contrasting large firms banking AI gains while county offices, small clinics, and local suppliers hit bottlenecks.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="Some adults work fewer standard hours and spend more time supervising systems, caring, learning, or trying small ventures.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A broad civic montage of households, storefronts, clinics, and schools touched by new AI convenience and growing arguments about control.",
-                    ),
-                ),
-                NarrativeBeat(
-                    line="The governing question is whether the machine surplus becomes public capacity or private rent.",
-                    image_prompt=self._polish_image_prompt(
-                        state.config.visual_style,
-                        "A reflective closing shot of still-human bottlenecks in public offices, infrastructure sites, and supervised control rooms as the country debates how to govern the gains.",
-                    ),
-                ),
-            ],
+            narrative_beats=self._stage_narrative_beats([], world_brief=dummy_world_brief, visual_style=state.config.visual_style),
             sample_citizens=[],
             tracking=tracking or self._neutral_tracking(),
             macro_stats=self._fallback_macro_stats(config=state.config, stage_index=state.active_stage_index),
@@ -3193,10 +3644,10 @@ class OrchestratorService:
     def _dummy_featurettes(self, state: SimulationState, stage: StagePackage) -> list[DocumentaryFeaturette]:
         return [
             DocumentaryFeaturette(
-                subject="Household routines",
-                question="How do households actually secure ordinary life in this economy?",
-                title="What The New Competence Bought At Home",
-                logline="A side reel on how families keep bills paid, care arranged, and leverage intact when capable systems become ordinary but dependence shifts underneath them.",
+                subject="The rent account",
+                question="What changed about keeping a household secure when machine-linked income and service guarantees entered ordinary life?",
+                title="The Account That Pays The Bills",
+                logline="A side reel on how families keep rent paid, care arranged, and leverage intact when capable systems become ordinary but dependence shifts underneath them.",
                 status="generating",
                 narrative_beats=[
                     NarrativeBeat(
@@ -3223,9 +3674,9 @@ class OrchestratorService:
                 ],
             ),
             DocumentaryFeaturette(
-                subject="State capacity",
-                question="Which public systems became more capable, and which ones still lagged?",
-                title="The Agencies That Could Finally Keep Up",
+                subject="The permit desk",
+                question="What changed about the public office that citizens used to expect would stall?",
+                title="The Desk That Finally Answered",
                 logline="A side reel on which public systems actually gained capacity, which still lagged, and why the state felt newly capable in some lanes and brittle in others.",
                 status="generating",
                 narrative_beats=[
@@ -3253,8 +3704,8 @@ class OrchestratorService:
                 ],
             ),
             DocumentaryFeaturette(
-                subject="Small firms",
-                question="What changed for small operators once cheap machine capability became normal?",
+                subject="The two-person firm",
+                question="What changed for a tiny operator once it could rent a whole layer of competent machine work?",
                 title="The Two-Person Company",
                 logline="A side reel on how very small firms gained reach, where they still hit walls, and why local business politics changed with them.",
                 status="generating",

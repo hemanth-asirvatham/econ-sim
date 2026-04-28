@@ -1,4 +1,4 @@
-import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Component, lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { BriefingTheater } from "./components/BriefingTheater";
 import { CitizenGrid } from "./components/CitizenGrid";
 import { DebateRoom, type DebateRoomHandle, type TownHallSceneState } from "./components/DebateRoom";
@@ -8,7 +8,7 @@ import { VoiceDock, type VoiceDockHandle } from "./components/VoiceDock";
 import { useSetupRealtimeSession } from "./hooks/useSetupRealtimeSession";
 import type { CouncilTurnContext } from "./lib/council";
 import { featuretteQuestionLabel } from "./lib/featurettes";
-import { stageConstraint, stageGain, stagePolicyAxes, stageRoomBrief, stageSplit, stageWorldOpening } from "./lib/stageText";
+import { stageConstraint, stageGain, stageRoomBrief, stageSplit, stageWorldOpening } from "./lib/stageText";
 import { countryThemeProfile } from "./lib/themeProfiles";
 import {
   buildCompatibilitySetupSession,
@@ -27,6 +27,7 @@ import {
   makeDefaultSetupDraft,
   trackingList,
   type RoomName,
+  type RealtimeRole,
   type SceneHotspot,
   type ScenePresence,
   type SetupSessionState,
@@ -61,6 +62,37 @@ const ROOM_BUTTONS: Array<{ key: RoomName; label: string }> = [
 ];
 
 type DrawerTab = "room" | "intel" | "reels";
+class SceneErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidUpdate(previousProps: { resetKey: string }) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) {
+      return this.props.children;
+    }
+    return (
+      <section className="scene scene--error immersive-stage__scene">
+        <div className="scene-error-card">
+          <span>Scene renderer paused</span>
+          <strong>{this.state.error.message || "The 3D room failed to render."}</strong>
+          <p>Try another room, or reload the stage. The simulation state is still intact.</p>
+        </div>
+      </section>
+    );
+  }
+}
 const EMPTY_PRESENCE: ScenePresence = {
   status: "idle",
   liveMode: "text",
@@ -71,20 +103,22 @@ const EMPTY_PRESENCE: ScenePresence = {
 };
 
 function setupLaunchIntent(prompt: string) {
-  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, "");
-  if (/^(?:go|i['’]?m ready|im ready|ready to go|get going|go ahead|go for it|use the default(?: broad)?(?: u\.?s\.?)?(?: run| setup)?|start it|start the run|start the sim|launch it|let's begin|lets begin)$/.test(normalized)) {
-    return true;
-  }
+  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
+  const directCommand =
+    "(?:go|go ahead|go for it|do it|kick it off|get going|start|start it|start this|start from here|start the run|start the sim|start simulation|start the simulation|launch|launch it|launch this|launch the run|launch the sim|launch simulation|launch the simulation|run it|run this|begin|begin it|let's begin|lets begin)";
   if (
-    /\b(?:i['’]?m ready|im ready|ready to go|get going|go ahead|go for it|start it|start the run|start the sim|launch it|let's begin|lets begin)\b/.test(
+    new RegExp(
+      `^(?:ok(?:ay)?|yeah|yes|yep|sure|alright|all right|cool|great|please|now|then|so)[, ]+${directCommand}(?:[, ]*(?:please|now))?$`,
+    ).test(normalized) ||
+    new RegExp(`^${directCommand}(?:[, ]*(?:please|now))?$`).test(normalized) ||
+    new RegExp(`^(?:i['’]?m ready|im ready|ready to go|broad setup is fine|use the default(?: broad)?(?: u\\.?s\\.?)?(?: run| setup)?)(?:[, ]+${directCommand})?$`).test(
       normalized,
-    )
+    ) ||
+    new RegExp(`^(?:let's|lets|we should|i think we should|i guess we should)\\s+(?:launch|start|begin|run)\\s+(?:it|this|the run|the sim|the simulation)$`).test(normalized)
   ) {
     return true;
   }
-  return /^(?:that(?:'| i)?s good|sounds good|looks good),?\s+(?:go|start(?: it| the run| the sim)?|launch it)$/.test(
-    normalized,
-  );
+  return new RegExp(`^(?:that(?:'| i)?s good|sounds good|looks good|default looks good|default is fine),?\\s+${directCommand}$`).test(normalized);
 }
 
 function queueAfterPaint(callback: () => void) {
@@ -158,17 +192,7 @@ function parseRequestedRoom(value: string | null): RoomName | null {
 }
 
 function requestedRoomFromModeQuery(params: URLSearchParams): RoomName | null {
-  const explicitRoom = parseRequestedRoom(params.get("room"));
-  if (explicitRoom) {
-    return explicitRoom;
-  }
-  if (params.get("auditorium")) {
-    return "debate";
-  }
-  if (params.get("advisor")) {
-    return "advisor";
-  }
-  return null;
+  return parseRequestedRoom(params.get("room"));
 }
 
 function summarizePollTakeaway(summary: StagePackage["poll_summaries"][number]) {
@@ -187,12 +211,12 @@ function splitNamedLoadingQuote(
   const match = raw.match(/^([A-Z][A-Za-z .'-]{0,36}):\s*["“]?(.+?)["”]?\s*$/);
   if (!match) {
     return {
-      text: sanitizeLoadingQuote(raw, 190),
+      text: sanitizeLoadingQuote(raw, 240),
       attribution: fallbackAttribution,
     };
   }
   const name = match[1].trim();
-  const text = sanitizeLoadingQuote(match[2], 190);
+  const text = sanitizeLoadingQuote(match[2], 240);
   return {
     text,
     attribution: formatLoadingAttribution(name, fallbackAttribution),
@@ -407,8 +431,7 @@ function isCitizenFocusLocked(presence: ScenePresence) {
   return (
     presence.status === "connecting" ||
     presence.playerActivity === "speaking" ||
-    presence.counterpartActivity === "speaking" ||
-    presence.voicePhase === "waiting"
+    presence.counterpartActivity === "speaking"
   );
 }
 
@@ -436,14 +459,18 @@ function loadingPhaseMeta(progress: SimulationState["progress"]) {
 }
 
 const LOADING_TIPS = [
-  "Speak like you would to a chief of staff. Ask for the council's disagreement, voters worried about jobs, a poll on access, a cleaner board line, or the debate.",
-  "Name the thing you care about, not a rigid command. Try asking for parents, nurses, founders, students, or retirees who would see this future differently.",
-  "Each chapter starts from one shared world brief. Advisors, citizens, polls, debates, and reels should all feel like they live in the same country.",
-  "Policies matter most when they change access, prices, ownership, legitimacy, or physical bottlenecks. Small gestures should not magically steer the whole economy.",
-  "In later chapters, ask what pays the bills now, what people would hate to lose, and who controls access to the new productive floor.",
-  "Use the policy board like a scratchpad. Keep a few clear lines you can defend in the auditorium, then let voters react.",
-  "The simulation is not trying to punish action or inaction by default. It is watching what actually changes people's lives.",
-  "If a future feels strange, ask one citizen for a normal week: income, care, school, errands, work, and what AI quietly does in the background.",
+  "The game loop is: watch the chapter reel, think with advisors, talk to citizens, debate in public, call the election, then see the world move.",
+  "You can talk naturally. Say what you want to do, who you want to hear from, or what you are trying to understand.",
+  "The world changes mostly because technology diffuses and people use it. Policy matters when it changes access, prices, ownership, capacity, or bottlenecks.",
+  "Do not patch every discomfort. Some gains are precious; some frictions are tolerable; some failures need a hard intervention.",
+  "The policy board is a scratchpad. Keep only a few lines you could defend out loud from the auditorium.",
+  "Ask the advisors what people would hate to lose, not only what they fear.",
+  "Ask citizens about an ordinary week: money, school, care, errands, status, free time, local politics, or what AI quietly does around them.",
+  "If the future feels too familiar, ask what replaced the old workweek, what pays the bills, and who controls access now.",
+  "A good poll asks a human question, not a policy memo question.",
+  "The rival is there to steelman the missing side. If you restrict hard, expect someone to argue for speed and access.",
+  "In the auditorium, call on the town hall when you want one voter to test the room.",
+  "When you are ready, call the election. The winner's platform shapes the next chapter, but the technology keeps moving too.",
 ];
 
 function simulationUrl(
@@ -501,6 +528,12 @@ export default function App() {
   const [setupSession, setSetupSession] = useState<SetupSessionState | null>(null);
   const [launchingSetup, setLaunchingSetup] = useState(false);
   const [setupBooting, setSetupBooting] = useState(false);
+  const [directSimulationBooting, setDirectSimulationBooting] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return Boolean(new URLSearchParams(window.location.search).get("sim"));
+  });
   const [stageGate, setStageGate] = useState<StageGate>("loading");
   const [setupPromptDraft, setSetupPromptDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -536,12 +569,14 @@ export default function App() {
   const [activeCitizenId, setActiveCitizenId] = useState<string | undefined>(undefined);
   const [streetCandidateCitizenId, setStreetCandidateCitizenId] = useState<string | undefined>(undefined);
   const [streetPendingCitizenId, setStreetPendingCitizenId] = useState<string | undefined>(undefined);
+  const [streetVoiceRoaming, setStreetVoiceRoaming] = useState(false);
   const [resolvingStage, setResolvingStage] = useState(false);
   const [setupDetailsOpen, setSetupDetailsOpen] = useState(false);
   const [panelsOpen, setPanelsOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>("room");
   const [reelsOpen, setReelsOpen] = useState(false);
   const [reelsRequestedFeaturetteId, setReelsRequestedFeaturetteId] = useState<string | null>(null);
+  const [reelsCinemaOpen, setReelsCinemaOpen] = useState(false);
   const queryRequestedRoomRef = useRef<RoomName | null>(
     typeof window === "undefined" ? null : requestedRoomFromModeQuery(new URLSearchParams(window.location.search)),
   );
@@ -578,6 +613,8 @@ export default function App() {
   const dockActionGenerationRef = useRef(0);
   const refreshSnapshotGenerationRef = useRef(0);
   const simulationRef = useRef<SimulationState | null>(null);
+  const forceNextStageGateRef = useRef(false);
+  const suppressIntroPreservationRef = useRef(false);
   const setupLaunchInFlightRef = useRef<string | null>(null);
   const initialBootRef = useRef(false);
   const setupComposerRef = useRef<HTMLInputElement | null>(null);
@@ -632,8 +669,13 @@ export default function App() {
     (setupRealtime.liveMode === "voice" &&
       (setupRealtime.presence.voicePhase === "waiting" || setupRealtime.presence.voicePhase === "responding"));
   const citizens = stage?.sample_citizens ?? [];
+  const citizensHydrating =
+    Boolean(simulation && stage && simulation.status === "stage_ready" && citizens.length === 0 && simulation.progress.phase === "citizen_updates");
+  const townHallUnavailable = citizensHydrating || citizens.length === 0;
+  const townHallUnavailableReason = citizensHydrating
+    ? "Citizens are still arriving. The chapter is playable while interviews catch up."
+    : "Town hall needs at least one citizen ready.";
   const currentStageRoomBrief = stageRoomBrief(stage);
-  const currentStageAxes = stagePolicyAxes(stage, 4);
   const readyFeaturetteCount = stage?.featurettes.filter((featurette) => featurette.status === "ready").length ?? 0;
   const featurettesPending = stage
     ? Boolean(simulation && simulation.status === "stage_ready" && stage.featurettes_status !== "ready" && stage.featurettes_status !== "error")
@@ -709,16 +751,16 @@ export default function App() {
         ? debatePlayerCase
         : advisorPolicyNotes.length > 0
           ? advisorPolicyNotes.join("\n")
-          : currentStageAxes.join("\n"),
-    [advisorPolicyNotes, currentStageAxes, debatePlayerCase, debatePolicyLines],
+          : "",
+    [advisorPolicyNotes, debatePlayerCase, debatePolicyLines],
   );
   const debateBoardNotes = useMemo(
     () =>
-      (debatePolicyLines.length > 0 ? debatePolicyLines : advisorPolicyNotes.length > 0 ? advisorPolicyNotes : stage?.policy_notes ?? [])
+      (advisorPolicyNotes.length > 0 ? advisorPolicyNotes : stage?.policy_notes ?? [])
         .map((line) => line.trim().replace(/^[-*]\s*/, ""))
         .filter(Boolean)
         .slice(0, 4),
-    [advisorPolicyNotes, debatePolicyLines, stage?.policy_notes],
+    [advisorPolicyNotes, stage?.policy_notes],
   );
   const citizenThreadKey =
     simulation && activeCitizen ? `stage:${simulation.active_stage_index}:citizen:${activeCitizen.citizen_id}` : "";
@@ -756,19 +798,21 @@ export default function App() {
         floorOwner === "player" ||
         (Boolean(floorOwner) && Boolean(playerName) && floorOwner === playerName);
       if (playerHasFloor) {
-        return {
-          id: "council-player-floor",
-          speaker: "user" as const,
-          speaker_name: simulation?.config.player_name ?? "You",
-          text: councilFloor?.reason ? `You have the floor. ${councilFloor.reason}` : "You have the floor.",
-          mode: "voice" as const,
-          created_at: new Date().toISOString(),
-        };
+        return undefined;
       }
       const councilIsActivelySpeaking =
         scenePresence.advisor.counterpartActivity === "speaking" ||
         scenePresence.advisor.voicePhase === "responding";
       if (!councilIsActivelySpeaking) {
+        const latestTextReply = currentSceneTurns
+          .filter((turn) => turn.speaker === "assistant" && turn.mode === "text")
+          .at(-1);
+        const latestTextReplyAgeMs = latestTextReply?.created_at
+          ? Date.now() - Date.parse(latestTextReply.created_at)
+          : Number.POSITIVE_INFINITY;
+        if (latestTextReply && Number.isFinite(latestTextReplyAgeMs) && latestTextReplyAgeMs < 120000) {
+          return latestTextReply;
+        }
         return undefined;
       }
     }
@@ -802,6 +846,7 @@ export default function App() {
     if (!simulation) {
       return [];
     }
+    const stageMacroHighlights = Object.values(stage?.macro_stats ?? {}).slice(0, 2);
     const latestPoll = simulation.current_polls[0];
     const [topAnswer, topShare] = latestPoll
       ? Object.entries(latestPoll.shares).sort((left, right) => right[1] - left[1])[0] ?? ["Polling pending", 0]
@@ -818,11 +863,29 @@ export default function App() {
         value: `Chapter ${simulation.active_stage_index + 1}`,
         detail: stage?.phase_label ?? (simulation.player_in_power ? "You are still in office." : "You are trying to win power back."),
       },
-      {
-        label: "Public mood",
-        value: stageHasPublicRead ? `${simulation.approval_rating.toFixed(0)}% approval` : "Approval pending",
-        detail: stageHasPublicRead ? pollDetail : "Fresh polling will appear once the stage locks in.",
-      },
+      ...(
+        stageHasPublicRead
+          ? [
+              {
+                label: "Public mood",
+                value: `${simulation.approval_rating.toFixed(0)}% approval`,
+                detail: pollDetail,
+              },
+            ]
+          : stageMacroHighlights.length > 0
+            ? stageMacroHighlights.map((stat) => ({
+                label: stat.label,
+                value: stat.value,
+                detail: stat.detail,
+              }))
+            : [
+                {
+                  label: "Public mood",
+                  value: "Approval pending",
+                  detail: "Fresh polling will appear once the stage locks in.",
+                },
+              ]
+      ),
       {
         label: "Electorate",
         value: `${simulation.persona_count_ready || simulation.config.persona_count} citizens ready`,
@@ -902,7 +965,7 @@ export default function App() {
     const seenQuotes = new Set<string>();
     const seenNotes = new Set<string>();
     const pushQuote = (label: string, rawText?: string, attribution?: string) => {
-      const trimmed = sanitizeLoadingQuote(rawText ?? "", 220);
+      const trimmed = sanitizeLoadingQuote(rawText ?? "", 380);
       if (!trimmed || seenQuotes.has(`${label}:${trimmed}:${attribution ?? ""}`)) {
         return;
       }
@@ -910,7 +973,7 @@ export default function App() {
       quoteEntries.push({ kind: "quote", label, text: trimmed, attribution });
     };
     const pushNote = (label: string, rawText?: string) => {
-      const trimmed = sanitizeLoadingQuote(rawText ?? "", 180);
+      const trimmed = sanitizeLoadingQuote(rawText ?? "", 230);
       if (!trimmed || seenNotes.has(`${label}:${trimmed}`)) {
         return;
       }
@@ -932,7 +995,7 @@ export default function App() {
       }
     }
     if (!previousResolvedStage && simulation?.active_stage_index === 0) {
-      LOADING_TIPS.forEach((tip, index) => pushNote(index === 0 ? "Voice tip" : "Simulation tip", tip));
+      LOADING_TIPS.forEach((tip, index) => pushNote(index === 0 ? "Tutorial tip" : "Simulation tip", tip));
     }
     if (quoteEntries.length === 0 && noteEntries.length === 0 && simulation) {
       if (!sourceStage) {
@@ -953,7 +1016,7 @@ export default function App() {
       pushNote("Status", simulation?.progress.label ?? "Writing the world.");
     }
     const entries: Array<{ kind: "quote" | "note"; label: string; text: string; attribution?: string }> = [];
-    const maxLength = 6;
+    const maxLength = 8;
     const effectiveQuotes = quoteEntries;
     const effectiveNotes = noteEntries;
     if (effectiveQuotes.length > 0) {
@@ -989,13 +1052,13 @@ export default function App() {
   const debateAdvancePayload =
     debatePlatform.trim()
     || advisorPolicyNotes.join("\n").trim()
-    || currentStageAxes.join("\n").trim()
-    || stageWorldOpening(stage)
-    || "Carry the current platform into the vote.";
-  const debateAdvanceDisabled = resolvingStage;
+    || "";
+  const debateAdvanceDisabled = resolvingStage || !debateAdvancePayload.trim();
   const debateAdvanceLabel = resolvingStage ? "Counting vote..." : "Next stage";
   const debateAdvanceHint = debateAdvanceDisabled
-    ? "The election is being counted and folded into the next stage."
+    ? resolvingStage
+      ? "The election is being counted and folded into the next stage."
+      : "Lock at least one policy idea on the board or say your platform before calling the vote."
     : "Call the vote and move the simulation into the next chapter.";
   const visibleLoadingHighlights = useMemo(
     () => loadingHighlights.slice(0, readyForNextEra ? 1 : 2),
@@ -1036,21 +1099,33 @@ export default function App() {
     void (async () => {
       try {
         if (simulationId) {
+          setDirectSimulationBooting(true);
           const loaded = await getSimulation(simulationId);
+          simulationRef.current = loaded;
           setSimulation(loaded);
           const requestedRoom =
             honorQueryRequestedRoomRef.current
               ? requestedRoomFromModeQuery(params) ?? queryRequestedRoomRef.current
               : null;
-          setRoom(requestedRoom ?? loaded.current_room);
+          const directLive = params.get("view") === "live";
+          const nextRoom = requestedRoom ?? loaded.current_room;
+          setRoom(directLive && nextRoom === "briefing" ? "advisor" : nextRoom);
+          if (loaded.status === "stage_ready" && loaded.stages.length > 0) {
+            setStageGate(directLive ? "live" : "ready");
+          } else {
+            setStageGate("loading");
+          }
           if (loaded.focused_citizen_id) {
             setActiveCitizenId(loaded.focused_citizen_id);
           }
+          setDirectSimulationBooting(false);
           return;
         }
+        setDirectSimulationBooting(false);
         await bootSetupChamber();
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "failed to load simulation");
+        setDirectSimulationBooting(false);
       }
     })();
   }, []);
@@ -1063,8 +1138,12 @@ export default function App() {
       return;
     }
     introducedStageRef.current = stageKey;
+    disconnectLiveChannels();
+    setCouncilFloor(null);
+    setLiveSceneCaptions((current) => ({ ...current, advisor: null, citizens: null, debate: null }));
     const params = new URLSearchParams(window.location.search);
-    const directLive = params.get("view") === "live";
+    const forceReadyGate = forceNextStageGateRef.current && simulation.status === "stage_ready";
+    const directLive = !forceReadyGate && params.get("view") === "live";
     const requestedRoom = honorQueryRequestedRoomRef.current
       ? requestedRoomFromModeQuery(params) ?? queryRequestedRoomRef.current
       : null;
@@ -1072,12 +1151,16 @@ export default function App() {
       ? (simulation.current_room === "briefing" ? "advisor" : simulation.current_room)
       : simulation.current_room;
     setShowCinematicIntro(false);
-    setStageGate(directLive ? "live" : "ready");
+    setStageGate(forceReadyGate ? "ready" : directLive ? "live" : "ready");
     setPanelsOpen(false);
     setDrawerTab("room");
     setSceneTextOpen(false);
     setSceneTextDraft("");
     setRoom(requestedRoom ?? defaultLiveRoom);
+    if (forceReadyGate) {
+      forceNextStageGateRef.current = false;
+      window.history.replaceState(null, "", simulationUrl(simulation.simulation_id, advisorMode, auditoriumMode));
+    }
     honorQueryRequestedRoomRef.current = false;
   }, [simulation, stage, stageKey]);
 
@@ -1138,13 +1221,26 @@ export default function App() {
         const requestedRoom = honorQueryRequestedRoomRef.current
           ? requestedRoomFromModeQuery(new URLSearchParams(window.location.search)) ?? queryRequestedRoomRef.current
           : null;
+        const forceReadyGate =
+          forceNextStageGateRef.current &&
+          latest.status === "stage_ready" &&
+          latest.active_stage_index !== simulation.active_stage_index;
+        if (forceReadyGate) {
+          window.history.replaceState(null, "", simulationUrl(latest.simulation_id, advisorMode, auditoriumMode));
+        }
         startTransition(() => {
           setSimulation(latest);
-          setRoom(requestedRoom ?? latest.current_room);
+          setRoom(forceReadyGate ? "briefing" : requestedRoom ?? latest.current_room);
+          if (forceReadyGate) {
+            setStageGate("ready");
+          }
           if (latest.focused_citizen_id) {
             setActiveCitizenId(latest.focused_citizen_id);
           }
         });
+        if (forceReadyGate) {
+          forceNextStageGateRef.current = false;
+        }
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "failed to refresh simulation");
       }
@@ -1163,7 +1259,11 @@ export default function App() {
   }, [featurettesPending, simulation, stage]);
 
   useEffect(() => {
-    if (!simulation || simulation.status !== "stage_ready" || simulation.progress.phase !== "polling") {
+    if (
+      !simulation ||
+      simulation.status !== "stage_ready" ||
+      !["citizen_updates", "polling"].includes(simulation.progress.phase)
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -1181,6 +1281,7 @@ export default function App() {
 
   useEffect(() => {
     if (!reelsOpen) {
+      setReelsCinemaOpen(false);
       return;
     }
     const previousOverflow = document.body.style.overflow;
@@ -1313,16 +1414,18 @@ export default function App() {
     setError(null);
     try {
       const created = await startSimulationFromSetup(activeSession);
+      simulationRef.current = created;
       setSimulation(created);
-      setRoom("briefing");
-      setStageGate("loading");
+      setRoom(created.current_room === "briefing" ? "advisor" : created.current_room);
+      setStageGate(created.status === "stage_ready" && created.stages.length > 0 ? "ready" : "loading");
       setSetupDetailsOpen(false);
       setPanelsOpen(false);
       setDrawerTab("room");
       setShowCinematicIntro(false);
       setSceneTextOpen(false);
       setSceneTextDraft("");
-      window.history.replaceState(null, "", simulationUrl(created.simulation_id, advisorMode, auditoriumMode));
+      const targetUrl = simulationUrl(created.simulation_id, advisorMode, auditoriumMode);
+      window.history.replaceState(null, "", targetUrl);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "failed to start simulation from setup");
     } finally {
@@ -1388,11 +1491,17 @@ export default function App() {
     if (!simulation || resolvingStage) {
       return;
     }
+    const platformText = playerPlatform.trim();
+    if (!platformText) {
+      setError("Lock at least one policy idea on the board or say your platform before calling the vote.");
+      return;
+    }
     const previousRoom = room;
     const previousStageGate = stageGate;
     const previousPanelsOpen = panelsOpen;
     const previousIntroState = showCinematicIntro;
     setResolvingStage(true);
+    forceNextStageGateRef.current = true;
     setError(null);
     disconnectLiveChannels();
     setStageGate("loading");
@@ -1417,12 +1526,19 @@ export default function App() {
     );
     try {
       const updated = await resolveStage(simulation.simulation_id, {
-        player_platform: playerPlatform,
+        player_platform: platformText,
         player_rebuttal: playerRebuttal || undefined,
       });
+      window.history.replaceState(null, "", simulationUrl(updated.simulation_id, advisorMode, auditoriumMode));
+      setRoom("briefing");
+      setStageGate(updated.status === "stage_ready" ? "ready" : "loading");
+      setPanelsOpen(false);
+      setSceneTextOpen(false);
+      setShowCinematicIntro(false);
       setSimulation(updated);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "failed to resolve stage");
+      forceNextStageGateRef.current = false;
       setStageGate(previousStageGate);
       setRoom(previousRoom);
       setPanelsOpen(previousPanelsOpen);
@@ -1441,28 +1557,86 @@ export default function App() {
     }
   }
 
-  function handleSimulationSync(updated: SimulationState) {
+  function handleSimulationSync(
+    updated: SimulationState,
+    options?: {
+      preferredRoom?: RoomName;
+      preferredCitizenId?: string;
+    },
+  ) {
+    const syncedUpdate =
+      options?.preferredRoom && updated.status === "stage_ready"
+        ? {
+            ...updated,
+            current_room: options.preferredRoom,
+            focused_citizen_id:
+              options.preferredRoom === "citizens"
+                ? options.preferredCitizenId ?? updated.focused_citizen_id
+                : updated.focused_citizen_id,
+          }
+        : updated;
     const currentSimulation = simulationRef.current;
+    if (currentSimulation && currentSimulation.simulation_id === syncedUpdate.simulation_id) {
+      if (syncedUpdate.active_stage_index < currentSimulation.active_stage_index) {
+        return;
+      }
+      if (
+        resolvingStage &&
+        syncedUpdate.status === "stage_ready" &&
+        syncedUpdate.active_stage_index === currentSimulation.active_stage_index
+      ) {
+        return;
+      }
+    }
+    const stageAdvanced = Boolean(
+      currentSimulation &&
+        currentSimulation.simulation_id === syncedUpdate.simulation_id &&
+        currentSimulation.active_stage_index !== syncedUpdate.active_stage_index,
+    );
+    const forceReadyGate =
+      forceNextStageGateRef.current &&
+      syncedUpdate.status === "stage_ready" &&
+      (stageAdvanced || syncedUpdate.current_room === "briefing");
     const requestedRoom = honorQueryRequestedRoomRef.current
       ? requestedRoomFromModeQuery(new URLSearchParams(window.location.search)) ?? queryRequestedRoomRef.current
       : null;
-    const nextRoom = requestedRoom ?? updated.current_room;
+    const serverRoomChanged = Boolean(
+      currentSimulation &&
+        currentSimulation.simulation_id === syncedUpdate.simulation_id &&
+        currentSimulation.current_room !== syncedUpdate.current_room,
+    );
+    const preservingIntro =
+      !forceReadyGate &&
+      !suppressIntroPreservationRef.current &&
+      syncedUpdate.status === "stage_ready" &&
+      (stageGate === "intro" || showCinematicIntro);
+    const nextRoom = forceReadyGate || preservingIntro
+      ? "briefing"
+      : options?.preferredRoom ?? requestedRoom ?? (serverRoomChanged ? syncedUpdate.current_room : roomRef.current);
     if (
       currentSimulation &&
-      currentSimulation.simulation_id === updated.simulation_id &&
-      simulationUpdatedAtMs(updated) < simulationUpdatedAtMs(currentSimulation)
+      currentSimulation.simulation_id === syncedUpdate.simulation_id &&
+      simulationUpdatedAtMs(syncedUpdate) < simulationUpdatedAtMs(currentSimulation)
     ) {
       return;
     }
-    if (nextRoom !== roomRef.current) {
+    const previousRoom = roomRef.current;
+    if (nextRoom !== previousRoom) {
       disconnectLiveChannels();
     }
+    roomRef.current = nextRoom;
     startTransition(() => {
-      setSimulation(updated);
+      setSimulation(syncedUpdate);
       setRoom(nextRoom);
-      setShowCinematicIntro((current) => (nextRoom === "briefing" ? current : false));
+      setShowCinematicIntro((current) => (preservingIntro ? true : nextRoom === "briefing" ? current : false));
       setStageGate((current) => {
-        if (updated.status !== "stage_ready") {
+        if (forceReadyGate) {
+          return "ready";
+        }
+        if (preservingIntro) {
+          return "intro";
+        }
+        if (syncedUpdate.status !== "stage_ready") {
           return "loading";
         }
         if (current === "intro" && nextRoom === "briefing") {
@@ -1473,28 +1647,37 @@ export default function App() {
         }
         return "live";
       });
-      if (nextRoom !== "briefing") {
+      if (nextRoom !== "briefing" && nextRoom !== previousRoom) {
         setSceneTextOpen(false);
       }
-      if (updated.focused_citizen_id) {
-        setActiveCitizenId(updated.focused_citizen_id);
-        setStreetCandidateCitizenId(nextRoom === "citizens" ? updated.focused_citizen_id : undefined);
+      if (syncedUpdate.focused_citizen_id) {
+        setActiveCitizenId(syncedUpdate.focused_citizen_id);
+        setStreetCandidateCitizenId(nextRoom === "citizens" ? syncedUpdate.focused_citizen_id : undefined);
       }
       if (nextRoom !== "citizens") {
         setStreetCandidateCitizenId(undefined);
       }
     });
+    const currentParams = new URLSearchParams(window.location.search);
+    const liveView =
+      syncedUpdate.status === "stage_ready" &&
+      !forceReadyGate &&
+      !preservingIntro &&
+      (nextRoom !== "briefing" || currentParams.get("view") === "live");
     window.history.replaceState(
       null,
       "",
       simulationUrl(
-        updated.simulation_id,
+        syncedUpdate.simulation_id,
         advisorMode,
         auditoriumMode,
-        nextRoom,
-        updated.status === "stage_ready" ? "live" : undefined,
+        liveView ? nextRoom : undefined,
+        liveView ? "live" : undefined,
       ),
     );
+    if (forceReadyGate) {
+      forceNextStageGateRef.current = false;
+    }
   }
 
   function refreshSimulationSnapshot(delayMs = 1200) {
@@ -1542,17 +1725,12 @@ export default function App() {
     if (!stage) {
       return;
     }
-    if (hasPlayableFeaturettes) {
-      const defaultFeaturetteId = stage.featurettes.find((item) => item.status === "ready")?.id ?? null;
-      setReelsRequestedFeaturetteId(requestedFeaturetteId ?? defaultFeaturetteId);
-      setReelsOpen(true);
-      setPanelsOpen(false);
-      return;
-    }
-    setReelsRequestedFeaturetteId(null);
-    setReelsOpen(false);
-    setDrawerTab("reels");
-    setPanelsOpen(true);
+    const defaultFeaturetteId = hasPlayableFeaturettes
+      ? stage.featurettes.find((item) => item.status === "ready")?.id ?? null
+      : null;
+    setReelsRequestedFeaturetteId(requestedFeaturetteId ?? defaultFeaturetteId);
+    setReelsOpen(true);
+    setPanelsOpen(false);
   }
 
   async function toggleFullscreen() {
@@ -1575,16 +1753,19 @@ export default function App() {
       return;
     }
     const anyVoiceLive =
-      setupVoiceConnected
-      || [scenePresence.advisor, scenePresence.citizens, scenePresence.debate].some(
+      [scenePresence.advisor, scenePresence.citizens, scenePresence.debate].some(
         (presence) => presence.status === "connected" && presence.liveMode === "voice" && !presence.muted,
       );
     const keepVoiceLive =
       options?.resumeVoice !== false &&
       anyVoiceLive &&
       nextRoom !== "briefing";
+    const previousRoom = roomRef.current;
     honorQueryRequestedRoomRef.current = false;
     const effectiveAuditoriumMode = options?.nextAuditoriumMode ?? auditoriumMode;
+    if (options?.nextAuditoriumMode && options.nextAuditoriumMode !== auditoriumMode) {
+      setAuditoriumMode(options.nextAuditoriumMode);
+    }
     const focusedCitizenId =
       nextRoom === "citizens"
         ? citizenId ?? candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id ?? simulation.focused_citizen_id ?? citizens[0]?.citizen_id
@@ -1593,11 +1774,33 @@ export default function App() {
     setStageGate("live");
     setSceneTextOpen(false);
     setSceneTextDraft("");
+    if (nextRoom !== previousRoom) {
+      disconnectNonCurrentRoomChannels(nextRoom);
+      setLiveSceneCaptions((current) => ({ ...current, [previousRoom]: null }));
+      if (previousRoom === "advisor") {
+        setCouncilFloor(null);
+      }
+    }
+    setRoom(nextRoom);
+    roomRef.current = nextRoom;
+    setSimulation((current) =>
+      current && current.status === "stage_ready"
+        ? {
+            ...current,
+            current_room: nextRoom,
+            focused_citizen_id:
+              nextRoom === "citizens"
+                ? focusedCitizenId ?? current.focused_citizen_id
+                : current.focused_citizen_id,
+          }
+        : current,
+    );
     if (panelsOpen) {
       setDrawerTab("room");
     }
     if (nextRoom !== "citizens") {
       setStreetCandidateCitizenId(undefined);
+      setStreetVoiceRoaming(false);
     } else if (focusedCitizenId) {
       setStreetCandidateCitizenId(focusedCitizenId);
     }
@@ -1607,13 +1810,16 @@ export default function App() {
         citizen_id: focusedCitizenId,
       });
       const maybeSimulation = result.data?.simulation as SimulationState | undefined;
+      const committedCitizenId = nextRoom === "citizens" ? maybeSimulation?.focused_citizen_id ?? focusedCitizenId : undefined;
       if (maybeSimulation?.simulation_id) {
-        handleSimulationSync(maybeSimulation);
+        handleSimulationSync(maybeSimulation, {
+          preferredRoom: nextRoom,
+          preferredCitizenId: committedCitizenId,
+        });
       }
-      const committedRoom = maybeSimulation?.current_room ?? nextRoom;
+      const committedRoom = nextRoom;
       setRoom(committedRoom);
       if (committedRoom === "citizens") {
-        const committedCitizenId = maybeSimulation?.focused_citizen_id ?? focusedCitizenId;
         if (committedCitizenId) {
           setActiveCitizenId(committedCitizenId);
           setStreetCandidateCitizenId(committedCitizenId);
@@ -1692,6 +1898,7 @@ export default function App() {
       return;
     }
     honorQueryRequestedRoomRef.current = false;
+    advisorDockRef.current?.disconnect();
     handlePresenceChange("advisor", EMPTY_PRESENCE);
     setCouncilFloor(null);
     setLiveSceneCaptions((current) => ({ ...current, advisor: null }));
@@ -1712,7 +1919,9 @@ export default function App() {
       return;
     }
     honorQueryRequestedRoomRef.current = false;
+    debateDockRef.current?.disconnect();
     handlePresenceChange("debate", EMPTY_PRESENCE);
+    setLiveSceneCaptions((current) => ({ ...current, debate: null }));
     setAuditoriumMode(nextMode);
     if (nextMode === "town_hall" && options?.launchTownHall) {
       setTownHallLaunchNonce((current) => current + 1);
@@ -1755,6 +1964,7 @@ export default function App() {
   }
 
   async function handleModeCommand(command: {
+    sourceRole?: RealtimeRole;
     room?: RoomName;
     advisorMode?: AdvisorMode;
     auditoriumMode?: AuditoriumMode;
@@ -1820,18 +2030,23 @@ export default function App() {
       return true;
     }
     if (command.action === "call_election") {
+      if (debateAdvanceDisabled) {
+        setError(debateAdvanceHint);
+        return false;
+      }
       await handleResolveStage(debateAdvancePayload, latestDebatePlayerTurn);
       return true;
     }
     if (command.action === "townhall_question") {
+      if (townHallUnavailable) {
+        setError(townHallUnavailableReason);
+        return false;
+      }
       setPanelsOpen(false);
       if (room !== "debate") {
         await handleRoomFocus("debate", undefined, { nextAuditoriumMode: "town_hall" });
       }
       setAuditoriumRoomMode("town_hall", { launchTownHall: true });
-      queueAfterPaint(() => {
-        void debateRoomRef.current?.askTownHallQuestion();
-      });
       return true;
     }
     if (command.action === "run_queued_polls") {
@@ -1865,6 +2080,12 @@ export default function App() {
       }
     }
     if (command.action === "update_policy_board" && command.policyBoard) {
+      if (command.sourceRole && command.sourceRole !== "advisor") {
+        return false;
+      }
+      if (room !== "advisor") {
+        return false;
+      }
       try {
         const result = await callRealtimeTool(simulation.simulation_id, "advisor", "update_policy_board", command.policyBoard);
         const maybeSimulation = result.data?.simulation as SimulationState | undefined;
@@ -1894,6 +2115,24 @@ export default function App() {
         const maybeSimulation = result.data?.simulation as SimulationState | undefined;
         if (maybeSimulation?.simulation_id) {
           handleSimulationSync(maybeSimulation);
+          const focusedCitizenId = maybeSimulation.focused_citizen_id;
+          if (focusedCitizenId) {
+            const expectedScope = `${maybeSimulation.simulation_id}:citizen:${focusedCitizenId}`;
+            const generation = dockActionGenerationRef.current;
+            queueAfterPaint(() => {
+              withMountedDock(
+                (dock) => {
+                  if (dock.getScopeKey() === expectedScope) {
+                    void dock.startOrToggleVoice();
+                  }
+                },
+                0,
+                generation,
+                "citizens",
+                expectedScope,
+              );
+            });
+          }
         }
         return true;
       } catch (caught) {
@@ -1932,16 +2171,54 @@ export default function App() {
     return Boolean(command.advisorMode || command.auditoriumMode);
   }
 
-  function handleStreetFocusChange(citizenId?: string) {
-    if (room !== "citizens" || citizenFocusLocked || streetPendingCitizenId) {
+  async function handleStreetFocusChange(citizenId?: string) {
+    if (room !== "citizens") {
       return;
     }
     setStreetCandidateCitizenId((current) => (current === citizenId ? current : citizenId));
-    if (!citizenId || !simulation) {
+    const citizenVoiceWasLive =
+      scenePresence.citizens.liveMode === "voice" &&
+      scenePresence.citizens.status === "connected" &&
+      !scenePresence.citizens.muted;
+    const keepStreetVoiceOpen = citizenVoiceWasLive || streetVoiceRoaming;
+    if (!citizenId) {
+      if (keepStreetVoiceOpen) {
+        citizenDockRef.current?.disconnect();
+        handlePresenceChange("citizens", EMPTY_PRESENCE);
+        setActiveCitizenId(undefined);
+        setStreetCandidateCitizenId(undefined);
+        pendingCitizenActionRef.current = null;
+        setStreetPendingCitizenId(undefined);
+        setStreetVoiceRoaming(true);
+        return;
+      }
+      citizenDockRef.current?.disconnect();
+      handlePresenceChange("citizens", EMPTY_PRESENCE);
+      setActiveCitizenId(undefined);
+      pendingCitizenActionRef.current = null;
+      setStreetPendingCitizenId(undefined);
       return;
     }
-    if (simulation.focused_citizen_id === citizenId) {
+    if (!simulation) {
+      return;
+    }
+    if (streetPendingCitizenId) {
+      return;
+    }
+    if (simulation.focused_citizen_id === citizenId && activeCitizen?.citizen_id === citizenId) {
       setActiveCitizenId((current) => (current === citizenId ? current : citizenId));
+      return;
+    }
+    await handOffCitizenAction(
+      citizenId,
+      keepStreetVoiceOpen
+        ? (dock) => {
+            void dock.enableVoice();
+          }
+        : undefined,
+    );
+    if (keepStreetVoiceOpen) {
+      setStreetVoiceRoaming(false);
     }
   }
 
@@ -1992,7 +2269,7 @@ export default function App() {
       return `${simulationKey}:advisor:${options?.advisorMode ?? advisorMode}`;
     }
     if (targetRoom === "citizens") {
-      return `${simulationKey}:citizen:${options?.citizenId ?? activeCitizen?.citizen_id ?? streetCandidateCitizenId ?? "none"}`;
+      return `${simulationKey}:citizen:${options?.citizenId ?? streetCandidateCitizenId ?? activeCitizen?.citizen_id ?? "none"}`;
     }
     if (targetRoom === "debate") {
       return `${simulationKey}:debate:${options?.auditoriumMode ?? auditoriumMode}`;
@@ -2025,6 +2302,7 @@ export default function App() {
     try {
       if (needsCitizenSwap) {
         citizenDockRef.current?.disconnect();
+        handlePresenceChange("citizens", EMPTY_PRESENCE);
       }
       const updated = await persistCitizenFocus(nextCitizenId);
       const committedCitizenId = updated?.focused_citizen_id ?? nextCitizenId;
@@ -2093,6 +2371,7 @@ export default function App() {
     refreshSnapshotGenerationRef.current += 1;
     pendingCitizenActionRef.current = null;
     setStreetPendingCitizenId(undefined);
+    setStreetVoiceRoaming(false);
     advisorDockRef.current?.disconnect();
     citizenDockRef.current?.disconnect();
     debateDockRef.current?.disconnect();
@@ -2157,26 +2436,35 @@ export default function App() {
     if (!simulation) {
       return room;
     }
+    suppressIntroPreservationRef.current = true;
     setShowCinematicIntro(false);
     setStageGate("live");
     setSceneTextOpen(false);
     const targetRoom = room !== "briefing" ? room : simulation.current_room !== "briefing" ? simulation.current_room : "advisor";
-    if (room !== targetRoom || simulation.current_room === "briefing") {
-      await handleRoomFocus(targetRoom);
-    }
-    if (options?.openChannel) {
-      revealRoomChannel();
-    }
-    if (options?.startVoice) {
-      await handOffRoomAction(targetRoom, (dock) => {
-        void dock.startOrToggleVoice();
-      });
+    try {
+      if (room !== targetRoom || simulation.current_room === "briefing") {
+        await handleRoomFocus(targetRoom, undefined, { resumeVoice: false });
+      }
+      if (options?.openChannel) {
+        revealRoomChannel();
+      }
+      if (options?.startVoice) {
+        await handOffRoomAction(targetRoom, (dock) => {
+          void dock.startOrToggleVoice();
+        });
+      }
+    } finally {
+      suppressIntroPreservationRef.current = false;
     }
     return targetRoom;
   }
 
   function handleLaunchStageIntro() {
-    if (!simulation || simulation.status !== "stage_ready") {
+    if (!simulation || simulation.status !== "stage_ready" || !stage) {
+      return;
+    }
+    if (stage.narrative_beats.length === 0) {
+      void handleEnterWarRoom({ openChannel: false });
       return;
     }
     setRoom("briefing");
@@ -2202,10 +2490,16 @@ export default function App() {
       queuePostTurnRefreshes();
       return;
     }
-    if (room === "citizens" && candidateCitizen?.citizen_id && candidateCitizen.citizen_id !== activeCitizen?.citizen_id) {
-      await handOffCitizenAction(candidateCitizen.citizen_id, (dock) => {
+    if (
+      room === "citizens" &&
+      candidateCitizen?.citizen_id &&
+      candidateCitizen.citizen_id !== activeCitizen?.citizen_id
+    ) {
+      const nextCitizenId = candidateCitizen.citizen_id;
+      await handOffCitizenAction(nextCitizenId);
+      withMountedDock((dock) => {
         void dock.sendText(next);
-      });
+      }, 0, dockActionGenerationRef.current, "citizens", dockScopeKeyForRoom("citizens", { citizenId: nextCitizenId }));
       queuePostTurnRefreshes();
       return;
     }
@@ -2348,12 +2642,13 @@ export default function App() {
         {
           id: "briefing-voices",
           label: "Street",
-          hint: "Hear the country",
+          hint: citizensHydrating ? "Citizens are still arriving" : "Hear the country",
           position: [2.7, 2.26, -3.55],
           tone: "steel",
           action: "room",
           room: "citizens",
           citizenId: activeCitizen?.citizen_id ?? candidateCitizen?.citizen_id,
+          disabled: citizensHydrating,
         },
         {
           id: "briefing-debate",
@@ -2371,12 +2666,13 @@ export default function App() {
         {
           id: "advisor-voices",
           label: "Street",
-          hint: "Interview voters directly",
+          hint: citizensHydrating ? "Citizens are still arriving" : "Interview voters directly",
           position: [-5.55, 1.06, -1.12],
           tone: "steel",
           action: "room",
           room: "citizens",
           citizenId: activeCitizen?.citizen_id ?? candidateCitizen?.citizen_id,
+          disabled: citizensHydrating,
         },
         {
           id: "advisor-debate",
@@ -2430,27 +2726,33 @@ export default function App() {
         action: "room",
         room: "advisor",
       },
-        {
-          id: "debate-voices",
-          label: "Street",
-          hint: "Return to voters",
-          position: [4.45, 1.34, 2.82],
+      {
+        id: "debate-voices",
+        label: "Street",
+        hint: citizensHydrating ? "Citizens are still arriving" : "Return to voters",
+        position: [4.45, 1.34, 2.82],
         tone: "steel",
         action: "room",
         room: "citizens",
         citizenId: activeCitizen?.citizen_id ?? candidateCitizen?.citizen_id,
+        disabled: citizensHydrating,
       },
       {
         id: "debate-townhall",
         label: auditoriumMode === "town_hall" ? "Audience question" : "Town hall",
-        hint: auditoriumMode === "town_hall" ? "Open the next voter question" : "Open the live audience floor",
+        hint: townHallUnavailable
+          ? townHallUnavailableReason
+          : auditoriumMode === "town_hall"
+            ? "Open the next voter question"
+            : "Open the live audience floor",
         position: [2.58, 1.28, 1.5],
         tone: "sage",
         action: "townhall",
         active: auditoriumMode === "town_hall",
+        disabled: townHallUnavailable,
       },
     ];
-  }, [activeCitizen?.citizen_id, advisorMode, auditoriumMode, candidateCitizen?.citizen_id, citizens, resolvingStage, room, stage]);
+  }, [activeCitizen?.citizen_id, advisorMode, auditoriumMode, candidateCitizen?.citizen_id, citizensHydrating, resolvingStage, room, stage, townHallUnavailable, townHallUnavailableReason]);
 
   const roomDrawer = !stage ? null : (
     <section className="immersive-drawer__room">
@@ -2500,16 +2802,13 @@ export default function App() {
               <span>Working agenda</span>
               {advisorPolicyNotes.length > 0 ? (
                 advisorPolicyNotes.slice(0, 4).map((note, index) => <p key={note}>{index + 1}. {note}</p>)
-              ) : currentStageAxes.length > 0 ? (
-                currentStageAxes.slice(0, 3).map((note, index) => <p key={note}>{index + 1}. {note}</p>)
               ) : (
                 <p>The room will hold the few planks that survive the argument.</p>
               )}
             </div>
             <div className="side-panel__block">
               <span>Current pressures</span>
-              {[stageSplit(stage, 132), stageConstraint(stage, 132)]
-                .filter(Boolean)
+              {Array.from(new Set([stageSplit(stage, 132), stageConstraint(stage, 132)].filter(Boolean)))
                 .map((item) => (
                   <p key={item}>{item}</p>
                 ))}
@@ -2530,7 +2829,21 @@ export default function App() {
 
       {room === "citizens" ? (
         <section className="room-grid room-grid--citizens immersive-room-grid">
-          <CitizenGrid citizens={citizens} activeCitizenId={activeCitizen?.citizen_id ?? candidateCitizen?.citizen_id} onSelect={(citizenId) => void handleRoomFocus("citizens", citizenId)} />
+          {citizens.length > 0 ? (
+            <CitizenGrid
+              citizens={citizens}
+              activeCitizenId={activeCitizen?.citizen_id ?? candidateCitizen?.citizen_id}
+              onSelect={(citizenId) => void handleRoomFocus("citizens", citizenId)}
+            />
+          ) : (
+            <section className={`side-panel side-panel--desk side-panel--theme-${themeMode}`}>
+              <div className="side-panel__block">
+                <span>Street still populating</span>
+                <p>The chapter is already live, but representative citizens are still being updated into this world.</p>
+                <p>Stay in the war room or auditorium for a moment, or come back once the street lights up.</p>
+              </div>
+            </section>
+          )}
           {activeCitizen ? (
             <VoiceDock
               key={activeCitizen.citizen_id}
@@ -2582,6 +2895,8 @@ export default function App() {
           onModeCommand={handleModeCommand}
           onTownHallStateChange={setTownHallSceneState}
           townHallLaunchNonce={townHallLaunchNonce}
+          townHallDisabled={townHallUnavailable}
+          townHallDisabledReason={townHallUnavailableReason}
         />
       ) : null}
     </section>
@@ -2714,11 +3029,40 @@ export default function App() {
   }, [simulation?.simulation_id]);
 
   return (
-    <div className={`app-shell ${simulation ? "app-shell--live" : "app-shell--setup"} app-shell--theme-${themeMode}`}>
+    <div className={`app-shell ${simulation || directSimulationBooting ? "app-shell--live" : "app-shell--setup"} app-shell--theme-${themeMode}`}>
       <div className="app-shell__glow app-shell__glow--left" />
       <div className="app-shell__glow app-shell__glow--right" />
 
-      {!simulation ? (
+      {!simulation && directSimulationBooting ? (
+        <main className="immersive-stage">
+          <section
+            className="loading-stage loading-stage--immersive"
+            style={
+              {
+                ["--loading-accent" as string]: themeProfile.loadingTone,
+                ["--loading-fill" as string]: themeProfile.fill,
+                ["--loading-halo" as string]: themeProfile.halo,
+              } as CSSProperties
+            }
+          >
+            <div className="loading-stage__hero">
+              <div className="loading-stage__spinner" />
+              <div className="loading-stage__heading">
+                <span className="loading-stage__eyebrow">Opening run</span>
+                <h1>Finding the current chapter</h1>
+                <p>The simulation exists. The app is pulling its world, room, people, and chapter reel back into memory.</p>
+              </div>
+            </div>
+            <div className="loading-stage__lower">
+              <article className="loading-stage__quote-card loading-stage__quote-card--wide">
+                <span>While it loads</span>
+                <p>{LOADING_TIPS[loadingQuoteIndex % LOADING_TIPS.length]}</p>
+              </article>
+            </div>
+            {error ? <p className="setup-room__error">{error}</p> : null}
+          </section>
+        </main>
+      ) : !simulation ? (
         <main className="immersive-stage immersive-stage--setup">
           <section className="immersive-stage__world" style={{ position: "relative" }}>
             <SetupRoomViewport
@@ -2973,6 +3317,7 @@ export default function App() {
           ) : stage ? (
             <>
               <section className="immersive-stage__world">
+                <SceneErrorBoundary resetKey={`${simulation.simulation_id}:${stage.index}:${room}:${advisorMode}:${auditoriumMode}`}>
                 <Suspense fallback={<section className="scene scene--loading immersive-stage__scene" />}>
                   <SceneViewport
                     key={`${simulation.simulation_id}:${stage.index}`}
@@ -3032,7 +3377,13 @@ export default function App() {
                     stageAdvanceLabel={debateAdvanceLabel}
                     stageAdvanceHint={debateAdvanceHint}
                     stageAdvanceDisabled={debateAdvanceDisabled}
+                    townHallDisabled={townHallUnavailable}
+                    townHallDisabledReason={townHallUnavailableReason}
                     onTownHallQuestion={() => {
+                      if (townHallUnavailable) {
+                        setError(townHallUnavailableReason);
+                        return;
+                      }
                       void debateRoomRef.current?.askTownHallQuestion();
                     }}
                     onStreetFocusChange={handleStreetFocusChange}
@@ -3058,13 +3409,14 @@ export default function App() {
                     onRestart={() => void handleRestart()}
                   />
                 </Suspense>
+                </SceneErrorBoundary>
                 {showCinematicIntro ? (
                   <BriefingTheater
                     stage={stage}
                     variant="cinematic"
                     themeProfile={themeProfile}
-                    hidden={panelsOpen}
-                    onEnterWarRoom={() => void handleEnterWarRoom({ startVoice: true })}
+                    hidden={false}
+                    onEnterWarRoom={() => void handleEnterWarRoom({ openChannel: false })}
                   />
                 ) : null}
                 {simulation.status === "completed" && stage.resolution ? (
@@ -3089,22 +3441,25 @@ export default function App() {
                       }}
                     />
                     <div className="featurette-overlay__panel" ref={reelsOverlayRef} tabIndex={-1}>
-                      <button
-                        className="btn btn--ghost featurette-overlay__close"
-                        data-testid="featurette-overlay-close"
-                        ref={reelsCloseButtonRef}
-                        onClick={() => {
-                          setReelsOpen(false);
-                          setReelsRequestedFeaturetteId(null);
-                        }}
-                      >
-                        Close
-                      </button>
+                      {!reelsCinemaOpen ? (
+                        <button
+                          className="btn btn--ghost featurette-overlay__close"
+                          data-testid="featurette-overlay-close"
+                          ref={reelsCloseButtonRef}
+                          onClick={() => {
+                            setReelsOpen(false);
+                            setReelsRequestedFeaturetteId(null);
+                          }}
+                        >
+                          Close
+                        </button>
+                      ) : null}
                       <FeaturetteShelf
                         stage={stage}
                         variant="overlay"
                         requestedFeaturetteId={reelsRequestedFeaturetteId}
                         onRequestedFeaturetteClear={() => setReelsRequestedFeaturetteId(null)}
+                        onCinemaStateChange={setReelsCinemaOpen}
                         onClose={() => {
                           setReelsOpen(false);
                           setReelsRequestedFeaturetteId(null);
@@ -3129,7 +3484,10 @@ export default function App() {
                           key={entry.key}
                           className={`room-nav__button ${room === entry.key ? "room-nav__button--active" : ""}`}
                           onClick={() => void handleRoomFocus(entry.key)}
-                          disabled={simulation.status !== "stage_ready" && entry.key !== "briefing"}
+                          disabled={
+                            (simulation.status !== "stage_ready" && entry.key !== "briefing")
+                            || (entry.key === "citizens" && citizensHydrating)
+                          }
                         >
                           {entry.label}
                         </button>
@@ -3162,7 +3520,11 @@ export default function App() {
                     ) : null}
                   </div>
 
-                  <div className={`immersive-drawer__body ${panelsOpen ? "immersive-drawer__body--open" : ""}`}>
+                  <div
+                    className={`immersive-drawer__body ${panelsOpen ? "immersive-drawer__body--open" : ""}`}
+                    aria-hidden={!panelsOpen}
+                    inert={!panelsOpen}
+                  >
                     <div className={`immersive-drawer__pane ${drawerTab === "room" ? "immersive-drawer__pane--active" : ""}`}>
                       {roomDrawer}
                     </div>

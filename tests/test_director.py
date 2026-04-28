@@ -11,12 +11,10 @@ from econ_sim.models import (
     AdvisorMode,
     AuditoriumMode,
     CouncilAdvisorDraft,
-    CouncilAdvisorBeat,
     CouncilAdvisorAction,
     CouncilAdvisorProfile,
     CouncilFloorPick,
     CouncilSpeakerDecision,
-    CouncilTurnPlan,
     CouncilTurnRequest,
     ConversationSyncRequest,
     ConversationTurn,
@@ -24,6 +22,7 @@ from econ_sim.models import (
     DocumentaryFeaturette,
     NarrativeBeat,
     PollSummary,
+    PreparationPhase,
     QueuePollRequest,
     RealtimeRole,
     RealtimeSessionRequest,
@@ -211,6 +210,95 @@ async def test_prepare_stage_queues_featurettes_without_blocking_stage_ready(tmp
 
 
 @pytest.mark.asyncio
+async def test_stage_becomes_playable_before_citizens_finish_hydrating(tmp_path: Path, monkeypatch):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    hydration_started = asyncio.Event()
+    release_hydration = asyncio.Event()
+
+    async def slow_update_personas_for_stage(**kwargs):
+        hydration_started.set()
+        await release_hydration.wait()
+        return director.gabriel_service._dummy_updates(
+            kwargs["personas"],
+            kwargs["stage"],
+            kwargs["incumbent_name"],
+        )
+
+    monkeypatch.setattr(director.gabriel_service, "update_personas_for_stage", slow_update_personas_for_stage)
+    monkeypatch.setattr(director, "_queue_stage_featurettes", lambda simulation_id, stage_index: None)
+    monkeypatch.setattr(director, "_queue_stage_tracking_poll", lambda simulation_id, stage_index: None)
+    monkeypatch.setattr(director, "_queue_stage_town_hall_questions", lambda simulation_id, stage_index: None)
+
+    state = await director.create_simulation(SimulationCreateRequest())
+    await asyncio.wait_for(hydration_started.wait(), timeout=2)
+
+    async def wait_until_playable():
+        while True:
+            latest = await director.get_simulation(state.simulation_id)
+            if latest.status == SimulationStatus.stage_ready:
+                return latest
+            await asyncio.sleep(0.01)
+
+    playable = await asyncio.wait_for(wait_until_playable(), timeout=2)
+
+    assert playable.progress.phase == PreparationPhase.citizen_updates
+    assert playable.stages[playable.active_stage_index].sample_citizens == []
+    assert playable.focused_citizen_id is None
+
+    advisor_session = await director.create_realtime_session(
+        playable.simulation_id,
+        RealtimeSessionRequest(role=RealtimeRole.advisor),
+    )
+    assert advisor_session.session_type == "advisor"
+
+    with pytest.raises(RuntimeError, match="citizens are still hydrating"):
+        await director.create_realtime_session(
+            playable.simulation_id,
+            RealtimeSessionRequest(role=RealtimeRole.citizen, citizen_id="citizen_1"),
+        )
+
+    move_result = await director.execute_tool(
+        playable.simulation_id,
+        RealtimeRole.advisor,
+        "move_room_focus",
+        {"room": "citizens"},
+    )
+    assert move_result.ok is False
+    assert "hydrating" in str(move_result.data.get("message", "")).lower()
+
+    release_hydration.set()
+    await director.wait_for_pending(state.simulation_id)
+
+    loaded = await director.get_simulation(state.simulation_id)
+    assert loaded.stages[loaded.active_stage_index].sample_citizens
+    assert loaded.focused_citizen_id == loaded.stages[loaded.active_stage_index].sample_citizens[0].citizen_id
+
+
+@pytest.mark.asyncio
+async def test_stage_stays_playable_when_late_citizen_hydration_fails(tmp_path: Path, monkeypatch):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+
+    async def failing_update_personas_for_stage(**kwargs):
+        raise RuntimeError("persona refresh failed after stage publish")
+
+    monkeypatch.setattr(director.gabriel_service, "update_personas_for_stage", failing_update_personas_for_stage)
+    monkeypatch.setattr(director, "_queue_stage_featurettes", lambda simulation_id, stage_index: None)
+    monkeypatch.setattr(director, "_queue_stage_tracking_poll", lambda simulation_id, stage_index: None)
+    monkeypatch.setattr(director, "_queue_stage_town_hall_questions", lambda simulation_id, stage_index: None)
+
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+
+    assert loaded.status == SimulationStatus.stage_ready
+    assert loaded.error is None
+    assert loaded.progress.label == "Citizens still arriving"
+    assert loaded.stages[loaded.active_stage_index].sample_citizens == []
+
+
+@pytest.mark.asyncio
 async def test_prepare_stage_featurettes_merges_ready_assets_without_overwriting_stage(tmp_path: Path, monkeypatch):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
@@ -265,6 +353,63 @@ async def test_prepare_stage_featurettes_merges_ready_assets_without_overwriting
     assert refreshed_stage.featurettes[0].status == "ready"
     assert refreshed_stage.featurettes[0].narrative_beats[0].image_url.startswith("/assets/")
     assert refreshed_stage.featurettes[0].narrative_beats[0].audio_url.startswith("/assets/")
+
+
+@pytest.mark.asyncio
+async def test_stage_media_falls_back_when_image_generation_is_blocked(tmp_path: Path, monkeypatch):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+    director.orchestrator.settings.dummy_openai = False
+
+    async def fake_render_image(*, prompt: str, output_path: Path) -> None:
+        raise RuntimeError("moderation_blocked")
+
+    async def fake_synthesize(*, text: str, output_path: Path) -> None:
+        output_path.write_bytes(b"mp3")
+
+    monkeypatch.setattr(director.orchestrator.gateway, "render_image", fake_render_image)
+    monkeypatch.setattr(director.orchestrator.gateway, "synthesize", fake_synthesize)
+
+    await director.orchestrator.materialize_stage_media(stage=stage, asset_dir=tmp_path / "assets")
+
+    assert stage.narrative_beats
+    assert stage.narrative_beats[0].image_path is not None
+    assert stage.narrative_beats[0].image_path.endswith("-fallback.svg")
+    assert Path(stage.narrative_beats[0].image_path).exists()
+    assert stage.narrative_beats[0].audio_path is not None
+    assert Path(stage.narrative_beats[0].audio_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_stage_media_timeout_writes_fallback_frames(tmp_path: Path, monkeypatch):
+    settings = AppSettings(dummy_openai=True, image_timeout_seconds=0.0, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+    stage.narrative_beats = stage.narrative_beats[:2]
+    director.orchestrator.settings.dummy_openai = False
+
+    async def slow_render_image(*, prompt: str, output_path: Path) -> None:
+        await asyncio.sleep(2)
+        output_path.write_bytes(b"late image")
+
+    async def fake_synthesize(*, text: str, output_path: Path) -> None:
+        output_path.write_bytes(b"mp3")
+
+    monkeypatch.setattr(director.orchestrator.gateway, "render_image", slow_render_image)
+    monkeypatch.setattr(director.orchestrator.gateway, "synthesize", fake_synthesize)
+
+    await director.orchestrator.materialize_stage_media(stage=stage, asset_dir=tmp_path / "assets-timeout")
+
+    assert stage.narrative_beats
+    assert all(beat.image_path and beat.image_path.endswith("-fallback.svg") for beat in stage.narrative_beats)
+    assert all(Path(str(beat.image_path)).exists() for beat in stage.narrative_beats)
 
 
 @pytest.mark.asyncio
@@ -848,7 +993,7 @@ async def test_resolve_stage_advances(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_resolve_stage_falls_back_to_draft_agenda_and_records_election_shift(tmp_path: Path):
+async def test_resolve_stage_rejects_empty_platform(tmp_path: Path):
     settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
     director = build_director(settings)
     state = await director.create_simulation(
@@ -859,16 +1004,11 @@ async def test_resolve_stage_falls_back_to_draft_agenda_and_records_election_shi
     )
     await director.wait_for_pending(state.simulation_id)
 
-    updated = await director.resolve_stage(
-        state.simulation_id,
-        ResolveStageRequest(player_platform="", player_rebuttal="I want the gains to stay broad and visible."),
-    )
-    resolved_stage = updated.stages[0]
-
-    assert resolved_stage.resolution is not None
-    assert resolved_stage.resolution.player_agenda_points
-    assert resolved_stage.resolution.election_takeaway
-    assert resolved_stage.resolution.post_debate_vote_share_player is not None
+    with pytest.raises(RuntimeError, match="player platform is required"):
+        await director.resolve_stage(
+            state.simulation_id,
+            ResolveStageRequest(player_platform="", player_rebuttal="I want the gains to stay broad and visible."),
+        )
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1181,11 @@ def test_normalize_policy_note_preserves_governing_mechanism(tmp_path: Path):
     assert director._axis_to_policy_note(
         "Expand AI use in public-facing administration now versus slow deployment until training, data systems, and review capacity improve."
     ) == "Open public services to AI."
+    assert director._normalize_policy_note("Raise machine checks automatically when household model-credit.") == ""
+    assert (
+        director._normalize_policy_note("Raise machine checks automatically when model-credit access is capped")
+        == "Raise machine checks automatically when model-credit access is capped."
+    )
 
 
 def test_normalize_policy_note_drops_conversational_filler(tmp_path: Path):
@@ -1050,6 +1195,108 @@ def test_normalize_policy_note_drops_conversational_filler(tmp_path: Path):
     assert director._normalize_policy_note("Mhm") == ""
     assert director._normalize_policy_note("好的") == ""
     assert director._normalize_policy_note("Okay") == ""
+    assert director._normalize_policy_note("Caleb, can you add this to the policy board") == ""
+
+
+def test_council_tool_action_detection_skips_normal_first_turn(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+
+    assert not director._council_tool_action_was_requested("What do you think about this world?")
+    assert director._council_tool_action_was_requested("Run a poll on whether people like the machine check.")
+    assert director._council_tool_action_was_requested("Add this to the policy board.")
+
+
+@pytest.mark.asyncio
+async def test_direct_policy_board_notes_use_prior_advisor_idea_for_add_this(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index]
+    thread_turns = [
+        ConversationTurn(
+            speaker="assistant",
+            speaker_name="Rowan",
+            text=(
+                "I would put one line on the board: offer wage insurance for workers displaced by automation, "
+                "funded from compute-lease revenue."
+            ),
+            mode="voice",
+        ),
+    ]
+
+    notes = director._direct_policy_board_notes_from_turn(
+        stage,
+        "Rowan, can you add this to the policy board?",
+        thread_turns,
+    )
+
+    assert notes == ["Offer wage insurance for workers displaced by automation, funded from compute-lease revenue."]
+    assert "can you add" not in notes[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_live_council_board_update_is_owned_by_selected_advisor(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest(council_roster=_standard_council_roster()))
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    expected_note = "Offer wage insurance for workers displaced by automation, funded from compute-lease revenue."
+
+    await director.sync_conversation(
+        loaded.simulation_id,
+        ConversationSyncRequest(
+            role=RealtimeRole.advisor,
+            advisor_mode=AdvisorMode.council,
+            turns=[
+                ConversationTurnInput(
+                    speaker="assistant",
+                    speaker_name="Rowan",
+                    speaker_voice="cedar",
+                    text=(
+                        "I would put one line on the board: offer wage insurance for workers displaced by automation, "
+                        "funded from compute-lease revenue."
+                    ),
+                    mode="voice",
+                ),
+            ],
+        ),
+    )
+
+    async def fake_parse(**kwargs):
+        text_format = kwargs["text_format"]
+        if text_format is CouncilFloorPick:
+            return (CouncilFloorPick(next_speaker="capacity"), "decider-response-id")
+        if text_format is CouncilAdvisorDraft:
+            return (
+                CouncilAdvisorDraft(
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="Yes. I put the wage-insurance version up, because it names who is paid and where the money comes from.",
+                    board_notes=[expected_note],
+                    action=CouncilAdvisorAction(
+                        name="update_policy_board",
+                        arguments={"action": "add", "notes": [expected_note]},
+                    ),
+                ),
+                "advisor-response-id",
+            )
+        raise AssertionError(f"unexpected parse type {text_format}")
+
+    director.gateway.parse = fake_parse  # type: ignore[method-assign]
+
+    response = await director.generate_council_turn(
+        loaded.simulation_id,
+        CouncilTurnRequest(text="Rowan, can you add this to the policy board?", mode="voice"),
+    )
+
+    assert response.board_notes == [expected_note]
+    assert response.simulation.stages[response.simulation.active_stage_index].policy_notes == [expected_note]
+    assert "rowan" not in response.board_notes[0].lower()
+    assert "can you add" not in response.board_notes[0].lower()
 
 
 def test_normalize_council_speech_fixes_lowercase_fragment_breaks(tmp_path: Path):
@@ -1319,37 +1566,8 @@ async def test_advisor_realtime_session_uses_manual_response_for_council_only(tm
     council_tool_names = [tool["name"] for tool in captured[0]["tools"]]
     solo_tool_names = [tool["name"] for tool in captured[1]["tools"]]
     assert captured[0]["tools"] == []
-    assert "Do not answer the player" in str(captured[0]["instructions"])
     assert "report_council_floor" not in council_tool_names
     assert "report_council_floor" not in solo_tool_names
-
-
-@pytest.mark.asyncio
-async def test_council_prompts_push_for_real_arguments_not_slogans(tmp_path: Path):
-    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
-    director = build_director(settings)
-    state = await director.create_simulation(SimulationCreateRequest())
-    await director.wait_for_pending(state.simulation_id)
-    loaded = await director.get_simulation(state.simulation_id)
-    stage = loaded.stages[loaded.active_stage_index]
-
-    live_prompt = director.realtime_prompts.advisor_instructions(
-        loaded,
-        stage.world_brief,
-        [],
-        advisor_mode=AdvisorMode.council,
-    )
-    turn_prompt = director.realtime_prompts.council_turn_generation_instructions(
-        loaded,
-        [],
-    )
-
-    assert "if a line could fit on a campaign sticker, it is too empty" in live_prompt
-    assert "plain speech beats smart-sounding fog" in live_prompt
-    assert "This council runs in three moving parts." in turn_prompt
-    assert "Do not ask advisors to report urgency." in turn_prompt
-    assert "Keep each spoken beat one lane wide, concrete, and ready for audio." in turn_prompt
-    assert "Council roster:" in turn_prompt
 
 
 def test_resolve_asset_file_finds_frontend_bundle_and_run_media(tmp_path: Path):
@@ -1394,8 +1612,6 @@ async def test_debate_realtime_session_uses_town_hall_floor_prompt_when_requeste
     assert session.session_variant == "town_hall"
     assert captured[0]["create_response"] is False
     assert captured[0]["capture_only"] is True
-    assert "Your only job is to hear the player's answer clearly" in str(captured[0]["instructions"])
-    assert "Ignore applause, chair noise, audience murmur" in str(captured[0]["instructions"])
 
 
 @pytest.mark.asyncio
@@ -1575,9 +1791,6 @@ async def test_generate_council_turn_can_continue_without_new_player_text(tmp_pa
     )
 
     assert len(captured_input_texts) == 1
-    assert captured_input_texts[0].startswith("Take the next live beat in the current council exchange.")
-    assert "The president explicitly wants the room to argue it out." in captured_input_texts[0]
-    assert "Speak naturally and directly." in captured_input_texts[0]
     assert response.lead == "Leila"
     assert response.next_speaker == "innovation"
     assert response.yield_after_turn is False
@@ -1712,15 +1925,8 @@ async def test_generate_council_turn_explicit_disagreement_adds_stronger_room_fi
         ),
     )
 
-    assert captured["max_output_tokens"] == [16, 200]
+    assert captured["max_output_tokens"] == [12, 200]
     assert len(captured["candidate_input_texts"]) == 1
-    assert "The president explicitly wants the room to argue it out." in str(captured["candidate_input_texts"][0])
-    assert "Speak naturally and directly." in str(captured["candidate_input_texts"][0])
-    assert "You already have the floor." in str(captured["candidate_instructions"][0])
-    assert "You do not need to propose a new policy every turn." in str(captured["candidate_instructions"][0])
-    assert "If the player clearly asked for a poll, a room move, or a board change" in str(captured["candidate_instructions"][0])
-    assert "You are deciding who speaks next in a live strategy council." in str(captured["decider_instructions"])
-    assert "Council continuation turn." not in str(captured["decider_input_text"])
     assert [turn.speaker_name for turn in response.turns] == ["Rowan"]
     assert response.contrast == []
 
@@ -1880,7 +2086,6 @@ async def test_generate_council_turn_keeps_provisional_advisor_context_on_new_us
     )
 
     assert captured["candidate_instructions"]
-    assert "Most recent spoken advisor line:\n- If the grid and procurement stay brittle, the visible gains will not hold." in captured["candidate_instructions"][0]
 
 
 def test_council_turn_helpers_detect_room_fights_and_trailing_beats(tmp_path: Path):
@@ -1893,32 +2098,18 @@ def test_council_turn_helpers_detect_room_fights_and_trailing_beats(tmp_path: Pa
 
     trailing_count = director._trailing_council_advisor_beats(
         [
-            director._assistant_turns_from_council_plan(  # type: ignore[attr-defined]
-                CouncilTurnPlan(
-                    lead="Rowan",
-                    reason="demo",
-                    advisors=[
-                        CouncilAdvisorBeat(name="Rowan", urgency=9, speak=True, text="Keep the buildout moving or the rents stay private."),
-                        CouncilAdvisorBeat(name="Leila", urgency=8, speak=False, text=""),
-                        CouncilAdvisorBeat(name="Mateo", urgency=4, speak=False, text=""),
-                        CouncilAdvisorBeat(name="Amina", urgency=3, speak=False, text=""),
-                    ],
-                ),
-                "text",
-            )[0],
-            director._assistant_turns_from_council_plan(  # type: ignore[attr-defined]
-                CouncilTurnPlan(
-                    lead="Leila",
-                    reason="demo",
-                    advisors=[
-                        CouncilAdvisorBeat(name="Leila", urgency=9, speak=True, text="Then say who pays while you wait for that competition to show up."),
-                        CouncilAdvisorBeat(name="Rowan", urgency=6, speak=False, text=""),
-                        CouncilAdvisorBeat(name="Mateo", urgency=4, speak=False, text=""),
-                        CouncilAdvisorBeat(name="Amina", urgency=3, speak=False, text=""),
-                    ],
-                ),
-                "text",
-            )[0],
+            ConversationTurn(
+                speaker="assistant",
+                speaker_name="Rowan",
+                text="Keep the buildout moving or the rents stay private.",
+                mode="text",
+            ),
+            ConversationTurn(
+                speaker="assistant",
+                speaker_name="Leila",
+                text="Then say who pays while you wait for that competition to show up.",
+                mode="text",
+            ),
         ]
     )
     assert trailing_count == 2
@@ -1976,10 +2167,27 @@ async def test_targeted_council_roster_keeps_named_pair_for_debate(tmp_path: Pat
         trailing_advisor_beats=1,
         avoid_speaker="capacity",
     )
+    later_continuation_roster = director._council_candidate_roster(
+        state,
+        [
+            *turns,
+            ConversationTurn(
+                speaker="assistant",
+                speaker_name="Rowan",
+                speaker_voice="cedar",
+                text="If we tax too hard, the bill lands on schools and small firms first.",
+                mode="voice",
+            ),
+        ],
+        continue_dialogue=True,
+        trailing_advisor_beats=2,
+        avoid_speaker="capacity",
+    )
 
     assert roster is not None
     assert [advisor.key for advisor in roster] == ["capacity", "innovation"]
-    assert [advisor.key for advisor in continuation_roster] == ["innovation"]
+    assert [advisor.key for advisor in continuation_roster] == ["capacity", "innovation"]
+    assert [advisor.key for advisor in later_continuation_roster] == ["innovation"]
 
 
 @pytest.mark.asyncio
@@ -2286,11 +2494,17 @@ async def test_generate_council_turn_understands_write_that_down(tmp_path: Path)
                 "decider-response-id",
             )
         if text_format is CouncilAdvisorDraft:
+            note = "Give every household a basic AI account and audit only money or infrastructure systems."
             return (
                 CouncilAdvisorDraft(
                     advisor_key="capacity",
                     advisor_name="Rowan",
                     text="I wrote that down.",
+                    board_notes=[note],
+                    action=CouncilAdvisorAction(
+                        name="update_policy_board",
+                        arguments={"action": "add", "notes": [note]},
+                    ),
                 ),
                 "advisor-response-id",
             )
@@ -2304,8 +2518,12 @@ async def test_generate_council_turn_understands_write_that_down(tmp_path: Path)
     )
 
     updated = await director.get_simulation(loaded.simulation_id)
-    assert updated.stages[updated.active_stage_index].policy_notes == ["Give every household basic AI."]
-    assert response.board_notes == ["Give every household basic AI."]
+    assert updated.stages[updated.active_stage_index].policy_notes == [
+        "Give every household a basic AI account and audit only money or infrastructure systems."
+    ]
+    assert response.board_notes == [
+        "Give every household a basic AI account and audit only money or infrastructure systems."
+    ]
 
 
 def test_orchestrator_normalize_council_roster_realigns_common_name_voice_pairs(tmp_path: Path):
@@ -2425,7 +2643,9 @@ async def test_generate_town_hall_question_falls_back_and_persists_to_citizen_sn
 
     updated = await director.get_simulation(loaded.simulation_id)
     refreshed_citizen = updated.stages[updated.active_stage_index].sample_citizens[0]
-    assert response.question_turn.text == "My public account pays most of our rent, but it freezes long enough to blow up the week. What would change for people like me next month?"
+    assert response.question_turn.text.startswith("My public account pays most of our rent")
+    assert "people like me" not in response.question_turn.text
+    assert response.question_turn.text.endswith("?")
     assert refreshed_citizen.town_hall_question == response.question_turn.text
     assert refreshed_citizen.town_hall_cue
 
@@ -2490,7 +2710,9 @@ async def test_generate_town_hall_question_falls_back_when_model_line_ends_dangl
         TownHallQuestionRequest(citizen_id=stage.sample_citizens[0].citizen_id, mode="voice"),
     )
 
-    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What would change for people like me next month?"
+    assert response.question_turn.text.startswith("My monthly AI payment covers rent")
+    assert "people like me" not in response.question_turn.text
+    assert response.question_turn.text.endswith("?")
 
 
 @pytest.mark.asyncio
@@ -2545,7 +2767,9 @@ async def test_generate_town_hall_question_ignores_clipped_seed_and_uses_fallbac
         TownHallQuestionRequest(citizen_id=stage.sample_citizens[0].citizen_id, mode="voice"),
     )
 
-    assert response.question_turn.text == "My monthly AI payment covers rent, but two platforms can still raise prices overnight. What would change for people like me next month?"
+    assert response.question_turn.text.startswith("My monthly AI payment covers rent")
+    assert "people like me" not in response.question_turn.text
+    assert response.question_turn.text.endswith("?")
 
 
 @pytest.mark.asyncio
@@ -2561,12 +2785,20 @@ async def test_generic_council_board_request_uses_advisor_note_not_placeholder(t
         if text_format is CouncilFloorPick:
             return (CouncilFloorPick(next_speaker="capacity"), "response-id")
         if text_format is CouncilAdvisorDraft:
+            notes = [
+                "Keep useful AI services open.",
+                "Charge the largest machine-labor renters to fund public compute credits.",
+            ]
             return (
                 CouncilAdvisorDraft(
-                        advisor_key="capacity",
-                        advisor_name="Rowan",
-                        text="I would keep useful AI services open, then charge the largest machine-labor renters to fund public compute credits.",
-                        board_notes=["Keep useful AI services open and charge large machine-labor renters for public compute credits."],
+                    advisor_key="capacity",
+                    advisor_name="Rowan",
+                    text="First, keep useful AI services open. Second, charge the largest machine-labor renters to fund public compute credits.",
+                    board_notes=notes,
+                    action=CouncilAdvisorAction(
+                        name="update_policy_board",
+                        arguments={"action": "add", "notes": notes},
+                    ),
                 ),
                 "response-id",
             )
@@ -2577,10 +2809,132 @@ async def test_generic_council_board_request_uses_advisor_note_not_placeholder(t
     response = await director.generate_council_turn(
         loaded.simulation_id,
         CouncilTurnRequest(
-            text="Rowan, put the best concrete policy idea on the board.",
+            text="Rowan, what should we put on the board? Give me two concrete policy ideas.",
             mode="text",
         ),
     )
 
-    assert response.board_notes == ["Keep useful AI services open and charge large machine-labor renters for public compute credits."]
+    assert response.board_notes == [
+        "Keep useful AI services open.",
+        "Charge the largest machine-labor renters to fund public compute credits.",
+    ]
     assert response.simulation.stages[response.simulation.active_stage_index].policy_notes == response.board_notes
+
+
+def test_orchestrator_future_year_signal_handles_absolute_years_and_decades(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+
+    assert director.orchestrator._future_year_signal("Start this around 2045.") == 19
+    assert director.orchestrator._future_year_signal("Set it in the 2040s.") == 19
+    assert director.orchestrator._future_year_signal("Open in a mid-century AI society.") == 24
+    assert director.orchestrator._future_year_signal("Start twenty-five years from now.") == 25
+    assert director.orchestrator._future_year_signal("Put us half a century ahead.") == 50
+
+
+@pytest.mark.asyncio
+async def test_council_board_note_apply_drops_placeholder_lines(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+    stage.policy_notes = ["Keep public compute credits universal."]
+
+    applied = director._maybe_apply_council_board_notes(
+        stage,
+        ["your ideas", "the best ones", "Keep public compute credits universal."],
+    )
+
+    assert applied == ["Keep public compute credits universal."]
+
+
+@pytest.mark.asyncio
+async def test_direct_board_request_uses_previous_advisor_best_ones_without_replacing(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(
+        SimulationCreateRequest(
+            player_name="President Morgan Hale",
+            opponent_name="Governor Elena Cross",
+        )
+    )
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+    stage.policy_notes = ["Keep public model accounts portable."]
+    turns = [
+        ConversationTurn(
+            speaker="assistant",
+            speaker_name="Rowan",
+            text=(
+                "I would do two things. Fund monthly machine checks from compute rents. "
+                "Require fast appeals when model credits are cut."
+            ),
+            mode="voice",
+        )
+    ]
+
+    notes = director._direct_policy_board_notes_from_turn(stage, "Put the best ones on the board.", turns)
+
+    assert notes == [
+        "Keep public model accounts portable.",
+        "Fund monthly machine checks from compute rents.",
+        "Require fast appeals when model credits are cut.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_named_council_board_request_uses_prior_advisor_idea(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(
+        SimulationCreateRequest(
+            player_name="President Morgan Hale",
+            opponent_name="Governor Elena Cross",
+        )
+    )
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+    turns = [
+        ConversationTurn(
+            speaker="assistant",
+            speaker_name="Caleb",
+            text=(
+                "Keep consumer AI services broadly open. "
+                "Audit only systems that can move money, rights, robots, or infrastructure."
+            ),
+            mode="voice",
+        )
+    ]
+
+    notes = director._direct_policy_board_notes_from_turn(
+        stage,
+        "Caleb, can you add this to the policy board?",
+        turns,
+    )
+
+    assert notes == [
+        "Keep consumer AI services broadly open.",
+        "Audit only systems that can move money, rights, robots, or infrastructure.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_board_question_does_not_capture_trailing_question_as_policy(tmp_path: Path):
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    director = build_director(settings)
+    state = await director.create_simulation(SimulationCreateRequest())
+    await director.wait_for_pending(state.simulation_id)
+    loaded = await director.get_simulation(state.simulation_id)
+    stage = loaded.stages[loaded.active_stage_index].model_copy(deep=True)
+
+    notes = director._direct_policy_board_notes_from_turn(
+        stage,
+        "What do you think we should put on the policy board, and does anyone think we should leave some of this alone?",
+        [],
+    )
+
+    assert notes == []

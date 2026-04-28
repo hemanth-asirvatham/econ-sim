@@ -109,6 +109,7 @@ Live runs use the configured OpenAI API by default and write temporary simulatio
 
 ## Notes
 
-- The repo defaults several non-Realtime models to `gpt-5.4` because that matches the intended sim design. If your project exposes a different GPT-5 variant, override the model names in `.env`.
-- The Realtime model defaults to `gpt-realtime-1.5`.
+- The repo defaults full text/reasoning calls to `gpt-5.5`, while keeping the council floor picker on `gpt-5.4-nano` for latency. If your project exposes different GPT-5 variants, override the model names in `.env`.
+- The Realtime model defaults to `gpt-realtime-alpha-dolphin-11`, the current internal Dolphin Realtime 2 snapshot that accepts the GA Realtime session shape, with Realtime reasoning set to `low`. To roll back, set `ECON_SIM_REALTIME_MODEL=gpt-realtime-1.5` and `ECON_SIM_REALTIME_REASONING_EFFORT=none` in `.env`.
+- The image model defaults to `gpt-image-2`.
 - Dummy mode keeps the entire loop runnable without live API access, including persisted stage files and placeholder briefing art.

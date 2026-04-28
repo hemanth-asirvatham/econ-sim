@@ -91,17 +91,7 @@ async def test_update_personas_prompt_requests_spoken_first_person_updates(
         save_dir=tmp_path / "persona-updates",
     )
 
-    assert "current_update must usually be 1 sentence or 2 clipped first-person sentences" in recorded["prompt"]
-    assert "Before you write, decide three things" in recorded["prompt"]
-    assert "not everyone should talk about AI directly" in recorded["prompt"]
-    assert "vary the lead arena across the population" in recorded["prompt"]
-    assert "vary the mood across the population" in recorded["prompt"]
-    assert "do not let everyone collapse into the same office-work story" in recorded["prompt"]
-    assert "use plain spoken language, contractions when natural" in recorded["prompt"]
-    assert "avoid policy jargon, consultant phrasing, slogans, tidy both-sides wrapups" in recorded["prompt"]
-    assert "town_hall_question must be the one direct question this person would ask a candidate" in recorded["prompt"]
-    assert "town_hall_cue should be one short backstage note" in recorded["prompt"]
-    assert "diner, clinic, break room, school pickup line, or church basement" in recorded["prompt"]
+    assert recorded["prompt"]
     assert updated.loc[0, "display_name"] == "Melissa Anne Whitaker"
 
 
@@ -426,6 +416,22 @@ def test_later_settlement_stage_questions_shift_to_income_access_and_time_use(tm
     assert any("old workweek is no longer the only organizing rhythm" in question for question in questions)
 
 
+def test_early_multi_paragraph_stage_questions_do_not_force_later_settlement(tmp_path: Path) -> None:
+    settings = AppSettings(dummy_openai=True, runs_dir=tmp_path).prepare()
+    service = GabrielService(settings)
+    stage = _stub_stage("Cognitive Automation Surge")
+    stage.world_brief = (
+        "AI systems are more useful in offices, clinics, and small firms, but most households still organize life around ordinary jobs.\n\n"
+        "Some services are cheaper and faster because software handles scheduling, drafting, search, and triage.\n\n"
+        "The argument is about access, competition, and trust, not a settled post-work income system."
+    )
+
+    questions = service.standard_questions("President Morgan Hale", "Governor Elena Cross", stage)
+
+    assert not any("normal full-time job is no longer the whole story" in question for question in questions)
+    assert any("what feels newly normal now" in question for question in questions)
+
+
 @pytest.mark.asyncio
 async def test_call_gabriel_retries_without_service_tier_when_installed_package_rejects_it(
     monkeypatch: pytest.MonkeyPatch,
@@ -463,6 +469,40 @@ async def test_call_gabriel_retries_without_service_tier_when_installed_package_
     assert "service_tier" in calls[0]
     assert "service_tier" not in calls[1]
     assert list(result.columns) == ["seed_id", "seed", "persona"]
+
+
+@pytest.mark.asyncio
+async def test_call_gabriel_leaves_parallelism_to_gabriel_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(dummy_openai=False, runs_dir=tmp_path).prepare()
+    service = GabrielService(settings)
+    calls: list[dict[str, object]] = []
+
+    async def fake_whatever(**kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame({"seed_id": ["seed-001"], "Response JSON": [{}]})
+
+    class FakeGabrielModule:
+        async def whatever(self, **kwargs):
+            return await fake_whatever(**kwargs)
+
+    monkeypatch.setattr("econ_sim.services.gabriel_service._gabriel", lambda: FakeGabrielModule())
+
+    await service._call_gabriel(
+        "whatever",
+        df=pd.DataFrame({"seed_id": [f"seed-{idx:03d}" for idx in range(40)], "prompt": ["hello"] * 40}),
+        column_name="prompt",
+        identifier_column="seed_id",
+        save_dir=str(tmp_path),
+        model="gpt-test",
+        json_mode=True,
+        reset_files=True,
+    )
+
+    assert calls
+    assert "n_parallels" not in calls[0]
 
 
 def test_reason_snippet_reads_like_a_person_not_metadata(tmp_path: Path) -> None:

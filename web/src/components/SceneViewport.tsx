@@ -3,7 +3,7 @@ import { ContactShadows, Float, Html, PerspectiveCamera, RoundedBox, Sparkles } 
 import { type FormEvent, type MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { normalizeCouncilRoster, parseCouncilCaption, splitCouncilLines } from "../lib/council";
-import { stageConstraint, stageGain, stagePolicyAxes, stageRoomBrief, stageSplit, stageWorldOpening } from "../lib/stageText";
+import { stageConstraint, stageGain, stageRoomBrief, stageSplit, stageWorldOpening } from "../lib/stageText";
 import type { CountryThemeProfile } from "../lib/themeProfiles";
 import type { AdvisorMode, AuditoriumMode, CitizenSnapshot, CouncilAdvisorProfile, RoomName, SceneHotspot, ScenePresence, StagePackage } from "../types";
 
@@ -55,6 +55,8 @@ interface SceneViewportProps {
   stageAdvanceHint?: string;
   stageAdvanceDisabled?: boolean;
   onTownHallQuestion?: () => void;
+  townHallDisabled?: boolean;
+  townHallDisabledReason?: string;
   onTogglePanels?: () => void;
   detailsOpen?: boolean;
   onOpenReels?: () => void;
@@ -143,7 +145,7 @@ const STREET_BOUNDS = {
 
 const STREET_READY_DISTANCE = 5.8;
 const STREET_HIGHLIGHT_DISTANCE = 8.2;
-const STREET_FEATURE_DISTANCE = 15.8;
+const STREET_FEATURE_DISTANCE = 22.5;
 const STREET_EXTRA_MIN_DISTANCE = 9.6;
 const STREET_POSE_PUBLISH_INTERVAL_MS = 90;
 const STREET_POSE_PUBLISH_DELTA = 0.42;
@@ -180,8 +182,8 @@ const ROOM_CONFIGS: Record<
     fill: "#88b2c0",
   },
   citizens: {
-    camera: [0, 2.18, 9.6],
-    focus: [0, 1.02, 0.6],
+    camera: [0, 2.02, 7.35],
+    focus: [0, 1.05, 1.15],
     background: "#23313a",
     fogNear: 26,
     fogFar: 88,
@@ -210,10 +212,10 @@ function themedRoomConfig(room: RoomName, themeMode: "light" | "dark", themeProf
   const advisorView =
     room === "advisor" && advisorMode === "council"
       ? {
-          camera: [0, 3.08, 15.35] as [number, number, number],
-          focus: [0, 1.82, -2.35] as [number, number, number],
-          fogNear: 13,
-          fogFar: 29,
+          camera: [0, 2.92, 12.9] as [number, number, number],
+          focus: [0, 1.62, -1.85] as [number, number, number],
+          fogNear: 11,
+          fogFar: 28,
         }
       : null;
   const accent = themeProfile?.accent ?? base.accent;
@@ -362,13 +364,23 @@ function textPlaceholder(
   activeCitizen?: CitizenSnapshot,
   advisorMode: AdvisorMode = "solo",
   auditoriumMode: AuditoriumMode = "debate",
+  stage?: StagePackage,
 ) {
+  const changedWorld = Boolean(
+    stage &&
+      /machine|model account|model credit|compute|agent|paid hours|income floor|public ai|automation|cheap expertise/i.test(
+        `${stage.world_brief} ${stage.montage_logline}`,
+      ),
+  );
   switch (room) {
     case "advisor":
       return advisorMode === "council"
         ? "Ask where the room agrees, who wants the floor, or what belongs on the board..."
         : "Ask what is changing, who to poll, or what belongs on the board...";
     case "citizens":
+      if (changedWorld) {
+        return `Ask ${activeCitizen?.display_name?.split(" ")[0] ?? "them"} what pays the bills, which account or queue matters, or what old routine vanished...`;
+      }
       return `Ask ${activeCitizen?.display_name?.split(" ")[0] ?? "them"} about work, bills, school, or what feels better or worse...`;
     case "debate":
       if (auditoriumMode === "town_hall") {
@@ -398,7 +410,7 @@ function boardPolicyLabel(text: string) {
     cleaned.length > 98
       ? cleaned.replace(/\s+(?:while|so that|without|but)\s+.+$/i, "")
       : cleaned;
-  return boardSnippet(primaryClause.length > 38 ? primaryClause : cleaned, 76);
+  return boardSnippet(primaryClause.length > 38 ? primaryClause : cleaned, 88);
 }
 
 function compactCitizenLabel(name: string, max = 22) {
@@ -443,17 +455,17 @@ function citizenSuggestedQuestions(citizen: CitizenSnapshot) {
   }
 
   if (prompts.length === 0) {
-    prompts.push("What actually changed in your week lately?");
+    prompts.push("What pays the bills or steadies life now?");
   }
   prompts.push(
     citizen.ai_exposure.toLowerCase().includes("low") || citizen.ai_exposure.toLowerCase().includes("minimal")
       ? "Has AI shown up in your life much, or not really?"
-      : "What does AI actually do for you now?",
+      : "Which account, service, or machine help mattered this week?",
   );
   prompts.push(
     /\b(rent|bill|price|prices|cost|debt|mortgage)\b/.test(source)
       ? "What feels easier now, and what still feels expensive or hard?"
-      : "What feels better now, and what still feels stubbornly human?",
+      : "What old routine disappeared, and what still needs a person?",
   );
 
   return [...new Set(prompts)].slice(0, 3);
@@ -589,12 +601,16 @@ function buildStreetPlacements(citizens: CitizenSnapshot[]): StreetPlacement[] {
   return citizens.map((citizen, index) => {
     const hash = citizenHash(citizen);
     const openingPocket: Array<[number, number, number]> = [
+      [-3.25, 0, 16.6],
+      [3.35, 0, 15.7],
       [-4.8, 0, 13.2],
       [4.9, 0, 11.4],
       [-6.2, 0, 8.8],
       [6.1, 0, 7.5],
       [-4.9, 0, 4.7],
       [4.8, 0, 3.6],
+      [-3.1, 0, 1.5],
+      [3.2, 0, 0.4],
       [-6.0, 0, -0.6],
       [6.1, 0, -2.1],
       [-4.9, 0, -6.8],
@@ -812,7 +828,33 @@ function boardSummaryLabel(summary?: StagePackage["poll_summaries"][number] | nu
 }
 
 function stageMacroStats(stage: StagePackage) {
-  const stats = Object.entries(stage.macro_stats ?? {})
+  const priorityFor = (key: string, label: string) => {
+    const probe = `${key} ${label}`.toLowerCase();
+    const worldProbe = `${stage.phase_label} ${stage.title} ${stage.world_brief}`.toLowerCase();
+    const changedWorld =
+      /\b(deep|later|machine|compute|robot|agent|old job|workweek|dividend|service guarantee|public account|post-work|screen work|model labor|automated labor)\b/.test(
+        worldProbe,
+      );
+    if (/\bunemployment\b|\bjobless\b/.test(probe)) return 0;
+    if (/\bhours|time|labor|labour|participation|work\b/.test(probe)) return 1;
+    if (/\bgdp\b|\boutput\b|\bgrowth\b/.test(probe)) return 2;
+    if (changedWorld) {
+      if (/\b(machine|dividend|income floor|service guarantee|public account|universal service|automated income)\b/.test(probe)) {
+        return 3;
+      }
+      if (/\bcompute|model|access|credit|platform|ownership|rent|toll|allocation\b/.test(probe)) {
+        return 4;
+      }
+      if (/\bpower|grid|energy|chip|hardware|robot|depot|datacenter|data center\b/.test(probe)) {
+        return 5;
+      }
+    }
+    if (/\binflation\b|\bprices\b/.test(probe)) return 6;
+    if (/\bcompute\b|\bpower\b|\bgrid\b/.test(probe)) return 7;
+    if (/\bsecurity\b|\bstability\b|\btrust\b/.test(probe)) return 8;
+    return 9;
+  };
+  return Object.entries(stage.macro_stats ?? {})
     .flatMap(([key, stat]) => {
       const label = String(stat?.label ?? "").replace(/\s+/g, " ").trim();
       const value = String(stat?.value ?? "").replace(/\s+/g, " ").trim();
@@ -820,32 +862,20 @@ function stageMacroStats(stage: StagePackage) {
       if (!label || !value) {
         return [];
       }
-      return [{ key, label, value, detail }];
-    });
-  const priority = (entry: { key: string; label: string }) => {
-    const text = `${entry.key} ${entry.label}`.toLowerCase();
-    if (text.includes("unemployment")) return 0;
-    if (text.includes("labor") || text.includes("participation")) return 1;
-    if (text.includes("gdp") || text.includes("growth") || text.includes("output")) return 2;
-    if (text.includes("inflation") || text.includes("prices")) return 3;
-    if (text.includes("compute") || text.includes("power") || text.includes("energy")) return 4;
-    if (text.includes("defense") || text.includes("military") || text.includes("security")) return 5;
-    return 10;
-  };
-  return stats.sort((left, right) => priority(left) - priority(right));
+      return [{ key, label, value, detail, priority: priorityFor(key, label) }];
+    })
+    .sort((left, right) => left.priority - right.priority || left.label.localeCompare(right.label));
 }
 
 function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
   const columns: BoardPanel["columns"] = [];
-  const rankedSummaries = [...stage.poll_summaries]
-    .filter((summary) => !summary.question.toLowerCase().includes("election were held today"))
-    .sort((left, right) => {
-      const leftCustom = (left.source ?? "standard") !== "standard" || left.board_slot === "custom" ? 0 : 1;
-      const rightCustom = (right.source ?? "standard") !== "standard" || right.board_slot === "custom" ? 0 : 1;
-      return leftCustom - rightCustom;
-    });
-
-  rankedSummaries.slice(0, 2).forEach((summary) => {
+  const pushSummary = (summary?: StagePackage["poll_summaries"][number] | null) => {
+    if (!summary) {
+      return;
+    }
+    if (columns.some((column) => column.id === (summary.key ?? summary.question))) {
+      return;
+    }
     const choice = boardSummaryChoice(summary);
     if (choice?.answer) {
       columns.push({
@@ -860,7 +890,13 @@ function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
         ],
       });
     }
-  });
+  };
+
+  pushSummary(latestCustomPollSummary(stage));
+  pushSummary(latestPollSummaryBySlot(stage, ["capability"], ["capability_read"]));
+  pushSummary(latestPollSummaryBySlot(stage, ["gain"], ["ai_gain", "keep_change", "better_off"]));
+  pushSummary(latestPollSummaryBySlot(stage, ["pressure"], ["main_pressure", "biggest_worry", "job_worry", "public_stability"]));
+  pushSummary(latestPollSummaryBySlot(stage, ["national"], ["national_effect", "econ_read"]));
 
   if (columns.length === 0) {
     columns.push({
@@ -883,7 +919,7 @@ function boardPublicMoodColumns(stage: StagePackage): BoardPanel["columns"] {
     }
   }
 
-  return columns.slice(0, 2);
+  return columns.slice(0, 3);
 }
 
 function boardMacroRead(stage: StagePackage) {
@@ -900,7 +936,7 @@ function boardMacroRead(stage: StagePackage) {
 
 function boardMetricRows(stage: StagePackage): Array<{ label: string; value: string; note?: string }> {
   const pollingReady = stage.poll_summaries.length > 0;
-  const macroRows = stageMacroStats(stage).slice(0, 3).map((entry) => ({
+  const macroRows = stageMacroStats(stage).slice(0, 4).map((entry) => ({
     label: entry.label,
     value: boardSnippet(entry.value, 18),
     note: entry.detail ? boardSnippet(entry.detail, 34) : undefined,
@@ -913,21 +949,19 @@ function boardMetricRows(stage: StagePackage): Array<{ label: string; value: str
     return `${metric.delta > 0 ? "+" : "−"}${amount} vs last round`;
   };
   if (!pollingReady && macroRows.length > 0) {
-    return macroRows.slice(0, 3);
+    return macroRows.slice(0, 4);
   }
 
-  const rows = [
-    {
-      label: "Approval",
-      value: pollingReady ? stage.tracking.approval.display : "—",
-      note: pollingReady ? (formatDelta(stage.tracking.approval) || "latest voter read") : "Polling in background",
-    },
-  ];
+  const approvalRow = {
+    label: "Approval",
+    value: pollingReady ? stage.tracking.approval.display : "—",
+    note: pollingReady ? (formatDelta(stage.tracking.approval) || "latest voter read") : "Polling in background",
+  };
   if (macroRows.length > 0) {
-    return [...rows, ...macroRows.slice(0, 2)].slice(0, 3);
+    return pollingReady ? [...macroRows.slice(0, 3), approvalRow].slice(0, 4) : macroRows.slice(0, 4);
   }
   return [
-    ...rows,
+    approvalRow,
     {
       label: "Better off",
       value: pollingReady ? stage.tracking.better_off.display : "—",
@@ -1089,6 +1123,8 @@ export default function SceneViewport({
   stageAdvanceHint,
   stageAdvanceDisabled = false,
   onTownHallQuestion,
+  townHallDisabled = false,
+  townHallDisabledReason = "Town hall is not ready yet.",
   onTogglePanels,
   detailsOpen = false,
   onOpenReels,
@@ -1148,16 +1184,31 @@ export default function SceneViewport({
     ));
   const councilCaptionVisible =
     room === "advisor" && advisorMode === "council"
-      ? playerHasCouncilFloor ||
-        Boolean(activeCouncilLeadRaw) ||
+      ? Boolean(activeCouncilLeadRaw) ||
         presence.counterpartActivity === "speaking" ||
-        presence.voicePhase === "responding"
+        presence.voicePhase === "responding" ||
+        (captionSpeaker === "user" && Boolean(captionText))
       : true;
   const activeCouncilLead = playerHasCouncilFloor ? "You" : activeCouncilLeadRaw;
+  const showCouncilFloorCue =
+    !overlayActive &&
+    !panelsOpen &&
+    room === "advisor" &&
+    advisorMode === "council" &&
+    Boolean(activeCouncilLead || presence.voicePhase === "waiting" || presence.voicePhase === "responding" || presence.status === "connecting");
+  const councilFloorCueLabel =
+    activeCouncilLead === "You"
+      ? "Your floor"
+      : activeCouncilLead
+        ? `${activeCouncilLead} has the floor`
+        : presence.status === "connecting"
+          ? "Opening the table"
+          : "Choosing the next voice";
   const visibleCaptionText = room === "advisor" && advisorMode === "council" ? councilCaption.text : captionText;
   const textComposerAvailable = Boolean(onTextComposerToggle && onTextComposerChange && onTextComposerSend);
   const showStageAdvance =
     !overlayActive &&
+    !panelsOpen &&
     room === "debate" &&
     Boolean(onStageAdvance) &&
     Boolean(stageAdvanceLabel);
@@ -1167,24 +1218,28 @@ export default function SceneViewport({
     townHallState?.phase === "opponent_turn";
   const showTownHallQuestionAction =
     !overlayActive &&
+    !panelsOpen &&
     room === "debate" &&
     auditoriumMode === "town_hall" &&
+    townHallState?.readyForNextQuestion !== false &&
     Boolean(onTownHallQuestion);
-  const townHallQuestionDisabled = resolvingStage || townHallQuestionBusy || townHallState?.readyForNextQuestion === false;
+  const townHallQuestionDisabled =
+    townHallDisabled || resolvingStage || townHallQuestionBusy || townHallState?.readyForNextQuestion === false;
   const townHallQuestionLabel =
-    townHallState?.phase === "generating"
+    townHallDisabled
+      ? "Citizens arriving"
+      : townHallState?.phase === "generating"
       ? "Finding voter..."
       : townHallState?.phase === "voter_speaking"
       ? "Voter speaking..."
       : townHallState?.phase === "opponent_turn"
         ? "Opponent answering..."
-        : townHallState?.phase === "player_turn" && townHallState?.readyForNextQuestion === false
-          ? "Answer the voter"
-          : townHallState?.question
+        : townHallState?.question
             ? "Next audience question"
             : "Audience question";
   const showSceneUtilities =
     !overlayActive &&
+    !panelsOpen &&
     Boolean(onTogglePanels || onOpenReels || onToggleTheme || onToggleFullscreen || onRestart);
   const playerStateRef = useRef<StreetPlayerState>({ ...STREET_PLAYER_START });
   const streetAutoTargetRef = useRef<StreetAutoTarget | null>(null);
@@ -1194,13 +1249,24 @@ export default function SceneViewport({
   const lastPoseCommitRef = useRef(0);
   const lastPublishedPoseRef = useRef<StreetPlayerState>({ ...STREET_PLAYER_START });
   const presenceStatusRef = useRef(presence.status);
+  const streetCallbacksRef = useRef({
+    onStartVoice,
+    onStreetFocusChange,
+    onStreetPreviewChange,
+  });
+  const streetGateRef = useRef({
+    citizenConversationLocked: false,
+    overlayActive,
+    panelsOpen,
+    textComposerOpen,
+  });
   const streetPlacements = useMemo(() => buildStreetPlacements(citizens), [citizens]);
   const streetPlacementMap = useMemo(
     () => new Map(streetPlacements.map((entry) => [entry.citizen.citizen_id, entry])),
     [streetPlacements],
   );
   const streetExtras = useMemo(
-    () => buildStreetExtras(citizens, 14),
+    () => buildStreetExtras(citizens, 20),
     [citizens],
   );
   const citizenConversationLocked =
@@ -1209,13 +1275,29 @@ export default function SceneViewport({
     (
       presence.status === "connecting" ||
       presence.playerActivity === "speaking" ||
-      presence.counterpartActivity === "speaking" ||
-      presence.voicePhase === "waiting"
+      presence.counterpartActivity === "speaking"
     );
+
+  useEffect(() => {
+    streetGateRef.current = {
+      citizenConversationLocked,
+      overlayActive,
+      panelsOpen,
+      textComposerOpen,
+    };
+  }, [citizenConversationLocked, overlayActive, panelsOpen, textComposerOpen]);
 
   useEffect(() => {
     presenceStatusRef.current = presence.status;
   }, [presence.status]);
+
+  useEffect(() => {
+    streetCallbacksRef.current = {
+      onStartVoice,
+      onStreetFocusChange,
+      onStreetPreviewChange,
+    };
+  }, [onStartVoice, onStreetFocusChange, onStreetPreviewChange]);
 
   useEffect(() => {
     if (room !== "citizens") {
@@ -1232,9 +1314,6 @@ export default function SceneViewport({
           : { ...STREET_PLAYER_START },
       );
       setHoveredCitizenId((current) => (current === null ? current : null));
-      return;
-    }
-    if (overlayActive || panelsOpen || textComposerOpen) {
       return;
     }
     const pressed = new Set<string>();
@@ -1269,6 +1348,11 @@ export default function SceneViewport({
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      const gate = streetGateRef.current;
+      if (gate.overlayActive || gate.panelsOpen || gate.textComposerOpen) {
+        pressed.clear();
+        return;
+      }
       if (
         target &&
         (
@@ -1311,6 +1395,14 @@ export default function SceneViewport({
       const elapsed = Math.min((now - lastTick) / 16.67, 2);
       lastTick = now;
       if (presenceStatusRef.current === "connecting") {
+        animationFrame = window.requestAnimationFrame(tick);
+        return;
+      }
+      const gate = streetGateRef.current;
+      if (gate.overlayActive || gate.panelsOpen || gate.textComposerOpen) {
+        pressed.clear();
+        velocityX = THREE.MathUtils.lerp(velocityX, 0, Math.min(0.22 * elapsed, 1));
+        velocityZ = THREE.MathUtils.lerp(velocityZ, 0, Math.min(0.22 * elapsed, 1));
         animationFrame = window.requestAnimationFrame(tick);
         return;
       }
@@ -1371,9 +1463,11 @@ export default function SceneViewport({
         if (citizenDistance <= (autoTarget.stopRadius ?? 4.1) || distance < 0.34) {
           streetAutoTargetRef.current = null;
           if (autoTarget.kind === "approach" && autoTarget.citizenId) {
-            onStreetPreviewChange?.(autoTarget.citizenId);
+            streetCallbacksRef.current.onStreetPreviewChange?.(autoTarget.citizenId);
             if (autoTarget.startVoiceOnArrival) {
-              onStartVoice?.(autoTarget.citizenId);
+              streetCallbacksRef.current.onStartVoice?.(autoTarget.citizenId);
+            } else {
+              streetCallbacksRef.current.onStreetFocusChange?.(autoTarget.citizenId);
             }
           }
         } else {
@@ -1382,7 +1476,7 @@ export default function SceneViewport({
           manualHeading = autoTarget.heading ?? Math.atan2(moveX, -moveZ);
         }
       }
-      if (citizenConversationLocked) {
+      if (gate.citizenConversationLocked) {
         velocityX = THREE.MathUtils.lerp(velocityX, 0, Math.min(0.34 * elapsed, 1));
         velocityZ = THREE.MathUtils.lerp(velocityZ, 0, Math.min(0.34 * elapsed, 1));
         if (Math.abs(velocityX) > 0.0005 || Math.abs(velocityZ) > 0.0005) {
@@ -1437,7 +1531,7 @@ export default function SceneViewport({
       window.removeEventListener("keyup", handleKeyUp);
       window.cancelAnimationFrame(animationFrame);
     };
-  }, [citizenConversationLocked, onStartVoice, onStreetFocusChange, onStreetPreviewChange, overlayActive, panelsOpen, room, textComposerOpen]);
+  }, [room]);
 
   useEffect(() => {
     if (room !== "citizens") {
@@ -1525,7 +1619,7 @@ export default function SceneViewport({
       : presence.status === "error"
         ? "Retry connection"
         : "";
-  const voiceTriggerCompact = !voiceButtonHint;
+  const voiceTriggerCompact = false;
   const showSceneCaption =
     Boolean(captionText) &&
     councilCaptionVisible &&
@@ -1605,6 +1699,7 @@ export default function SceneViewport({
           gl={{ antialias: true, powerPreference: "high-performance" }}
         >
           <SceneWorld
+            key={`${room}:${advisorMode}:${themeMode}`}
             room={room}
             advisorMode={advisorMode}
             stage={stage}
@@ -1668,37 +1763,17 @@ export default function SceneViewport({
               {detailsOpen ? "Hide details" : "Details"}
             </button>
           ) : null}
-          {showTownHallQuestionAction ? (
-            <button
-              className={`scene-control scene-control--action ${townHallQuestionDisabled ? "scene-control--disabled" : ""}`}
-              onClick={() => onTownHallQuestion?.()}
-              disabled={townHallQuestionDisabled}
-              title="Open the floor for the next audience question."
-            >
-              Q&A
-            </button>
-          ) : null}
-          {showStageAdvance ? (
-            <button
-              className={`scene-control scene-control--action ${stageAdvanceDisabled ? "scene-control--disabled" : ""}`}
-              onClick={() => onStageAdvance?.()}
-              disabled={stageAdvanceDisabled}
-              title={stageAdvanceHint}
-            >
-              Next stage
-            </button>
-          ) : null}
           {onOpenReels ? (
             <button className="scene-control" onClick={onOpenReels}>
               {reelsLabel}
             </button>
           ) : null}
-          {panelsOpen && onToggleTheme ? (
+          {onToggleTheme ? (
             <button className="scene-control" onClick={onToggleTheme}>
               {themeLabel}
             </button>
           ) : null}
-          {panelsOpen && onToggleFullscreen ? (
+          {onToggleFullscreen ? (
             <button className="scene-control" onClick={onToggleFullscreen}>
               {fullscreenLabel}
             </button>
@@ -1709,6 +1784,32 @@ export default function SceneViewport({
       {!overlayActive ? (
         <>
           <div className="scene__channel-stack">
+            {showTownHallQuestionAction || showStageAdvance ? (
+              <div className="scene__action-row">
+                {showTownHallQuestionAction ? (
+                  <button
+                    className={`scene__townhall-action ${townHallQuestionDisabled ? "scene__townhall-action--disabled" : ""}`}
+                    onClick={() => onTownHallQuestion?.()}
+                    disabled={townHallQuestionDisabled}
+                    title={townHallDisabled ? townHallDisabledReason : "Open the floor for the next audience question."}
+                  >
+                    <span>{townHallQuestionLabel}</span>
+                    <small>Let one voter test the room before the next exchange.</small>
+                  </button>
+                ) : null}
+                {showStageAdvance ? (
+                  <button
+                    className={`scene__stage-action ${stageAdvanceDisabled ? "scene__stage-action--disabled" : ""}`}
+                    onClick={() => onStageAdvance?.()}
+                    disabled={stageAdvanceDisabled}
+                    title={stageAdvanceHint}
+                  >
+                    <span>{stageAdvanceLabel}</span>
+                    <small>{stageAdvanceHint}</small>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <div className={`scene__channel-bar ${textComposerOpen ? "scene__channel-bar--text-open" : ""}`}>
               <button
                 className={`scene__voice-trigger scene__voice-trigger--scene ${ 
@@ -1723,6 +1824,7 @@ export default function SceneViewport({
                   (room === "citizens" && presence.status === "idle" && !currentCitizen)
                 }
                 onClick={handleVoiceTrigger}
+                aria-label={voiceButtonLabel}
               >
                 <span className="scene__voice-trigger-icon" aria-hidden="true">
                   {voiceChannelConnecting
@@ -1736,16 +1838,26 @@ export default function SceneViewport({
                 </span>
               </button>
               {textComposerAvailable && textComposerOpen ? (
-                <form className="scene__inline-composer" onSubmit={handleComposerSubmit}>
+                <form
+                  className="scene__inline-composer"
+                  data-testid="scene-inline-composer"
+                  onSubmit={handleComposerSubmit}
+                >
                   <input
                     ref={textComposerInputRef}
                     type="text"
                     value={textComposerDraft}
                     onChange={(event) => onTextComposerChange?.(event.target.value)}
-                    placeholder={textPlaceholder(room, currentCitizen, advisorMode, auditoriumMode)}
+                    placeholder={textPlaceholder(room, currentCitizen, advisorMode, auditoriumMode, stage)}
                     aria-label="Type a turn"
+                    data-testid="scene-inline-input"
                   />
-                  <button type="submit" disabled={!textComposerDraft.trim()}>
+                  <button
+                    type="submit"
+                    aria-label="Send text turn"
+                    disabled={!textComposerDraft.trim()}
+                    data-testid="scene-inline-send"
+                  >
                     Send
                   </button>
                 </form>
@@ -1758,6 +1870,7 @@ export default function SceneViewport({
                 aria-label={textComposerOpen ? "Hide text input" : "Open text input"}
                 aria-pressed={textComposerOpen}
                 title={textComposerOpen ? "Hide text input" : "Type instead"}
+                data-testid="scene-text-trigger"
               >
                   <span aria-hidden="true">⌨</span>
                   <span className="sr-only">{textComposerOpen ? "Hide text input" : "Open text input"}</span>
@@ -1765,6 +1878,12 @@ export default function SceneViewport({
               ) : null}
             </div>
           </div>
+
+          {showCouncilFloorCue ? (
+            <div className={`scene-council-floor ${activeCouncilLead === "You" ? "scene-council-floor--player" : ""}`}>
+              <span>{councilFloorCueLabel}</span>
+            </div>
+          ) : null}
 
           {!panelsOpen && showTownHallBanner ? (
             <div className={`scene-townhall-floor ${townHallState?.error ? "scene-townhall-floor--error" : ""}`}>
@@ -1898,11 +2017,11 @@ function SceneWorld({
     (
       presence.status === "connecting" ||
       presence.playerActivity === "speaking" ||
-      presence.counterpartActivity === "speaking" ||
-      presence.voicePhase === "waiting"
+      presence.counterpartActivity === "speaking"
     );
   const voiceChannelOpen = presence.liveMode === "voice" && presence.status === "connected";
   const advisorCouncilMode = room === "advisor" && advisorMode === "council";
+  const playerHasCouncilFloor = advisorCouncilMode && councilSpeaker === "You";
   const streetSelectionLocked = room === "citizens" && citizenConversationLocked;
   const targetPosition =
     room === "citizens"
@@ -1937,7 +2056,7 @@ function SceneWorld({
             entry.citizen.citizen_id === previewCitizen?.citizen_id ||
             entry.citizen.citizen_id === hoveredCitizenId,
         )
-        .slice(0, 14)
+        .slice(0, 26)
         .map(({ entry }) => entry),
     [activeCitizen?.citizen_id, hoveredCitizenId, previewCitizen?.citizen_id, rankedStreetPlacements],
   );
@@ -1945,10 +2064,49 @@ function SceneWorld({
     () =>
       rankedStreetPlacements
         .filter(({ entry }) => !featuredStreetPlacements.some((featured) => featured.citizen.citizen_id === entry.citizen.citizen_id))
-        .slice(0, 8)
+        .slice(0, 18)
         .map(({ entry }) => entry),
     [featuredStreetPlacements, rankedStreetPlacements],
   );
+  useEffect(() => {
+    if (room !== "citizens" || streetSelectionLocked || hoveredCitizenId || streetAutoTargetRef.current?.kind === "approach") {
+      return;
+    }
+	    const nearest = rankedStreetPlacements.find(({ distance }) => distance < STREET_READY_DISTANCE);
+	    const previewId = previewCitizen?.citizen_id ?? activeCitizen?.citizen_id;
+	    const floatingVoiceOpen = voiceChannelOpen && !presence.muted;
+	    if (nearest) {
+	      const nextId = nearest.entry.citizen.citizen_id;
+	      if (nextId !== previewId) {
+	        onStreetPreviewChange?.(nextId);
+	      }
+	      if (floatingVoiceOpen && nextId !== activeCitizen?.citizen_id) {
+	        onStreetFocusChange?.(nextId);
+	      }
+	      return;
+	    }
+	    if (previewId) {
+	      const previewDistance = rankedStreetPlacements.find(({ entry }) => entry.citizen.citizen_id === previewId)?.distance ?? Infinity;
+	      if (previewDistance > STREET_HIGHLIGHT_DISTANCE) {
+	        onStreetPreviewChange?.(undefined);
+	        if (floatingVoiceOpen && activeCitizen?.citizen_id) {
+	          onStreetFocusChange?.(undefined);
+	        }
+	      }
+	    }
+	  }, [
+	    activeCitizen?.citizen_id,
+	    hoveredCitizenId,
+	    onStreetFocusChange,
+	    onStreetPreviewChange,
+	    presence.muted,
+	    previewCitizen?.citizen_id,
+	    rankedStreetPlacements,
+	    room,
+	    streetAutoTargetRef,
+	    streetSelectionLocked,
+	    voiceChannelOpen,
+	  ]);
   const streetSelectionCitizenId =
     room !== "citizens"
       ? undefined
@@ -2010,27 +2168,11 @@ function SceneWorld({
         highlightedStreetDistance < STREET_READY_DISTANCE
       )
     );
-  function nearestStreetPlacementToPoint(x: number, z: number) {
-    const candidates = featuredStreetPlacements.length > 0
-      ? featuredStreetPlacements
-      : rankedStreetPlacements.map(({ entry }) => entry);
-    let nearest: StreetPlacement | undefined;
-    let nearestDistance = Infinity;
-    for (const entry of candidates) {
-      const distance = Math.hypot(entry.position[0] - x, entry.position[2] - z);
-      if (distance < nearestDistance) {
-        nearest = entry;
-        nearestDistance = distance;
-      }
-    }
-    return nearestDistance <= 3.05 ? nearest : undefined;
-  }
   function handleStreetCitizenSelect(entry: StreetPlacement) {
     if (streetSelectionLocked) {
       return;
     }
     onStreetPreviewChange?.(entry.citizen.citizen_id);
-    onStreetFocusChange?.(entry.citizen.citizen_id);
     const distance = Math.hypot(entry.position[0] - playerStateRef.current.x, entry.position[2] - playerStateRef.current.z);
     if (distance > STREET_READY_DISTANCE - 0.45) {
       streetAutoTargetRef.current = {
@@ -2043,6 +2185,7 @@ function SceneWorld({
       };
     } else {
       streetAutoTargetRef.current = null;
+      onStreetFocusChange?.(entry.citizen.citizen_id);
     }
   }
   const playerPalette = playerInPower
@@ -2054,14 +2197,15 @@ function SceneWorld({
     { base: "#6c7287", glow: "#dce1ef", metallic: "#8990ab" },
     { base: "#6d6d5b", glow: "#efe3bf", metallic: "#9e9a7d" },
     { base: "#72656f", glow: "#e8d6ea", metallic: "#9987a2" },
+    { base: "#5f7469", glow: "#d8eadf", metallic: "#7f988b" },
   ] as const;
   const councilAdvisors = useMemo(() => {
-    const roster = councilRoster.slice(0, 5);
-    const span = roster.length <= 2 ? 3.7 : roster.length === 3 ? 3.1 : 2.55;
+    const roster = councilRoster.slice(0, 6);
+    const span = roster.length <= 2 ? 3.7 : roster.length === 3 ? 3.1 : roster.length >= 6 ? 2.18 : 2.55;
     return roster.map((advisor, index) => {
       const centeredIndex = index - (roster.length - 1) / 2;
       const x = centeredIndex * span;
-      const z = Math.abs(centeredIndex) < 0.6 ? -0.92 : roster.length >= 4 ? -0.22 : -0.58;
+      const z = Math.abs(centeredIndex) < 0.6 ? -0.98 : roster.length >= 6 ? 0.1 + Math.abs(centeredIndex) * 0.08 : roster.length >= 4 ? -0.22 : -0.58;
       return {
         ...advisor,
         position: [x, Math.abs(centeredIndex) < 0.6 ? 0.02 : 0, z] as [number, number, number],
@@ -2076,7 +2220,7 @@ function SceneWorld({
       <PerspectiveCamera
         makeDefault
         position={config.camera}
-        fov={room === "citizens" ? 30 : room === "advisor" ? (advisorCouncilMode ? 40 : 37) : room === "debate" ? 34 : 34}
+        fov={room === "citizens" ? 32 : room === "advisor" ? (advisorCouncilMode ? 42 : 37) : room === "debate" ? 34 : 34}
       />
       <color attach="background" args={[config.background]} />
       <fog attach="fog" args={[config.background, config.fogNear, config.fogFar]} />
@@ -2129,11 +2273,6 @@ function SceneWorld({
             if (streetSelectionLocked) {
               return;
             }
-            const nearestCitizen = nearestStreetPlacementToPoint(event.point.x, event.point.z);
-            if (nearestCitizen) {
-              handleStreetCitizenSelect(nearestCitizen);
-              return;
-            }
             streetAutoTargetRef.current = {
               kind: "walk",
               x: THREE.MathUtils.clamp(event.point.x, STREET_BOUNDS.minX, STREET_BOUNDS.maxX),
@@ -2165,6 +2304,7 @@ function SceneWorld({
         scale={room === "debate" ? 0.78 : room === "citizens" ? 0.48 : room === "advisor" ? (advisorCouncilMode ? 0.72 : 0.66) : 0.9}
         palette={playerPalette}
         followRef={room === "citizens" ? playerStateRef : undefined}
+        floorActive={room === "advisor" && advisorCouncilMode && playerHasCouncilFloor}
       />
       {room === "citizens"
         ? featuredStreetPlacements.map(({ citizen, position, appearance }) => (
@@ -2229,6 +2369,7 @@ function SceneWorld({
         ? councilAdvisors.map((advisor) => {
             const leadingSpeaker = councilSpeaker;
             const advisorOwnsFloor = leadingSpeaker === advisor.name;
+            const advisorPendingFloor = advisorOwnsFloor && presence.counterpartActivity !== "speaking";
             const advisorActivity =
               advisorOwnsFloor
                 ? presence.counterpartActivity === "speaking"
@@ -2243,16 +2384,21 @@ function SceneWorld({
                   position={advisor.position}
                   facing={advisor.facing}
                   activity={advisorActivity}
-                  scale={Math.abs(advisor.position[0]) < 0.9 ? 0.66 : 0.62}
+                  scale={councilAdvisors.length >= 6 ? (Math.abs(advisor.position[0]) < 0.9 ? 0.62 : 0.58) : (Math.abs(advisor.position[0]) < 0.9 ? 0.66 : 0.62)}
                   palette={advisor.palette}
                   interactive={false}
                   highlighted={advisorOwnsFloor}
                   floorActive={advisorOwnsFloor}
+                  floorPending={advisorPendingFloor}
                 />
                 <Html position={[advisor.position[0], 1.58, advisor.position[2] + 0.18]} center distanceFactor={11.6}>
-                  <div className={`scene-council-label ${leadingSpeaker === advisor.name ? "scene-council-label--active" : ""}`}>
+                  <div
+                    className={`scene-council-label ${
+                      leadingSpeaker === advisor.name ? "scene-council-label--active" : ""
+                    } ${advisorPendingFloor ? "scene-council-label--pending" : ""}`}
+                  >
                     <strong>{advisor.name}</strong>
-                    <small>{advisor.role}</small>
+                    <small>{advisorPendingFloor ? "next voice" : advisor.role}</small>
                   </div>
                 </Html>
               </group>
@@ -2336,7 +2482,6 @@ function SceneWorld({
 
 const BOARD_HAND_FONT = "'Segoe Print', 'Bradley Hand', 'Chalkboard SE', 'Marker Felt', 'Noteworthy', cursive";
 const BOARD_SANS_FONT = "'Avenir Next Condensed', 'DIN Condensed', 'IBM Plex Sans', 'Avenir Next', 'Segoe UI', sans-serif";
-const BOARD_MONO_FONT = "'SFMono-Regular', 'IBM Plex Mono', 'Menlo', 'Consolas', monospace";
 const BOARD_TEXTURE_CACHE_LIMIT = 18;
 const VENUE_TEXTURE_CACHE_LIMIT = 10;
 const BOARD_TEXTURE_CACHE = new Map<string, THREE.CanvasTexture>();
@@ -2370,10 +2515,30 @@ function boardRoundRect(ctx: CanvasRenderingContext2D, x: number, y: number, wid
 }
 
 function boardWrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines = 2) {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (!words.length) {
+  const roughWords = text.trim().split(/\s+/).filter(Boolean);
+  if (!roughWords.length) {
     return [];
   }
+  const words = roughWords.flatMap((word) => {
+    if (ctx.measureText(word).width <= maxWidth) {
+      return [word];
+    }
+    const chunks: string[] = [];
+    let chunk = "";
+    for (const char of word) {
+      const probe = `${chunk}${char}`;
+      if (!chunk || ctx.measureText(probe).width <= maxWidth) {
+        chunk = probe;
+        continue;
+      }
+      chunks.push(chunk);
+      chunk = char;
+    }
+    if (chunk) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  });
   const lines: string[] = [];
   let current = words[0];
   for (let index = 1; index < words.length; index += 1) {
@@ -2406,20 +2571,21 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
     return cachedTexture;
   }
   const canvas = document.createElement("canvas");
-  canvas.width = 2560;
-  canvas.height = 1440;
+  canvas.width = 3072;
+  canvas.height = 1728;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return new THREE.CanvasTexture(canvas);
   }
 
-  const paper = "#e7d8c3";
-  const paperEdge = "#c89d71";
-  const border = "#21130a";
-  const line = "rgba(50, 31, 16, 0.28)";
-  const marker = "#140b05";
-  const markerSoft = "#573726";
-  const accent = "#7b4820";
+  const darkBoard = themeMode === "dark";
+  const paper = darkBoard ? "#2b241c" : "#e7d8c3";
+  const paperEdge = darkBoard ? "#15110d" : "#c89d71";
+  const border = darkBoard ? "#f1dfbd" : "#21130a";
+  const line = darkBoard ? "rgba(244, 225, 192, 0.2)" : "rgba(50, 31, 16, 0.28)";
+  const marker = darkBoard ? "#fff1cf" : "#140b05";
+  const markerSoft = darkBoard ? "#d8b979" : "#573726";
+  const accent = darkBoard ? "#f0a95f" : "#7b4820";
   const paperGradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
   paperGradient.addColorStop(0, paper);
   paperGradient.addColorStop(1, paperEdge);
@@ -2428,14 +2594,14 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
 
   const vignette = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 640, canvas.width / 2, canvas.height / 2, canvas.width * 0.68);
   vignette.addColorStop(0, "rgba(255,255,255,0)");
-  vignette.addColorStop(1, "rgba(78, 54, 32, 0.09)");
+  vignette.addColorStop(1, darkBoard ? "rgba(0, 0, 0, 0.18)" : "rgba(78, 54, 32, 0.09)");
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.strokeStyle = border;
   ctx.lineWidth = 16;
   ctx.strokeRect(42, 42, canvas.width - 84, canvas.height - 84);
 
-  ctx.fillStyle = "rgba(94, 68, 45, 0.024)";
+  ctx.fillStyle = darkBoard ? "rgba(244, 225, 192, 0.026)" : "rgba(94, 68, 45, 0.024)";
   for (let index = 0; index < 48; index += 1) {
     const width = 52 + (index % 7) * 18;
     const height = 6 + (index % 5) * 2;
@@ -2449,12 +2615,12 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
   ctx.fillText(panel.kicker.toUpperCase(), 214, 212);
 
   if (panel.variant === "policy") {
-    const policyItems = (panel.list?.slice(0, 3) ?? ["", "", ""]);
-    const rowGap = 430;
-    const rowStartY = 416;
-    const itemFontSize = 92;
-    const numberFontSize = 112;
-    const lineStep = 72;
+    const policyItems = (panel.list?.slice(0, 4) ?? ["", "", "", ""]);
+    const rowGap = 246;
+    const rowStartY = 368;
+    const itemFontSize = 76;
+    const numberFontSize = 90;
+    const lineStep = 68;
     const maxPolicyLines = 3;
     ctx.strokeStyle = line;
     ctx.lineWidth = 2.5;
@@ -2479,7 +2645,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
       if (item) {
         ctx.fillStyle = marker;
         ctx.font = `600 ${itemFontSize}px ${BOARD_HAND_FONT}`;
-        const lines = boardWrapLines(ctx, boardSnippet(item, 94), canvas.width - 960, maxPolicyLines);
+        const lines = boardWrapLines(ctx, item, canvas.width - 820, maxPolicyLines);
         lines.forEach((lineItem, lineIndex) => {
           ctx.fillText(lineItem, 700, rowY + lineIndex * lineStep);
         });
@@ -2516,49 +2682,58 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
 
     const isMoodVariant = panel.variant === "mood";
     const isStatsVariant = panel.variant === "stats";
-      const statRows = (panel.stats ?? []).slice(0, 3);
+      const statRows = (panel.stats ?? []).slice(0, 4);
     const signalRows = (panel.columns ?? []).slice(0, 3);
     const statBandTop = cursorY + 34;
     const statBandWidth = canvas.width - statsX * 2;
 
     if (isMoodVariant) {
-      const primaryStatRows = statRows.slice(0, 3);
-      const visibleSignals = signalRows.slice(0, 3);
+      const primaryStatRows = statRows.slice(0, 4);
+      const visibleSignals = signalRows.slice(0, panel.footerText ? 2 : 3);
       ctx.fillStyle = accent;
       ctx.fillRect(statsX, statBandTop - 12, 286, 12);
 
-      const metricBaseY = statBandTop + 98;
-      const metricGap = 48;
-      const metricCardWidth = (statBandWidth - metricGap * (primaryStatRows.length - 1)) / Math.max(primaryStatRows.length, 1);
+      const metricBaseY = statBandTop + 86;
+      const metricColumns = primaryStatRows.length > 1 ? 2 : 1;
+      const metricGapX = 86;
+      const metricGapY = 44;
+      const metricCardWidth = (statBandWidth - metricGapX * (metricColumns - 1)) / metricColumns;
+      const metricRowHeight = 236;
       primaryStatRows.forEach((row, index) => {
-        const x = statsX + index * (metricCardWidth + metricGap);
-        const y = metricBaseY;
+        const columnIndex = index % metricColumns;
+        const rowIndex = Math.floor(index / metricColumns);
+        const x = statsX + columnIndex * (metricCardWidth + metricGapX);
+        const y = metricBaseY + rowIndex * (metricRowHeight + metricGapY);
         ctx.strokeStyle = line;
-        ctx.lineWidth = 5;
+        ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(x, y + 150);
-        ctx.lineTo(x + metricCardWidth, y + 150);
+        ctx.moveTo(x, y + 190);
+        ctx.lineTo(x + metricCardWidth, y + 190);
         ctx.stroke();
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 60px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 48px ${BOARD_SANS_FONT}`;
         ctx.fillText(row.label.toUpperCase(), x, y);
         ctx.fillStyle = marker;
-        ctx.font = `700 154px ${BOARD_HAND_FONT}`;
-        ctx.fillText(row.value, x, y + 118);
+        ctx.font = `700 112px ${BOARD_HAND_FONT}`;
+        const valueLines = boardWrapLines(ctx, row.value, metricCardWidth - 28, 2);
+        valueLines.forEach((lineText, lineIndex) => {
+          ctx.fillText(lineText, x, y + 92 + lineIndex * 72);
+        });
         if (row.note) {
           ctx.fillStyle = markerSoft;
-          ctx.font = `600 40px ${BOARD_SANS_FONT}`;
-          ctx.fillText(boardSnippet(row.note, 28), x, y + 200);
+          ctx.font = `600 34px ${BOARD_SANS_FONT}`;
+          ctx.fillText(boardSnippet(row.note, 38), x, y + 224);
         }
       });
 
-      const signalTop = metricBaseY + 292;
+      const metricRows = Math.max(1, Math.ceil(primaryStatRows.length / metricColumns));
+      const signalTop = metricBaseY + metricRows * (metricRowHeight + metricGapY) + 34;
       if (visibleSignals.length > 0) {
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 72px ${BOARD_SANS_FONT}`;
-        ctx.fillText("STATE OF PLAY", statsX, signalTop);
+        ctx.font = `700 58px ${BOARD_SANS_FONT}`;
+        ctx.fillText("PUBLIC SIGNALS", statsX, signalTop);
         ctx.fillStyle = accent;
-        ctx.fillRect(statsX, signalTop + 20, 218, 8);
+        ctx.fillRect(statsX, signalTop + 18, 250, 8);
       }
 
       visibleSignals.forEach((column, index) => {
@@ -2569,43 +2744,48 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
         const label = typeof lineItem === "string" ? column.title : lineItem.label;
         const value = typeof lineItem === "string" ? lineItem : lineItem.answer;
         const detail = typeof lineItem === "string" ? "" : lineItem.share ?? "";
-        const y = signalTop + 96 + index * 186;
+        const y = signalTop + 80 + index * 202;
+        const detailColumnWidth = detail ? 560 : 0;
+        const textColumnWidth = statBandWidth - detailColumnWidth - (detail ? 90 : 0);
         ctx.strokeStyle = line;
-        ctx.lineWidth = 5;
+        ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(statsX, y + 148);
-        ctx.lineTo(canvas.width - statsX, y + 148);
+        ctx.moveTo(statsX, y + 164);
+        ctx.lineTo(canvas.width - statsX, y + 164);
         ctx.stroke();
 
         ctx.fillStyle = markerSoft;
-        ctx.font = `700 52px ${BOARD_SANS_FONT}`;
+        ctx.font = `700 40px ${BOARD_SANS_FONT}`;
         ctx.fillText(column.title.toUpperCase(), statsX, y);
-        ctx.fillStyle = marker;
-        ctx.font = `700 96px ${BOARD_HAND_FONT}`;
-        const answerWidth = detail ? statBandWidth - 600 : statBandWidth - 140;
-        const answerLines = boardWrapLines(ctx, value, answerWidth, 2);
-        answerLines.forEach((lineText, lineIndex) => {
-          ctx.fillText(lineText, statsX, y + 76 + lineIndex * 56);
-        });
         if (detail) {
           ctx.textAlign = "right";
+          ctx.fillStyle = markerSoft;
+          ctx.font = `700 30px ${BOARD_SANS_FONT}`;
+          ctx.fillText("TOP SHARE", canvas.width - statsX, y + 2);
           ctx.fillStyle = marker;
-          ctx.font = `700 116px ${BOARD_HAND_FONT}`;
-          ctx.fillText(detail, canvas.width - statsX, y + 88);
+          ctx.font = `700 112px ${BOARD_HAND_FONT}`;
+          ctx.fillText(detail, canvas.width - statsX, y + 96);
           ctx.textAlign = "left";
         }
         if (label && label.toLowerCase() !== column.title.toLowerCase()) {
           ctx.fillStyle = markerSoft;
-          ctx.font = `600 38px ${BOARD_SANS_FONT}`;
-          const labelLines = boardWrapLines(ctx, boardSnippet(label, 68), statBandWidth - 180, 1);
+          ctx.font = `600 32px ${BOARD_SANS_FONT}`;
+          const labelLines = boardWrapLines(ctx, boardSnippet(label, 86), textColumnWidth, 1);
           labelLines.forEach((lineText, lineIndex) => {
-            ctx.fillText(lineText, statsX, y + 138 + lineIndex * 30);
+            ctx.fillText(lineText, statsX, y + 42 + lineIndex * 30);
           });
         }
+        ctx.fillStyle = marker;
+        ctx.font = `700 70px ${BOARD_HAND_FONT}`;
+        const answerWidth = Math.max(1120, textColumnWidth);
+        const answerLines = boardWrapLines(ctx, value, answerWidth, 2);
+        answerLines.forEach((lineText, lineIndex) => {
+          ctx.fillText(lineText, statsX, y + 108 + lineIndex * 52);
+        });
       });
 
       if (panel.footerText) {
-        const footerTop = signalTop + 104 + visibleSignals.length * 186 + 10;
+        const footerTop = signalTop + 96 + visibleSignals.length * 202 + 8;
         ctx.fillStyle = markerSoft;
         ctx.font = `700 48px ${BOARD_SANS_FONT}`;
         ctx.fillText((panel.footerLabel ?? "Macro read").toUpperCase(), statsX, footerTop);
@@ -2646,14 +2826,14 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
         ctx.fillText(row.label.toUpperCase(), statsX, lineY + 12);
         ctx.fillStyle = marker;
         ctx.textAlign = "right";
-        ctx.font = `700 160px ${BOARD_MONO_FONT}`;
+        ctx.font = `700 154px ${BOARD_HAND_FONT}`;
         ctx.fillText(row.value, canvas.width - statsX, lineY + 78);
+        ctx.textAlign = "left";
         if (row.note) {
           ctx.fillStyle = accent;
           ctx.font = `700 42px ${BOARD_SANS_FONT}`;
-          ctx.fillText(boardSnippet(row.note, 32).toUpperCase(), statsX, lineY + 154);
+          ctx.fillText(boardSnippet(row.note, 38).toUpperCase(), statsX, lineY + 154);
         }
-        ctx.textAlign = "left";
       });
 
       const signalTop = readoutY + primaryStatRows.length * 182 + 24;
@@ -2708,7 +2888,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
           ctx.font = `700 38px ${BOARD_SANS_FONT}`;
           ctx.fillText("TOP SHARE", canvas.width - statsX, y + 2);
           ctx.fillStyle = marker;
-          ctx.font = `700 110px ${BOARD_MONO_FONT}`;
+          ctx.font = `700 104px ${BOARD_HAND_FONT}`;
           ctx.fillText(detail, canvas.width - statsX, y + 96);
           ctx.textAlign = "left";
         }
@@ -2756,7 +2936,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
         ctx.fillStyle = accent;
         ctx.fillRect(x, accentY, 148, 8);
         ctx.fillStyle = marker;
-        ctx.font = `700 140px ${BOARD_MONO_FONT}`;
+        ctx.font = `700 140px ${BOARD_HAND_FONT}`;
         const valueLines = boardWrapLines(ctx, row.value, statCellWidth - 12, 1);
         valueLines.forEach((lineItem, lineIndex) => {
           ctx.fillText(lineItem, x, valueY + lineIndex * 78);
@@ -2823,7 +3003,7 @@ function boardTexture(panel: BoardPanel, themeMode: "light" | "dark", signature:
         if (detail) {
           ctx.textAlign = "right";
           ctx.fillStyle = marker;
-          ctx.font = `700 112px ${BOARD_MONO_FONT}`;
+          ctx.font = `700 112px ${BOARD_HAND_FONT}`;
           ctx.fillText(detail, x + signalWidth, y + 146);
           ctx.fillStyle = markerSoft;
           ctx.font = `700 28px ${BOARD_SANS_FONT}`;
@@ -2885,7 +3065,7 @@ function venueScreenTexture(stage: StagePackage, themeMode: "light" | "dark", si
   }
   const canvas = document.createElement("canvas");
   canvas.width = 2560;
-  canvas.height = 1180;
+  canvas.height = 1728;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return new THREE.CanvasTexture(canvas);
@@ -3242,12 +3422,12 @@ function AdvisorBoards({
     () => (
       notes.length > 0
         ? notes
-        : stagePolicyAxes(stage, 5)
+        : stage.policy_notes
     ),
     [notes, stage],
   );
   const agendaNotes = useMemo(
-    () => fallbackAgendaSource.slice(0, 5).map((item) => boardPolicyLabel(item)),
+    () => fallbackAgendaSource.slice(0, 4).map((item) => boardPolicyLabel(item)),
     [fallbackAgendaSource, notesKey],
   );
   const statsKey = boardMetricsKey(stage);
@@ -3261,10 +3441,8 @@ function AdvisorBoards({
   const statsPanel = useMemo<BoardPanel>(() => ({
     variant: "mood",
     kicker: playerInPower ? "Public mood" : "Campaign mood",
-    stats: statsRows.slice(0, 3),
-    columns: moodColumns,
-    footerLabel: "World read",
-    footerText: boardSnippet(boardMacroRead(stage), 156),
+    stats: statsRows.slice(0, 4),
+    columns: moodColumns.slice(0, 2),
   }), [
     moodKey,
     playerInPower,
@@ -3274,55 +3452,55 @@ function AdvisorBoards({
   const policyPanel = useMemo<BoardPanel>(() => ({
     variant: "policy",
     kicker: playerInPower ? "Policy ideas" : "Campaign ideas",
-    list: (agendaNotes.length > 0 ? agendaNotes : ["", "", "", "", ""]).slice(0, 5),
+    list: (agendaNotes.length > 0 ? agendaNotes : ["", "", "", ""]).slice(0, 4),
   }), [agendaKey, playerInPower]);
   const statsBoardLayout =
     layout === "council"
       ? {
-          bayWidth: 9.72,
-          bayHeight: 6.68,
-          x: 4.75,
-          y: 3.72,
-          z: -5.38,
-          boardWidth: 9.02,
-          boardHeight: 5.98,
-          boardZ: -5.1,
-          pitch: -0.001,
+          bayWidth: 6.78,
+          bayHeight: 4.82,
+          x: 3.42,
+          y: 3.18,
+          z: -3.82,
+          boardWidth: 6.42,
+          boardHeight: 4.5,
+          boardZ: -3.56,
+          pitch: -0.012,
         }
       : {
-        bayWidth: 9.72,
-        bayHeight: 6.54,
-          x: 4.95,
-          y: 3.66,
-          z: -5.34,
-          boardWidth: 9.44,
-          boardHeight: 6.02,
-          boardZ: -5.14,
-          pitch: -0.001,
+          bayWidth: 7.34,
+          bayHeight: 4.96,
+          x: 3.86,
+          y: 3.22,
+          z: -3.9,
+          boardWidth: 6.96,
+          boardHeight: 4.56,
+          boardZ: -3.62,
+          pitch: -0.012,
         };
   const policyBoardLayout =
     layout === "council"
       ? {
-          bayWidth: 9.04,
-          bayHeight: 6.34,
-          x: 4.75,
-          y: 3.72,
-          z: -5.38,
-          boardWidth: 8.58,
-          boardHeight: 5.7,
-          boardZ: -5.12,
-          pitch: -0.001,
+          bayWidth: 6.54,
+          bayHeight: 4.72,
+          x: 3.42,
+          y: 3.18,
+          z: -3.82,
+          boardWidth: 6.18,
+          boardHeight: 4.38,
+          boardZ: -3.58,
+          pitch: -0.012,
         }
       : {
-        bayWidth: 8.92,
-        bayHeight: 6.22,
-          x: 4.95,
-          y: 3.66,
-          z: -5.34,
-          boardWidth: 8.48,
-          boardHeight: 5.58,
-          boardZ: -5.18,
-          pitch: -0.001,
+          bayWidth: 6.72,
+          bayHeight: 4.82,
+          x: 3.86,
+          y: 3.22,
+          z: -3.9,
+          boardWidth: 6.28,
+          boardHeight: 4.42,
+          boardZ: -3.66,
+          pitch: -0.012,
         };
   return (
     <>
@@ -3361,7 +3539,7 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
   const publicReadPanel = useMemo<BoardPanel>(() => ({
     variant: "mood",
     kicker: "Public mood",
-    stats: statsRows.slice(0, 3),
+    stats: statsRows.slice(0, 4),
     columns: moodColumns,
     footerLabel: "World read",
     footerText: boardSnippet(boardMacroRead(stage), 156),
@@ -3371,11 +3549,9 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
       (
         notes.length > 0
           ? notes
-          : stage.policy_notes.length > 0
-            ? stage.policy_notes
-            : stagePolicyAxes(stage, 5)
+          : stage.policy_notes
       )
-        .slice(0, 5)
+        .slice(0, 4)
         .map((note) => boardPolicyLabel(note)),
     [notes, stage],
   );
@@ -3393,7 +3569,7 @@ function DebateBoards({ stage, notes, themeMode }: { stage: StagePackage; notes:
         panel={{
           variant: "policy",
           kicker: "Platform today",
-          list: (platformNotes.length > 0 ? platformNotes : ["", "", "", "", ""]).slice(0, 5),
+          list: (platformNotes.length > 0 ? platformNotes : ["", "", "", ""]).slice(0, 4),
         }}
         themeMode={themeMode}
       />
@@ -3481,7 +3657,7 @@ function SceneCitizenLabel({
     <Html position={position} center distanceFactor={7.6} style={{ pointerEvents: "auto" }}>
       <button
         type="button"
-        className={`scene-hotspot scene-hotspot--${tone} scene-hotspot--person scene-citizen-label ${active ? "scene-hotspot--active" : ""}`}
+        className={`scene-hotspot scene-hotspot--${tone} scene-hotspot--person scene-citizen-label ${active ? "scene-hotspot--active scene-citizen-label--active" : ""} ${ready ? "scene-citizen-label--ready" : ""}`}
         onClick={(event) => {
           event.stopPropagation();
           onSelect?.();
@@ -3523,8 +3699,8 @@ function SceneRig({
       const forwardX = Math.sin(cameraHeading);
       const forwardZ = -Math.cos(cameraHeading);
       const encounterBlend = streetFocus ? THREE.MathUtils.clamp(1 - Math.min(1, focusDistance / 8.8), 0, 1) : 0;
-      const shoulderDistance = THREE.MathUtils.lerp(0.1, 0.2, encounterBlend);
-      const behindDistance = THREE.MathUtils.lerp(4.78, 3.98, encounterBlend);
+      const shoulderDistance = THREE.MathUtils.lerp(0.42, 0.28, encounterBlend);
+      const behindDistance = THREE.MathUtils.lerp(6.25, 4.72, encounterBlend);
       const cameraXMargin = 1.8;
       const lookXMargin = 1.05;
       const shoulderX = Math.cos(cameraHeading) * shoulderDistance;
@@ -3533,10 +3709,10 @@ function SceneRig({
       const behindZ = -forwardZ * behindDistance;
       const desiredX = player.x + behindX + shoulderX * 0.3;
       const targetX = THREE.MathUtils.clamp(desiredX, STREET_BOUNDS.minX + cameraXMargin, STREET_BOUNDS.maxX - cameraXMargin);
-      const targetY = THREE.MathUtils.lerp(1.38, 1.3, encounterBlend);
+      const targetY = THREE.MathUtils.lerp(3.48, 2.72, encounterBlend);
       const targetZ = THREE.MathUtils.clamp(player.z + behindZ + shoulderZ * 0.32 + 0.04, STREET_BOUNDS.minZ + 4.4, STREET_BOUNDS.maxZ - 1.05);
-      const baseLookX = THREE.MathUtils.clamp(player.x + forwardX * 3.6, STREET_BOUNDS.minX + lookXMargin, STREET_BOUNDS.maxX - lookXMargin);
-      const baseLookZ = player.z + forwardZ * 4.05;
+      const baseLookX = THREE.MathUtils.clamp(player.x + forwardX * 4.2, STREET_BOUNDS.minX + lookXMargin, STREET_BOUNDS.maxX - lookXMargin);
+      const baseLookZ = player.z + forwardZ * 6.8;
       const focusBlend =
         streetFocus
           ? THREE.MathUtils.clamp(
@@ -3555,7 +3731,7 @@ function SceneRig({
       camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, follow);
       camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, follow);
       camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, follow);
-      camera.lookAt(smoothedFocusRef.current[0], 0.9, smoothedFocusRef.current[1]);
+      camera.lookAt(smoothedFocusRef.current[0], 1.24, smoothedFocusRef.current[1]);
       return;
     }
     const driftedTarget = target;
@@ -3721,6 +3897,8 @@ function AdvisorCouncilShell({ accent, fill, themeMode }: { accent: string; fill
 }
 
 function CitizenShell({ accent, fill, themeMode }: { accent: string; fill: string; themeMode: "light" | "dark" }) {
+  const roadTexture = useMemo(() => streetSurfaceTexture(themeMode), [themeMode]);
+  useEffect(() => () => roadTexture.dispose(), [roadTexture]);
   const rearHorizon = [
     { position: [-25.4, 6.2, -47.2] as [number, number, number], size: [3.2, 8.8, 1.4] as [number, number, number], tone: "#6c5543" },
     { position: [-21.3, 5.6, -48.2] as [number, number, number], size: [2.8, 7.4, 1.3] as [number, number, number], tone: "#4f6a7e" },
@@ -3744,6 +3922,22 @@ function CitizenShell({ accent, fill, themeMode }: { accent: string; fill: strin
   ];
   return (
     <group>
+      <mesh position={[0, 0.02, -25.2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[17.2, 103]} />
+        <meshStandardMaterial map={roadTexture} color="#ffffff" roughness={0.98} />
+      </mesh>
+      {[-12.2, 12.2].map((x) => (
+        <mesh key={`street-sidewalk-${x}`} position={[x, 0.018, -25.2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+          <planeGeometry args={[6.2, 103]} />
+          <meshStandardMaterial color={themeMode === "light" ? "#a99176" : "#2e2925"} roughness={0.98} />
+        </mesh>
+      ))}
+      {[-8.65, 8.65].map((x) => (
+        <mesh key={`street-curb-${x}`} position={[x, 0.075, -25.2]} receiveShadow>
+          <boxGeometry args={[0.28, 0.12, 103]} />
+          <meshStandardMaterial color={themeMode === "light" ? "#d0bda4" : "#4b4037"} roughness={0.94} />
+        </mesh>
+      ))}
       <mesh position={[0, 8.4, -32]}>
         <planeGeometry args={[48, 24]} />
         <meshStandardMaterial
@@ -4465,6 +4659,7 @@ function CharacterFigure({
   interactive = false,
   highlighted = false,
   floorActive = false,
+  floorPending = false,
   followRef,
   animate = true,
   shadows = true,
@@ -4482,12 +4677,13 @@ function CharacterFigure({
     torsoWidth: number;
     torsoHeight: number;
     torsoDepth: number;
-      armLength: number;
-      legLength: number;
+    armLength: number;
+    legLength: number;
   };
   interactive?: boolean;
   highlighted?: boolean;
   floorActive?: boolean;
+  floorPending?: boolean;
   followRef?: MutableRefObject<StreetPlayerState>;
   animate?: boolean;
   shadows?: boolean;
@@ -4498,7 +4694,13 @@ function CharacterFigure({
   const groupRef = useRef<THREE.Group>(null);
   const headRef = useRef<THREE.Mesh>(null);
   const armRef = useRef<THREE.Group>(null);
+  const floorGlowRef = useRef(0);
+  const floorLightRef = useRef<THREE.PointLight>(null);
+  const floorOrbMaterialRef = useRef<THREE.MeshBasicMaterial>(null);
+  const floorHaloMaterialRef = useRef<THREE.MeshBasicMaterial>(null);
+  const floorRingMaterialRef = useRef<THREE.MeshBasicMaterial>(null);
   const [hovered, setHovered] = useState(false);
+  const [floorCueMounted, setFloorCueMounted] = useState(floorActive || floorPending);
   const form = silhouette ?? {
     head: 0.34,
     torsoWidth: 0.95,
@@ -4507,7 +4709,15 @@ function CharacterFigure({
     armLength: 0.62,
     legLength: 0.82,
   };
-  const emphasis = hovered || highlighted || floorActive;
+  const emphasis = hovered || highlighted || floorActive || floorPending;
+  useEffect(() => {
+    if (floorActive || floorPending) {
+      setFloorCueMounted(true);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setFloorCueMounted(false), 760);
+    return () => window.clearTimeout(timer);
+  }, [floorActive, floorPending]);
   const handleHoverStart = interactive
     ? (event: ThreeEvent<PointerEvent>) => {
         event.stopPropagation();
@@ -4531,7 +4741,7 @@ function CharacterFigure({
       }
     : undefined;
 
-  useFrame((state) => {
+  useFrame((state, delta) => {
     if (!animate) {
       return;
     }
@@ -4542,8 +4752,8 @@ function CharacterFigure({
       return;
     }
     const time = state.clock.elapsedTime;
-    const amplitude = activity === "speaking" ? 0.14 : floorActive ? 0.075 : activity === "listening" ? 0.05 : 0.02;
-    const speed = activity === "speaking" ? 5.5 : floorActive ? 3.4 : activity === "listening" ? 2.4 : 1.4;
+    const amplitude = activity === "speaking" ? 0.14 : floorActive ? 0.1 : activity === "listening" ? 0.05 : 0.02;
+    const speed = activity === "speaking" ? 5.5 : floorActive ? 4.3 : activity === "listening" ? 2.4 : 1.4;
     const anchor = followRef?.current;
     const translatedX = anchor ? anchor.x : position[0];
     const translatedZ = anchor ? anchor.z : position[2];
@@ -4552,6 +4762,22 @@ function CharacterFigure({
     head.rotation.z = Math.sin(time * speed * 0.7) * (activity === "speaking" ? 0.08 : 0.03);
     head.rotation.x = Math.sin(time * speed * 0.9) * (activity === "speaking" ? 0.05 : 0.02);
     arms.rotation.z = Math.sin(time * speed) * (activity === "speaking" ? 0.08 : 0.02);
+
+    const floorTarget = floorActive ? (floorPending ? 0.64 : 1) : 0;
+    floorGlowRef.current = THREE.MathUtils.damp(floorGlowRef.current, floorTarget, 6.2, delta);
+    const glow = floorGlowRef.current;
+    if (floorLightRef.current) {
+      floorLightRef.current.intensity = glow * (floorPending ? 0.95 : 1.7);
+    }
+    if (floorOrbMaterialRef.current) {
+      floorOrbMaterialRef.current.opacity = glow * (floorPending ? 0.18 : 0.3) * opacity;
+    }
+    if (floorHaloMaterialRef.current) {
+      floorHaloMaterialRef.current.opacity = glow * (floorPending ? 0.18 : 0.34) * opacity;
+    }
+    if (floorRingMaterialRef.current) {
+      floorRingMaterialRef.current.opacity = glow * (floorPending ? 0.22 : 0.36) * opacity;
+    }
   });
 
   return (
@@ -4577,12 +4803,20 @@ function CharacterFigure({
           <meshBasicMaterial color={palette.glow} transparent opacity={(floorActive ? 0.58 : emphasis ? 0.42 : 0.18) * opacity} />
         </mesh>
       ) : null}
-      {floorActive ? (
+      {floorCueMounted ? (
         <>
-          <pointLight position={[0, 2.25, 0.55]} color={palette.glow} intensity={1.25} distance={3.4} />
+          <pointLight ref={floorLightRef} position={[0, 2.25, 0.55]} color={palette.glow} intensity={0} distance={4.2} />
           <mesh position={[0, 2.52, 0]}>
             <sphereGeometry args={[0.2, 16, 16]} />
-            <meshBasicMaterial color={palette.glow} transparent opacity={0.22 * opacity} />
+            <meshBasicMaterial ref={floorOrbMaterialRef} color={palette.glow} transparent opacity={0} />
+          </mesh>
+          <mesh position={[0, 0.08, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.76, 0.9, 36]} />
+            <meshBasicMaterial ref={floorHaloMaterialRef} color={palette.glow} transparent opacity={0} />
+          </mesh>
+          <mesh position={[0, 0.085, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.94, 1.16, 36]} />
+            <meshBasicMaterial ref={floorRingMaterialRef} color={palette.glow} transparent opacity={0} />
           </mesh>
         </>
       ) : null}

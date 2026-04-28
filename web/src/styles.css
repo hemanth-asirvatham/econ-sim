@@ -1,5 +1,6 @@
 :root {
   color-scheme: dark;
+  --font-sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
   --bg-0: #0f0b08;
   --bg-1: #1a130e;
   --bg-2: #261b14;
@@ -1100,7 +1101,7 @@ textarea {
 }
 
 .briefing__image--loading {
-  opacity: 0.02;
+  opacity: 0.18;
 }
 
 .briefing__image--ready {
@@ -1503,6 +1504,46 @@ textarea {
   background:
     radial-gradient(circle at 30% 30%, rgba(213, 160, 92, 0.14), transparent 26%),
     linear-gradient(180deg, rgba(26, 19, 14, 0.92), rgba(11, 8, 6, 0.98));
+}
+
+.scene--error {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at 50% 25%, rgba(213, 160, 92, 0.18), transparent 30%),
+    linear-gradient(180deg, rgba(31, 22, 16, 0.94), rgba(12, 9, 7, 0.98));
+}
+
+.scene-error-card {
+  width: min(34rem, calc(100% - 2rem));
+  padding: 1.25rem 1.35rem;
+  border: 1px solid rgba(235, 205, 160, 0.2);
+  border-radius: 1rem;
+  background: rgba(28, 21, 16, 0.78);
+  color: rgba(251, 244, 232, 0.92);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+}
+
+.scene-error-card span {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: rgba(236, 202, 153, 0.78);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.scene-error-card strong {
+  display: block;
+  margin-bottom: 0.45rem;
+  font-size: 1.05rem;
+}
+
+.scene-error-card p {
+  margin: 0;
+  color: rgba(251, 244, 232, 0.68);
 }
 
 .scene__canvas,
@@ -3164,15 +3205,22 @@ textarea {
 
 .scene__controls {
   position: absolute;
-  top: 1.2rem;
-  right: 1.2rem;
+  top: 0.84rem;
+  right: 0.9rem;
   z-index: 8;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 0.4rem;
-  max-width: min(40rem, calc(100vw - 2.4rem));
+  gap: 0.28rem;
+  max-width: min(28rem, calc(100vw - 1.8rem));
   pointer-events: auto;
+  opacity: 0.78;
+  transition: opacity 160ms ease;
+}
+
+.scene__controls:hover,
+.scene__controls:focus-within {
+  opacity: 1;
 }
 
 .scene-control {
@@ -3180,11 +3228,11 @@ textarea {
   border-radius: 999px;
   background: rgba(15, 11, 9, 0.74);
   color: var(--ink-0);
-  padding: 0.42rem 0.62rem;
+  padding: 0.32rem 0.52rem;
   cursor: pointer;
   backdrop-filter: blur(10px);
-  font-size: 0.68rem;
-  letter-spacing: 0.06em;
+  font-size: 0.62rem;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
 }
 
@@ -3324,12 +3372,12 @@ textarea {
 .scene__channel-stack {
   position: absolute;
   left: 50%;
-  bottom: 0.82rem;
+  bottom: 0.72rem;
   z-index: 10;
   transform: translateX(-50%);
   display: grid;
-  gap: 0.42rem;
-  width: min(42rem, calc(100% - 1rem));
+  gap: 0.32rem;
+  width: min(36rem, calc(100% - 1rem));
   pointer-events: auto;
 }
 
@@ -3348,7 +3396,7 @@ textarea {
   justify-self: center;
   grid-template-columns: auto auto;
   width: auto;
-  min-width: min(13.2rem, calc(100vw - 1rem));
+  min-width: min(10.8rem, calc(100vw - 1rem));
 }
 
 .scene__channel-stack .scene__channel-bar--text-open {
@@ -3501,20 +3549,20 @@ textarea {
   display: flex;
   justify-content: center;
   align-items: stretch;
-  gap: 0.46rem;
+  gap: 0.36rem;
   width: auto;
-  max-width: min(30rem, 100%);
+  max-width: min(24rem, 100%);
 }
 
 .scene__stage-action,
 .scene__townhall-action {
   justify-self: center;
   display: grid;
-  gap: 0.12rem;
-  flex: 0 1 12.2rem;
-  min-width: min(12.2rem, 100%);
-  padding: 0.46rem 0.84rem 0.54rem;
-  border-radius: 1rem;
+  gap: 0.04rem;
+  flex: 0 1 9.6rem;
+  min-width: min(9.6rem, 100%);
+  padding: 0.38rem 0.68rem 0.42rem;
+  border-radius: 0.82rem;
   border: 1px solid rgba(233, 201, 160, 0.28);
   background:
     linear-gradient(180deg, rgba(61, 40, 24, 0.94), rgba(21, 14, 10, 0.985)),
@@ -3549,7 +3597,7 @@ textarea {
 
 .scene__stage-action span {
   color: var(--ink-0);
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
@@ -3565,13 +3613,17 @@ textarea {
 .scene__stage-action small,
 .scene__townhall-action small {
   color: rgba(250, 241, 224, 0.92);
-  font-size: 0.7rem;
-  line-height: 1.3;
+  font-size: 0.62rem;
+  line-height: 1.2;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .scene__townhall-action span {
   color: var(--ink-0);
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
 }
@@ -3957,8 +4009,20 @@ textarea {
   cursor: pointer;
 }
 
+.scene-citizen-label--active {
+  min-width: 10.2rem;
+  border-color: rgba(246, 225, 190, 0.48);
+  box-shadow:
+    0 0 0 2px rgba(246, 225, 190, 0.12),
+    0 12px 28px rgba(0, 0, 0, 0.26);
+}
+
+.scene-citizen-label--ready {
+  border-color: rgba(159, 219, 147, 0.42);
+}
+
 .scene-citizen-label span {
-  font-size: 0.56rem;
+  font-size: 0.62rem;
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: none;
@@ -3968,7 +4032,7 @@ textarea {
 .scene-citizen-label small {
   display: block;
   margin-top: 0.08rem;
-  font-size: 0.36rem;
+  font-size: 0.4rem;
   letter-spacing: 0.04em;
   text-transform: none;
   opacity: 0.88;
@@ -3995,6 +4059,7 @@ textarea {
   margin-top: 0.04rem;
   font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .scene-citizen-label__status--approve {
@@ -4291,8 +4356,8 @@ textarea {
 
 .scene__caption p {
   margin: 0.24rem 0 0;
-  font-size: 0.88rem;
-  line-height: 1.48;
+  font-size: 0.98rem;
+  line-height: 1.42;
 }
 
 .scene__caption-lines {
@@ -4305,8 +4370,8 @@ textarea {
 .scene__caption-lines span {
   display: block;
   color: var(--ink-0);
-  font-size: 0.9rem;
-  line-height: 1.48;
+  font-size: 0.98rem;
+  line-height: 1.42;
   letter-spacing: 0;
   text-transform: none;
 }
@@ -4322,10 +4387,10 @@ textarea {
 .scene__caption--centered {
   left: 50%;
   right: auto;
-  bottom: clamp(5.15rem, 8.6vh, 7.05rem);
-  width: min(42rem, calc(100% - 2rem));
-  max-height: min(7.8rem, 24vh);
-  padding: 0.56rem 1.05rem;
+  bottom: clamp(5.8rem, 9.4vh, 7.6rem);
+  width: min(58rem, calc(100% - 2.4rem));
+  max-height: min(12rem, 32vh);
+  padding: 0.68rem 1.22rem;
   border-color: rgba(229, 194, 149, 0.08);
   background:
     linear-gradient(180deg, rgba(15, 11, 9, 0.5), rgba(11, 9, 7, 0.64)),
@@ -4337,8 +4402,8 @@ textarea {
 }
 
 .scene--dense-bottom .scene__caption--centered {
-  bottom: clamp(7.15rem, 11.8vh, 9.55rem);
-  width: min(40rem, calc(100% - 1.6rem));
+  bottom: clamp(8.35rem, 13vh, 10.25rem);
+  width: min(56rem, calc(100% - 1.8rem));
 }
 
 .scene__caption--with-actions {
@@ -4353,11 +4418,11 @@ textarea {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 5;
 }
 
 .scene__caption--centered .scene__caption-lines {
-  max-height: 4.9rem;
+  max-height: 8.2rem;
   overflow: hidden;
 }
 
@@ -4373,6 +4438,11 @@ textarea {
   text-align: center;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
   backdrop-filter: blur(10px);
+  transition:
+    border-color 280ms ease,
+    box-shadow 320ms ease,
+    transform 320ms ease,
+    background 320ms ease;
 }
 
 .scene-council-label strong {
@@ -4388,15 +4458,140 @@ textarea {
   color: var(--ink-2);
 }
 
-.scene-council-urgency {
-  font-size: 0.52rem;
-  letter-spacing: 0.1em;
-  color: rgba(236, 214, 187, 0.9);
-}
-
 .scene-council-label--active {
   border-color: rgba(229, 194, 149, 0.34);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+}
+
+.scene-council-label--pending {
+  transform: translateY(-0.08rem);
+  border-color: rgba(242, 211, 166, 0.46);
+  background:
+    linear-gradient(180deg, rgba(33, 26, 18, 0.82), rgba(12, 10, 8, 0.7)),
+    radial-gradient(circle at 50% 0%, rgba(229, 194, 149, 0.18), transparent 62%);
+  box-shadow:
+    0 0 0 1px rgba(242, 211, 166, 0.08),
+    0 14px 30px rgba(0, 0, 0, 0.28);
+}
+
+.scene-council-floor {
+  position: absolute;
+  left: 50%;
+  top: clamp(4.35rem, 8.2vh, 5.7rem);
+  transform: translateX(-50%);
+  z-index: 3;
+  pointer-events: none;
+  padding: 0.36rem 0.62rem;
+  border-radius: 999px;
+  border: 1px solid rgba(232, 205, 168, 0.18);
+  background:
+    linear-gradient(180deg, rgba(26, 20, 14, 0.72), rgba(12, 10, 8, 0.64)),
+    radial-gradient(circle at top, rgba(231, 181, 104, 0.12), transparent 60%);
+  color: rgba(246, 234, 216, 0.96);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.scene-council-floor span {
+  display: block;
+  font-size: 0.66rem;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.scene-council-floor--player {
+  border-color: rgba(143, 198, 145, 0.24);
+  background:
+    linear-gradient(180deg, rgba(20, 42, 24, 0.72), rgba(12, 19, 12, 0.64)),
+    radial-gradient(circle at top, rgba(124, 193, 124, 0.16), transparent 60%);
+}
+
+.app-shell--theme-light .scene-council-floor {
+  border-color: rgba(120, 92, 58, 0.16);
+  background:
+    linear-gradient(180deg, rgba(252, 245, 234, 0.92), rgba(226, 209, 184, 0.84)),
+    radial-gradient(circle at top, rgba(192, 142, 82, 0.1), transparent 58%);
+  color: rgba(55, 36, 21, 0.94);
+  box-shadow: 0 12px 24px rgba(105, 78, 49, 0.12);
+}
+
+.app-shell--theme-light .scene-council-floor--player {
+  background:
+    linear-gradient(180deg, rgba(229, 246, 226, 0.94), rgba(196, 221, 193, 0.86)),
+    radial-gradient(circle at top, rgba(106, 167, 111, 0.13), transparent 58%);
+}
+
+.scene-wall-board {
+  display: grid;
+  gap: 0.22rem;
+  width: 16.6rem;
+  min-height: 9.4rem;
+  padding: 0.72rem 0.82rem;
+  border: 0.18rem solid rgba(49, 35, 24, 0.88);
+  border-radius: 0.38rem;
+  background:
+    linear-gradient(145deg, rgba(246, 237, 221, 0.96), rgba(218, 195, 163, 0.94)),
+    rgba(236, 219, 191, 0.96);
+  color: #1f130c;
+  box-shadow: 0 0.7rem 1.4rem rgba(0, 0, 0, 0.24);
+  transform: rotate(-0.6deg);
+  font-family: "Segoe Print", "Bradley Hand", "Chalkboard SE", "Marker Felt", "Noteworthy", cursive;
+}
+
+.scene-wall-board--policy {
+  transform: rotate(0.6deg);
+}
+
+.scene-wall-board--dark {
+  border-color: rgba(18, 13, 9, 0.94);
+  background:
+    linear-gradient(145deg, rgba(236, 222, 198, 0.96), rgba(190, 160, 124, 0.95)),
+    rgba(226, 204, 172, 0.96);
+}
+
+.scene-wall-board span {
+  font-family: var(--font-sans);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(72, 45, 22, 0.78);
+}
+
+.scene-wall-board p {
+  display: grid;
+  grid-template-columns: minmax(3.6rem, 0.7fr) minmax(0, 1.3fr);
+  align-items: baseline;
+  gap: 0.48rem;
+  margin: 0;
+  padding: 0 0 0.17rem;
+  border-bottom: 1px solid rgba(80, 55, 31, 0.18);
+}
+
+.scene-wall-board strong,
+.scene-wall-board em {
+  font-style: normal;
+  line-height: 1.05;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-wall-board strong {
+  font-family: var(--font-sans);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(80, 49, 25, 0.76);
+}
+
+.scene-wall-board em {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: rgba(29, 18, 10, 0.92);
 }
 
 
@@ -5269,7 +5464,7 @@ textarea {
 
 .setup-notes__grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   gap: 0.75rem;
 }
 
@@ -5380,11 +5575,11 @@ textarea {
 .loading-stage__spotlight {
   align-self: center;
   justify-self: center;
-  width: min(84rem, 100%);
+  width: min(92rem, 100%);
   display: grid;
   justify-items: center;
   align-content: center;
-  gap: 0.82rem;
+  gap: 0.65rem;
 }
 
 .loading-stage__cards {
@@ -5399,10 +5594,10 @@ textarea {
 .loading-stage__flash {
   align-self: center;
   justify-self: center;
-  width: min(86rem, calc(100% - 1rem));
-  min-height: clamp(12rem, 26vh, 15.5rem);
+  width: min(88rem, calc(100% - 1rem));
+  min-height: clamp(8.5rem, 20vh, 11.5rem);
   margin: 0;
-  padding: 1.08rem min(5vw, 3.2rem) 1.12rem;
+  padding: 0.8rem min(4vw, 2.4rem) 0.86rem;
   border-radius: 0;
   border: 0;
   background: transparent;
@@ -5427,7 +5622,7 @@ textarea {
 }
 
 .loading-stage__flash--quote p {
-  max-width: 58ch;
+  max-width: min(100ch, calc(100vw - 3rem));
   font-size: clamp(1.5rem, 2.25vw, 2.34rem);
   line-height: 1.16;
 }
@@ -5437,9 +5632,9 @@ textarea {
 }
 
 .loading-stage__flash--note p {
-  max-width: 40ch;
-  font-size: clamp(1.1rem, 1.9vw, 1.58rem);
-  line-height: 1.34;
+  max-width: 50ch;
+  font-size: clamp(1rem, 1.55vw, 1.34rem);
+  line-height: 1.3;
   font-family: "Iowan Old Style", "Book Antiqua", "Palatino Linotype", serif;
   letter-spacing: 0.005em;
 }
@@ -5455,13 +5650,21 @@ textarea {
 
 .loading-stage__flash p {
   margin: 0 auto;
-  max-width: 40ch;
+  max-width: 56ch;
   font-family: "Iowan Old Style", "Book Antiqua", "Palatino Linotype", serif;
   font-size: clamp(1.82rem, 2.8vw, 2.92rem);
   line-height: 1.1;
   text-wrap: balance;
   color: rgba(247, 239, 225, 0.96);
   text-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.loading-stage__flash.loading-stage__flash--quote p {
+  max-width: min(104ch, calc(100vw - 3rem));
+}
+
+.loading-stage__flash.loading-stage__flash--note p {
+  max-width: min(70ch, calc(100vw - 3rem));
 }
 
 .loading-stage__flash-attribution {
@@ -5475,7 +5678,7 @@ textarea {
 }
 
 .loading-stage__flash--note p {
-  max-width: 54ch;
+  max-width: 62ch;
   font-family: "Iowan Old Style", "Book Antiqua", "Palatino Linotype", serif;
   font-size: clamp(1.18rem, 2vw, 1.72rem);
   line-height: 1.34;
@@ -5602,9 +5805,9 @@ textarea {
 
 .app-shell--theme-light .loading-stage__flash--quote,
 .app-shell--theme-light .loading-stage__flash--note {
-  width: min(86rem, calc(100% - 1.25rem));
-  min-height: clamp(12.2rem, 27vh, 15.8rem);
-  padding: 1.16rem 1.45rem 1.22rem;
+  width: min(88rem, calc(100% - 1.25rem));
+  min-height: clamp(8.8rem, 21vh, 11.8rem);
+  padding: 0.88rem 1.2rem 0.94rem;
 }
 
 .app-shell--theme-light .loading-stage__flash--quote {
@@ -5619,12 +5822,12 @@ textarea {
 
 .app-shell--theme-light .loading-stage__flash--note {
   background:
-    linear-gradient(180deg, rgba(248, 241, 229, 0.88), rgba(232, 217, 198, 0.82)),
-    radial-gradient(circle at top, rgba(188, 136, 80, 0.06), transparent 62%);
-  border: 1px solid rgba(154, 118, 77, 0.12);
-  box-shadow: 0 18px 38px rgba(114, 86, 57, 0.08);
-  backdrop-filter: blur(10px);
-  border-radius: 1.55rem;
+    linear-gradient(180deg, rgba(248, 241, 229, 0.52), rgba(232, 217, 198, 0.34)),
+    radial-gradient(circle at top, rgba(188, 136, 80, 0.04), transparent 62%);
+  border: 1px solid rgba(154, 118, 77, 0.08);
+  box-shadow: 0 10px 24px rgba(114, 86, 57, 0.05);
+  backdrop-filter: blur(6px);
+  border-radius: 1.2rem;
 }
 
 .app-shell--theme-light .loading-stage__flash p {
@@ -5738,7 +5941,9 @@ textarea {
 
 @media (max-width: 720px) {
   .scene__channel-bar,
-  .scene__channel-bar--setup {
+  .scene__channel-bar--setup,
+  .scene__channel-stack .scene__channel-bar,
+  .scene__channel-stack .scene__channel-bar--text-open {
     width: calc(100% - 1rem);
     grid-template-columns: 1fr;
     gap: 0.55rem;
@@ -5898,12 +6103,12 @@ textarea {
 }
 
 .scene__controls {
-  top: 1.2rem;
-  right: 1.2rem;
+  top: 0.84rem;
+  right: 0.9rem;
 }
 
 .scene-control {
-  padding: 0.56rem 0.82rem;
+  padding: 0.32rem 0.52rem;
 }
 
 .scene-hotspot {
@@ -6403,11 +6608,11 @@ textarea {
 
 .scene-whiteboard--stats,
 .scene-whiteboard--policy {
-  width: 26.4rem;
+  width: 27.6rem;
 }
 
 .scene-whiteboard--policy {
-  width: 25.2rem;
+  width: 26.4rem;
 }
 
 .topbar--live.topbar--hidden {
@@ -6613,7 +6818,7 @@ textarea {
   }
 
   .scene__caption--centered {
-    width: min(36rem, calc(100% - 1.2rem));
+    width: min(46rem, calc(100% - 1.2rem));
   }
 
   .scene--dense-bottom .scene__caption--centered {
@@ -7185,10 +7390,12 @@ textarea {
 
   .setup-room__channel-bar {
     width: calc(100% - 1rem);
+    grid-template-columns: 1fr;
   }
 
   .setup-room__launch {
-    display: none;
+    display: inline-flex;
+    width: 100%;
   }
 
   .scene__hud--setup-room {
@@ -8015,16 +8222,13 @@ textarea {
   }
 
   .featurette-cinema {
-    padding:
-      calc(env(safe-area-inset-top, 0px) + 0.8rem)
-      0.8rem
-      calc(env(safe-area-inset-bottom, 0px) + 0.8rem);
+    padding: 0;
   }
 
   .featurette-cinema__media,
   .featurette-cinema__chrome {
-    min-height: calc(100dvh - 1.6rem);
-    height: calc(100dvh - 1.6rem);
+    min-height: 100dvh;
+    height: 100dvh;
   }
 
   .featurette-cinema__top-actions {

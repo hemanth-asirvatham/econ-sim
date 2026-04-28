@@ -17,15 +17,58 @@ const RUNTIME_DIR =
 
 async function screenshot(page, outDir, name, notes) {
   try {
-    const capture = page.screenshot({ path: path.join(outDir, name), timeout: 10000 });
+    const capture = page.screenshot({ path: path.join(outDir, name), timeout: 20000 });
     capture.catch(() => undefined);
     await Promise.race([
       capture,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("outer screenshot timeout")), 14000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("outer screenshot timeout")), 24000)),
     ]);
   } catch (error) {
     notes.push(`[screenshot:${name}] ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+async function canvasProbe(page) {
+  return await page.evaluate(() => {
+    const canvas = document.querySelector("canvas");
+    if (!(canvas instanceof HTMLCanvasElement) || canvas.width === 0 || canvas.height === 0) {
+      return { present: false };
+    }
+    const sample = document.createElement("canvas");
+    sample.width = 48;
+    sample.height = 30;
+    const ctx = sample.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      return { present: true, readable: false };
+    }
+    try {
+      ctx.drawImage(canvas, 0, 0, sample.width, sample.height);
+      const data = ctx.getImageData(0, 0, sample.width, sample.height).data;
+      let alphaPixels = 0;
+      let colorSum = 0;
+      let colorSq = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        const alpha = data[index + 3];
+        if (alpha > 0) {
+          alphaPixels += 1;
+        }
+        const luma = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        colorSum += luma;
+        colorSq += luma * luma;
+      }
+      const pixels = data.length / 4;
+      const mean = colorSum / pixels;
+      const variance = colorSq / pixels - mean * mean;
+      return {
+        present: true,
+        readable: true,
+        alphaShare: alphaPixels / pixels,
+        variance,
+      };
+    } catch (error) {
+      return { present: true, readable: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
 }
 
 async function clickIfVisible(page, selectors, notes, message) {
@@ -85,8 +128,10 @@ async function run() {
     await page.waitForTimeout(2400);
     await screenshot(page, OUT_DIR, "04-street.png", notes);
 
-    await page.keyboard.press("KeyW");
-    await page.waitForTimeout(900);
+    await page.keyboard.down("KeyW");
+    await page.waitForTimeout(1300);
+    await page.keyboard.up("KeyW");
+    await page.waitForTimeout(450);
     await screenshot(page, OUT_DIR, "05-street-move.png", notes);
 
     await clickIfVisible(
@@ -106,6 +151,7 @@ async function run() {
       notes,
       mic: (await page.locator(".scene__voice-trigger").count()) > 0 ? await page.locator(".scene__voice-trigger").first().innerText() : null,
       commandStrip: (await page.locator(".scene__command-strip").count()) > 0 ? await page.locator(".scene__command-strip").first().innerText() : null,
+      canvasProbe: await canvasProbe(page),
       actions: (await page.locator(".scene__action-row button").count()) > 0
         ? await page.locator(".scene__action-row button").allInnerTexts()
         : [],

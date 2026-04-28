@@ -226,7 +226,7 @@ class QueuedPollQuestion(BaseModel):
 
 
 class SimulationConfig(BaseModel):
-    title: str = "AGI Transition Command"
+    title: str = ""
     country: str = "United States"
     player_name: str
     player_role: str = "incumbent president"
@@ -243,7 +243,7 @@ class SimulationConfig(BaseModel):
     visual_style: str
     council_roster: list[CouncilAdvisorProfile] = Field(default_factory=list)
     orchestrator_reasoning_effort: ReasoningEffort = "medium"
-    realtime_model: str = "gpt-realtime-1.5"
+    realtime_model: str = "gpt-realtime-alpha-dolphin-11"
 
 
 class SimulationState(BaseModel):
@@ -269,7 +269,7 @@ class SimulationState(BaseModel):
 
 
 class SimulationCreateRequest(BaseModel):
-    title: str = "AGI Transition Command"
+    title: str | None = None
     country: str = "United States"
     player_name: str | None = None
     player_role: str | None = None
@@ -286,7 +286,7 @@ class SimulationCreateRequest(BaseModel):
     visual_style: str | None = None
     council_roster: list["CouncilAdvisorProfile"] = Field(default_factory=list)
     orchestrator_reasoning_effort: ReasoningEffort = "medium"
-    realtime_model: str = "gpt-realtime-1.5"
+    realtime_model: str = "gpt-realtime-alpha-dolphin-11"
 
 
 class SetupSessionPatchRequest(BaseModel):
@@ -306,8 +306,6 @@ class SetupSessionPatchRequest(BaseModel):
     stage_count: int | None = Field(default=None, ge=3, le=8)
     visual_style: str | None = None
     council_roster: list["CouncilAdvisorProfile"] | None = None
-    orchestrator_reasoning_effort: ReasoningEffort | None = None
-    realtime_model: str | None = None
 
 
 class SetupSessionCreateRequest(SetupSessionPatchRequest):
@@ -317,6 +315,7 @@ class SetupSessionCreateRequest(SetupSessionPatchRequest):
 class SetupChamberGuidance(BaseModel):
     chamber_reply: str
     readiness: Literal["ready", "needs_input"] = "ready"
+    launch_now: bool = False
     applied_updates: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
@@ -436,6 +435,7 @@ class CouncilTurnRequest(BaseModel):
     avoid_speaker: str = ""
     provisional_turns: list[ConversationTurnInput] = Field(default_factory=list)
     provisional_board_notes: list[str] = Field(default_factory=list)
+    commit: bool = True
 
 
 class CouncilAdvisorProfile(BaseModel):
@@ -468,13 +468,6 @@ class CouncilAdvisorDraft(BaseModel):
     action: CouncilAdvisorAction | None = None
 
 
-class CouncilAdvisorBeat(BaseModel):
-    name: str
-    urgency: int = Field(ge=0, le=10)
-    speak: bool = False
-    text: str = ""
-
-
 class CouncilFloorPick(BaseModel):
     next_speaker: str
 
@@ -486,15 +479,6 @@ class CouncilSpeakerDecision(BaseModel):
     board_notes: list[str] = Field(default_factory=list)
     contrast: list[str] = Field(default_factory=list)
     action: CouncilAdvisorAction | None = None
-
-
-class CouncilTurnPlan(BaseModel):
-    lead: str
-    reason: str
-    yield_after_turn: bool = False
-    player_proxy_urgency: int = Field(default=0, ge=0, le=10)
-    board_notes: list[str] = Field(default_factory=list)
-    advisors: list[CouncilAdvisorBeat]
 
 
 class CouncilTurnResponse(BaseModel):
