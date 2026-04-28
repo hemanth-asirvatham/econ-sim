@@ -38,6 +38,20 @@ VOICE_PROFILES: dict[str, str] = {
     "verse": "upper-pitch fun younger male",
 }
 
+FEMININE_VOICES = {"alloy", "coral", "marin", "sage", "shimmer"}
+MASCULINE_VOICES = {"ash", "ballad", "cedar", "echo", "verse"}
+FEMININE_NAME_HINTS = {
+    "aisha", "amy", "ana", "anna", "anika", "ashley", "aya", "camila", "chloe", "claire", "danielle",
+    "emily", "emma", "evelyn", "fatima", "grace", "hannah", "isabella", "jasmine", "ji", "jiwoo", "julia",
+    "karen", "keisha", "lauren", "leah", "linda", "maria", "maya", "mei", "natalie", "olivia", "priya",
+    "rachel", "sarah", "sophia", "tanya", "valerie", "yuna", "zoe",
+}
+MASCULINE_NAME_HINTS = {
+    "aaron", "adam", "alex", "anthony", "ben", "caleb", "carlos", "david", "deshawn", "diego", "ethan",
+    "george", "james", "jason", "javier", "john", "jordan", "jose", "kevin", "liam", "luis", "marcus",
+    "michael", "miguel", "noah", "omar", "robert", "sam", "samuel", "sean", "terrence", "tyler", "william",
+}
+
 
 class PreparedPollQuestion(BaseModel):
     question: str
@@ -595,7 +609,7 @@ class GabrielService:
                     display_name=str(row.get("display_name") or "Unnamed Citizen"),
                     role=str(row.get("role") or "Resident"),
                     region=str(row.get("region") or "United States"),
-                    voice=str(row.get("voice") or self._voice_for_seed(str(row.get("seed_id") or row.get("seed") or ""))),
+                    voice=str(row.get("voice") or self._voice_for_seed(str(row.get("seed_id") or row.get("seed") or ""), self._persona_voice_hint(row))),
                     support_label=str(row.get("support_label") or self._support_label_from_score(int(row.get("support_score") or 50))),
                     mood=str(row.get("mood") or "Uneasy"),
                     ai_exposure=str(row.get("ai_exposure") or "Medium"),
@@ -851,7 +865,7 @@ class GabrielService:
                 {
                     "seed_id": f"seed-{idx:03d}",
                     "seed": seed,
-                    "voice": self._voice_for_seed(f"seed-{idx:03d}"),
+                    "voice": self._voice_for_seed(f"seed-{idx:03d}", self._name_voice_hint(name)),
                     "baseline_ai_instinct": ["optimistic but watchful", "cautiously curious", "protective and skeptical", "first in line"][idx % 4],
                     "baseline_priority": ["income and opportunity", "family care and time", "national competitiveness", "personal autonomy"][idx % 4],
                     "persona": (
@@ -1012,7 +1026,10 @@ class GabrielService:
         out["display_name"] = display_names
         out["role"] = roles
         out["region"] = regions
-        out["voice"] = [self._voice_for_seed(str(seed_id)) for seed_id in out["seed_id"].astype(str)]
+        out["voice"] = [
+            self._voice_for_seed(str(row.get("seed_id")), self._persona_voice_hint(row))
+            for _, row in out.iterrows()
+        ]
         out["mood"] = moods
         out["ai_exposure"] = exposures
         out["household"] = [
@@ -1803,7 +1820,10 @@ class GabrielService:
     async def _calibrate_personas(self, personas: pd.DataFrame, save_dir: Path) -> pd.DataFrame:
         if self.settings.dummy_openai:
             out = personas.copy()
-            out["voice"] = out["seed_id"].astype(str).map(self._voice_for_seed)
+            out["voice"] = [
+                self._voice_for_seed(str(row.get("seed_id")), self._persona_voice_hint(row))
+                for _, row in out.iterrows()
+            ]
             return out
 
         voice_options = "; ".join(f"{name} = {description}" for name, description in VOICE_PROFILES.items())
@@ -1833,7 +1853,10 @@ class GabrielService:
             out = personas.copy()
             out["baseline_ai_instinct"] = out.get("baseline_ai_instinct", "").fillna("") if "baseline_ai_instinct" in out.columns else ""
             out["baseline_priority"] = out.get("baseline_priority", "").fillna("") if "baseline_priority" in out.columns else ""
-            out["voice"] = out["seed_id"].astype(str).map(self._voice_for_seed)
+            out["voice"] = [
+                self._voice_for_seed(str(row.get("seed_id")), self._persona_voice_hint(row))
+                for _, row in out.iterrows()
+            ]
             return out
         instinct_q, priority_q, voice_q = questions
         instinct_series = result[instinct_q] if instinct_q in result.columns else pd.Series([""] * len(result))
@@ -1842,8 +1865,8 @@ class GabrielService:
         result["baseline_ai_instinct"] = instinct_series.fillna("")
         result["baseline_priority"] = priority_series.fillna("")
         result["voice"] = [
-            self._normalize_voice_choice(choice, seed_id)
-            for choice, seed_id in zip(voice_series, result["seed_id"].astype(str), strict=False)
+            self._normalize_voice_choice(choice, str(row.get("seed_id")), row)
+            for choice, (_, row) in zip(voice_series, result.iterrows(), strict=False)
         ]
         return result
 
@@ -1882,15 +1905,60 @@ class GabrielService:
             and "Unknown keyword argument" in message
         )
 
-    def _voice_for_seed(self, seed_id: str) -> str:
-        voice_names = list(VOICE_PROFILES.keys())
+    def _voice_for_seed(self, seed_id: str, preferred_group: str | None = None) -> str:
+        if preferred_group == "feminine":
+            voice_names = sorted(FEMININE_VOICES)
+        elif preferred_group == "masculine":
+            voice_names = sorted(MASCULINE_VOICES)
+        else:
+            voice_names = list(VOICE_PROFILES.keys())
         digest = int(hashlib.sha1(seed_id.encode("utf-8")).hexdigest()[:8], 16)
         return voice_names[digest % len(voice_names)]
 
-    def _normalize_voice_choice(self, choice: object, seed_id: str) -> str:
+    def _normalize_voice_choice(self, choice: object, seed_id: str, row: object | None = None) -> str:
         text = re.sub(r"[^a-z\s-]", " ", str(choice or "").lower())
         text = re.sub(r"\s+", " ", text).strip()
+        preferred_group = self._persona_voice_hint(row)
         for voice_name in VOICE_PROFILES:
             if voice_name in text:
+                if preferred_group and self._voice_group(voice_name) != preferred_group:
+                    return self._voice_for_seed(seed_id, preferred_group)
                 return voice_name
-        return self._voice_for_seed(seed_id)
+        return self._voice_for_seed(seed_id, preferred_group)
+
+    def _voice_group(self, voice_name: str) -> str | None:
+        if voice_name in FEMININE_VOICES:
+            return "feminine"
+        if voice_name in MASCULINE_VOICES:
+            return "masculine"
+        return None
+
+    def _persona_voice_hint(self, row: object | None) -> str | None:
+        if row is None:
+            return None
+        get_value = getattr(row, "get", None)
+        if not callable(get_value):
+            return None
+        display_name = str(get_value("display_name", "") or "").strip()
+        hint = self._name_voice_hint(display_name)
+        if hint:
+            return hint
+        combined = " ".join(
+            str(get_value(key, "") or "")
+            for key in ("persona", "seed", "role", "household", "summary", "voice_notes", "speech_habits")
+        ).lower()
+        if re.search(r"\b(she|her|hers|woman|female|mother|mom|wife|daughter|sister|grandmother|aunt)\b", combined):
+            return "feminine"
+        if re.search(r"\b(he|him|his|man|male|father|dad|husband|son|brother|grandfather|uncle)\b", combined):
+            return "masculine"
+        return None
+
+    def _name_voice_hint(self, display_name: str) -> str | None:
+        first_name = re.sub(r"[^a-z]", "", display_name.strip().split(" ")[0].lower()) if display_name.strip() else ""
+        if not first_name:
+            return None
+        if first_name in FEMININE_NAME_HINTS:
+            return "feminine"
+        if first_name in MASCULINE_NAME_HINTS:
+            return "masculine"
+        return None

@@ -12,7 +12,7 @@ interface FeaturetteShelfProps {
   onCinemaStateChange?: (active: boolean) => void;
 }
 
-const FEATURETTE_AUDIO_PLAYBACK_RATE = 1.09;
+const FEATURETTE_AUDIO_PLAYBACK_RATE = 1.06;
 
 function beatDurationMs(line: string) {
   const wordCount = line.trim().split(/\s+/).filter(Boolean).length;

@@ -570,6 +570,8 @@ export default function App() {
   const [streetCandidateCitizenId, setStreetCandidateCitizenId] = useState<string | undefined>(undefined);
   const [streetPendingCitizenId, setStreetPendingCitizenId] = useState<string | undefined>(undefined);
   const [streetVoiceRoaming, setStreetVoiceRoaming] = useState(false);
+  const [voiceWakeArmed, setVoiceWakeArmed] = useState(false);
+  const voiceWakeCooldownUntilRef = useRef(0);
   const [resolvingStage, setResolvingStage] = useState(false);
   const [setupDetailsOpen, setSetupDetailsOpen] = useState(false);
   const [panelsOpen, setPanelsOpen] = useState(false);
@@ -1853,8 +1855,19 @@ export default function App() {
   }
 
   function handlePresenceChange(key: "advisor" | "citizens" | "debate", presence: ScenePresence) {
+    let armStreetWake = false;
     setScenePresence((current) => {
       const previous = current[key];
+      if (
+        key === "citizens" &&
+        roomRef.current === "citizens" &&
+        previous.liveMode === "voice" &&
+        previous.status === "connected" &&
+        !previous.muted &&
+        !(presence.liveMode === "voice" && presence.status === "connected")
+      ) {
+        armStreetWake = true;
+      }
       if (
         previous.status === presence.status &&
         previous.liveMode === presence.liveMode &&
@@ -1867,6 +1880,10 @@ export default function App() {
       }
       return { ...current, [key]: presence };
     });
+    if (armStreetWake) {
+      setStreetVoiceRoaming(true);
+      setVoiceWakeArmed(true);
+    }
   }
 
   function handleLiveCaptionChange(key: "advisor" | "citizens" | "debate", turn: ConversationTurn | null) {
@@ -2190,6 +2207,7 @@ export default function App() {
         pendingCitizenActionRef.current = null;
         setStreetPendingCitizenId(undefined);
         setStreetVoiceRoaming(true);
+        setVoiceWakeArmed(true);
         return;
       }
       citizenDockRef.current?.disconnect();
@@ -2218,7 +2236,8 @@ export default function App() {
         : undefined,
     );
     if (keepStreetVoiceOpen) {
-      setStreetVoiceRoaming(false);
+      setStreetVoiceRoaming(true);
+      setVoiceWakeArmed(true);
     }
   }
 
@@ -2372,6 +2391,7 @@ export default function App() {
     pendingCitizenActionRef.current = null;
     setStreetPendingCitizenId(undefined);
     setStreetVoiceRoaming(false);
+    setVoiceWakeArmed(false);
     advisorDockRef.current?.disconnect();
     citizenDockRef.current?.disconnect();
     debateDockRef.current?.disconnect();
@@ -2514,6 +2534,7 @@ export default function App() {
       return;
     }
     setSceneTextOpen(false);
+    setVoiceWakeArmed(true);
     if (showCinematicIntro || room === "briefing") {
       disconnectLiveChannels();
       await handleEnterWarRoom({ openChannel: false, startVoice: true });
@@ -2601,6 +2622,128 @@ export default function App() {
   const activePresence =
     room === "advisor" ? scenePresence.advisor : room === "citizens" ? scenePresence.citizens : room === "debate" ? scenePresence.debate : EMPTY_PRESENCE;
 
+  useEffect(() => {
+    if (
+      !voiceWakeArmed ||
+      !simulation ||
+      simulation.status !== "stage_ready" ||
+      showCinematicIntro ||
+      resolvingStage ||
+      room === "briefing"
+    ) {
+      return;
+    }
+    if (
+      activePresence.liveMode === "voice" &&
+      (activePresence.status === "connected" || activePresence.status === "connecting")
+    ) {
+      return;
+    }
+    if (room === "citizens" && !candidateCitizen?.citizen_id && !activeCitizen?.citizen_id) {
+      return;
+    }
+
+    let cancelled = false;
+    let animationFrame = 0;
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
+    let loudFrames = 0;
+
+    const startMonitor = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        const AudioContextCtor =
+          window.AudioContext ??
+          (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioContextCtor) {
+          return;
+        }
+        context = new AudioContextCtor();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 1024;
+        context.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Uint8Array(analyser.fftSize);
+        const tick = () => {
+          if (cancelled) {
+            return;
+          }
+          analyser.getByteTimeDomainData(samples);
+          let sum = 0;
+          for (const sample of samples) {
+            const centered = (sample - 128) / 128;
+            sum += centered * centered;
+          }
+          const rms = Math.sqrt(sum / samples.length);
+          loudFrames = rms > 0.058 ? loudFrames + 1 : Math.max(0, loudFrames - 1);
+          if (loudFrames >= 4 && Date.now() > voiceWakeCooldownUntilRef.current) {
+            voiceWakeCooldownUntilRef.current = Date.now() + 2500;
+            void handleVoiceWakeFromAmbient();
+            return;
+          }
+          animationFrame = window.requestAnimationFrame(tick);
+        };
+        animationFrame = window.requestAnimationFrame(tick);
+      } catch {
+        // If the browser denies ambient wake monitoring, the visible mic button
+        // still works. Keep this quiet; it is convenience glue, not core voice.
+      }
+    };
+
+    void startMonitor();
+
+    return () => {
+      cancelled = true;
+      if (animationFrame) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      stream?.getTracks().forEach((track) => track.stop());
+      void context?.close().catch(() => undefined);
+    };
+  }, [
+    activeCitizen?.citizen_id,
+    activePresence.liveMode,
+    activePresence.status,
+    candidateCitizen?.citizen_id,
+    resolvingStage,
+    room,
+    showCinematicIntro,
+    simulation?.simulation_id,
+    simulation?.status,
+    voiceWakeArmed,
+  ]);
+
+  async function handleVoiceWakeFromAmbient() {
+    if (!simulation || simulation.status !== "stage_ready") {
+      return;
+    }
+    if (room === "citizens") {
+      const targetCitizenId = candidateCitizen?.citizen_id ?? activeCitizen?.citizen_id;
+      if (!targetCitizenId) {
+        return;
+      }
+      setStreetVoiceRoaming(true);
+      await handOffCitizenAction(targetCitizenId, (dock) => {
+        void dock.enableVoice();
+      });
+      return;
+    }
+    if (room === "advisor" || room === "debate") {
+      await handOffRoomAction(room, (dock) => {
+        void dock.enableVoice();
+      });
+    }
+  }
+
   const setupVoiceButtonLabel =
     setupVoiceConnecting
       ? "Cancel joining"
@@ -2687,7 +2830,7 @@ export default function App() {
           id: "advisor-mode",
           label: advisorMode === "council" ? "Solo room" : "Council",
           hint: advisorMode === "council" ? "Return to the one-on-one room" : "Open the wider advisory table",
-          position: [3.05, 1.46, 0.9],
+          position: advisorMode === "council" ? [6.75, 1.52, 0.45] : [3.05, 1.46, 0.9],
           tone: "sage",
           action: "advisor_mode",
           active: advisorMode === "council",
@@ -3357,6 +3500,7 @@ export default function App() {
                     panelsOpen={panelsOpen}
                     overlayActive={showCinematicIntro || reelsOpen}
                     themeMode={themeMode}
+                    voiceWakeArmed={voiceWakeArmed}
                     captionSpeaker={currentSceneCaption?.speaker}
                     captionText={currentSceneCaption?.text}
                     textComposerOpen={sceneTextOpen}

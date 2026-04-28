@@ -12,7 +12,7 @@ interface BriefingTheaterProps {
   onEnterWarRoom?: () => void;
 }
 
-const BRIEFING_AUDIO_PLAYBACK_RATE = 1.09;
+const BRIEFING_AUDIO_PLAYBACK_RATE = 1.06;
 
 export function BriefingTheater({
   stage,

@@ -1953,6 +1953,7 @@ class SimulationDirector:
         self,
         action: CouncilAdvisorAction | None,
         *,
+        state: SimulationState,
         player_text: str,
     ) -> bool:
         if action is None:
@@ -1982,10 +1983,18 @@ class SimulationDirector:
                 )
             )
         if action.name == "focus_citizen_by_name":
+            requested_name = str(action.arguments.get("citizen_name", "")).strip()
+            if requested_name and self._council_advisor_profile_for(state, requested_name) is not None:
+                return False
             return bool(
                 re.search(
-                    r"\b(?:talk to|speak to|take me to|show me|go to|bring me to)\b",
+                    r"\b(?:talk to|speak to|take me to|show me|go to|bring me to)\b.{0,42}\b(?:citizen|voter|resident|constituent|person|someone|street|worker|student|teacher|parent|retiree|owner)\b",
                     normalized,
+                )
+                or (
+                    requested_name
+                    and re.search(r"\b(?:on|in|from)\s+the\s+street\b", normalized)
+                    and self._council_advisor_profile_for(state, requested_name) is None
                 )
             )
         if action.name != "update_policy_board":
@@ -2106,6 +2115,7 @@ class SimulationDirector:
     ) -> tuple[SimulationState, str]:
         if not self._should_execute_council_action(
             action,
+            state=state,
             player_text=player_text,
         ):
             return state, ""

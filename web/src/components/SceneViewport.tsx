@@ -40,6 +40,7 @@ interface SceneViewportProps {
   hotspots?: SceneHotspot[];
   panelsOpen?: boolean;
   overlayActive?: boolean;
+  voiceWakeArmed?: boolean;
   captionSpeaker?: "user" | "assistant" | "system";
   captionText?: string;
   onHotspotSelect?: (hotspot: SceneHotspot) => void;
@@ -1108,6 +1109,7 @@ export default function SceneViewport({
   hotspots = [],
   panelsOpen = false,
   overlayActive = false,
+  voiceWakeArmed = false,
   captionSpeaker,
   captionText,
   onHotspotSelect,
@@ -1604,6 +1606,8 @@ export default function SceneViewport({
         ? presence.muted
           ? "Resume mic"
           : "Pause mic"
+        : voiceWakeArmed
+          ? "Armed"
         : room === "citizens"
           ? currentCitizen
             ? citizenInteractionReady
@@ -1815,6 +1819,8 @@ export default function SceneViewport({
                 className={`scene__voice-trigger scene__voice-trigger--scene ${ 
                   conversationMicLive
                     ? "scene__voice-trigger--live"
+                    : voiceWakeArmed
+                      ? "scene__voice-trigger--armed"
                     : voiceChannelOpen && (presence.voicePhase === "waiting" || presence.voicePhase === "responding" || presence.muted)
                       ? "scene__voice-trigger--muted"
                       : ""
@@ -1831,6 +1837,8 @@ export default function SceneViewport({
                     ? "◌"
                     : conversationMicLive
                       ? "●"
+                      : voiceWakeArmed
+                        ? "◐"
                       : "○"}
                 </span>
                 <span className="scene__voice-trigger-copy">
@@ -2391,7 +2399,7 @@ function SceneWorld({
                   floorActive={advisorOwnsFloor}
                   floorPending={advisorPendingFloor}
                 />
-                <Html position={[advisor.position[0], 1.58, advisor.position[2] + 0.18]} center distanceFactor={11.6}>
+                <Html position={[advisor.position[0], 2.12, advisor.position[2] - 0.36]} center distanceFactor={12.8}>
                   <div
                     className={`scene-council-label ${
                       leadingSpeaker === advisor.name ? "scene-council-label--active" : ""
@@ -4366,11 +4374,10 @@ function AdvisorCouncilDecor({ accent, fill, playerInPower, themeMode }: { accen
         <meshStandardMaterial color={themeMode === "light" ? "#d9ccb8" : "#6b5648"} roughness={0.7} />
       </RoundedBox>
 
-      <CouncilChair position={[-3.95, 0.46, -0.18]} rotationY={0.2} tone="#4d3526" />
-      <CouncilChair position={[-1.3, 0.46, -0.9]} rotationY={0.08} tone={playerInPower ? "#4c5c6c" : "#5d4535"} />
-      <CouncilChair position={[1.3, 0.46, -0.9]} rotationY={-0.08} tone="#4a3a30" />
-      <CouncilChair position={[3.95, 0.46, -0.18]} rotationY={-0.2} tone="#4b4432" />
-      <CouncilChair position={[0, 0.46, 2.46]} rotationY={Math.PI} tone="#6b4b33" />
+      <Sofa position={[-4.75, 0.42, -0.72]} rotationY={0.12} scaleX={1.48} tone="#4d3526" />
+      <Sofa position={[0, 0.42, -1.16]} rotationY={0} scaleX={1.72} tone={playerInPower ? "#4c5c6c" : "#5d4535"} />
+      <Sofa position={[4.75, 0.42, -0.72]} rotationY={-0.12} scaleX={1.48} tone="#4a3a30" />
+      <Sofa position={[0, 0.42, 2.5]} rotationY={Math.PI} scaleX={1.18} tone="#6b4b33" />
 
       {[-10.8, 10.8].map((x) => (
         <Sofa key={`advisor-council-sofa-${x}`} position={[x, 0.44, -0.92]} tone={x < 0 ? "#3d2b22" : "#42312a"} />
@@ -5157,13 +5164,23 @@ function Bookcase({ position, accent }: { position: [number, number, number]; ac
   );
 }
 
-function Sofa({ position, tone }: { position: [number, number, number]; tone: string }) {
+function Sofa({
+  position,
+  tone,
+  rotationY = 0,
+  scaleX = 1,
+}: {
+  position: [number, number, number];
+  tone: string;
+  rotationY?: number;
+  scaleX?: number;
+}) {
   return (
-    <group position={position}>
-      <RoundedBox args={[1.8, 0.62, 0.78]} radius={0.08} castShadow receiveShadow>
+    <group position={position} rotation={[0, rotationY, 0]}>
+      <RoundedBox args={[1.8 * scaleX, 0.62, 0.78]} radius={0.08} castShadow receiveShadow>
         <meshStandardMaterial color={tone} roughness={0.88} />
       </RoundedBox>
-      <RoundedBox args={[1.8, 0.74, 0.22]} radius={0.06} position={[0, 0.32, -0.24]} castShadow receiveShadow>
+      <RoundedBox args={[1.8 * scaleX, 0.74, 0.22]} radius={0.06} position={[0, 0.32, -0.24]} castShadow receiveShadow>
         <meshStandardMaterial color={tone} roughness={0.88} />
       </RoundedBox>
     </group>

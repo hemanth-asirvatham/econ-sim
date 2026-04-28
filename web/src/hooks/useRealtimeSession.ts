@@ -358,8 +358,8 @@ type LocalTurnInput = Pick<ConversationTurn, "speaker" | "speaker_name" | "speak
 const COUNCIL_MAX_CONTINUATION_MS = 36000;
 const COUNCIL_MAX_CONTINUATION_BEATS = 4;
 const COUNCIL_CONTEXT_TURN_LIMIT = 12;
-const COUNCIL_BARGE_IN_CONFIRM_MS = 140;
-const COUNCIL_IDLE_SPEECH_START_CONFIRM_MS = 520;
+const COUNCIL_BARGE_IN_CONFIRM_MS = 220;
+const COUNCIL_IDLE_SPEECH_START_CONFIRM_MS = 720;
 const COUNCIL_SPEECH_PLAYBACK_RATE = 1.14;
 const SILENT_AUDIO_DATA_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
@@ -949,7 +949,7 @@ function interpretModeCommand(text: string): {
   if (normalized.includes("single advisor") || normalized.includes("chief advisor") || normalized.includes("chief of staff")) {
     return { room: "advisor", advisorMode: "solo" };
   }
-  if (normalized.includes("street") || normalized.includes("citizens") || normalized.includes("people")) {
+  if (normalized.includes("street") || normalized.includes("citizens") || normalized.includes("voters")) {
     return { room: "citizens" };
   }
   if (normalized.includes("briefing") || normalized.includes("documentary") || normalized.includes("intro")) {
@@ -1862,6 +1862,13 @@ export function useRealtimeSession({
     if (!command) {
       return false;
     }
+    if (
+      councilMode &&
+      command.citizenName &&
+      canonicalCouncilSpeakerName(command.citizenName, councilRosterRef.current)
+    ) {
+      return false;
+    }
     if (role === "advisor" && advisorModelShouldHandle(command)) {
       return false;
     }
@@ -2031,7 +2038,15 @@ export function useRealtimeSession({
       let continuationBeatCount = 0;
       let lastSpokenSpeaker = lastKnownSpeaker;
       let preparedNextResponse: CouncilTurnResponse | null = null;
-      const continuationBeatLimit = userAskedForCouncilDebate ? COUNCIL_MAX_CONTINUATION_BEATS : 2;
+      const continuationBeatLimit = userAskedForCouncilDebate ? COUNCIL_MAX_CONTINUATION_BEATS : 3;
+      const yieldCouncilFloorToPlayer = (reason?: string, contrast: string[] = []) => {
+        onCouncilFloorChange?.({
+          lead: "You",
+          owner: "player",
+          contrast,
+          reason,
+        });
+      };
       while (true) {
         if (councilLoopGenerationRef.current !== loopGeneration) {
           return;
@@ -2254,6 +2269,7 @@ export function useRealtimeSession({
               spoken_turn_count: spokenTurns.length,
               assistant_turn_count: assistantTurns.length,
             });
+            yieldCouncilFloorToPlayer("Audio paused before the full advisor turn finished.");
             return;
           }
           if (usingPreparedResponse && spokenTurns.length > 0) {
@@ -2300,6 +2316,7 @@ export function useRealtimeSession({
             reason: "max_duration",
             elapsed_ms: Date.now() - loopStartedAt,
           });
+          yieldCouncilFloorToPlayer("The room is ready for your next call.", response.contrast);
           return;
         }
         if (wantsVoiceResponse && (mutedRef.current || liveModeRef.current !== "voice" || statusRef.current !== "connected")) {
@@ -2311,6 +2328,7 @@ export function useRealtimeSession({
             live_mode: liveModeRef.current,
             status: statusRef.current,
           });
+          yieldCouncilFloorToPlayer("Mic is paused; your floor.", response.contrast);
           return;
         }
         if (repeatedAssistantSignatureCount >= 2) {
@@ -2320,6 +2338,7 @@ export function useRealtimeSession({
             reason: "repeated_signature",
             repeatedAssistantSignatureCount,
           });
+          yieldCouncilFloorToPlayer("The room has repeated itself; your floor.", response.contrast);
           return;
         }
         if (continuationBeatCount >= continuationBeatLimit) {
@@ -2329,6 +2348,7 @@ export function useRealtimeSession({
             reason: "max_beats",
             continuationBeatCount,
           });
+          yieldCouncilFloorToPlayer("Your turn.", response.contrast);
           return;
         }
         if (!canContinueDialogue) {
@@ -2339,6 +2359,7 @@ export function useRealtimeSession({
             recording: recordingVoiceTurnRef.current,
             barged: councilSpeechBargeRef.current,
           });
+          yieldCouncilFloorToPlayer("Your turn.", response.contrast);
           return;
         }
         continuationBeatCount += 1;
@@ -2697,14 +2718,13 @@ export function useRealtimeSession({
           const busyPlayback =
             assistantSpeakingRef.current || audioOutputPlayingRef.current || councilPlaybackActiveRef.current;
           if (busyPlayback) {
-            councilSpeechBargeRef.current = true;
             if (councilMode) {
-              invalidateCouncilLoop({
-                lead: "player",
-                owner: "player",
-                contrast: [],
-              });
+              // Realtime VAD can hear the browser's own council TTS. Do not cut
+              // off an advisor on speech_started alone; wait for a real transcript
+              // and filter playback echo before interrupting the council loop.
+              councilSpeechBargeRef.current = false;
             } else {
+              councilSpeechBargeRef.current = true;
               onHybridSpeechStart?.();
               const audio = councilSpeechAudioRef.current;
               if (audio) {

@@ -3504,9 +3504,26 @@ textarea {
   box-shadow: 0 0 0 1px rgba(214, 168, 103, 0.16), 0 14px 26px rgba(0, 0, 0, 0.2);
 }
 
+.scene__voice-trigger--armed {
+  border-color: rgba(238, 201, 106, 0.32);
+  background:
+    linear-gradient(180deg, rgba(72, 54, 26, 0.96), rgba(22, 16, 9, 0.98)),
+    radial-gradient(circle at top, rgba(242, 206, 112, 0.18), transparent 58%);
+  box-shadow: 0 0 0 1px rgba(238, 201, 106, 0.22), 0 0 22px rgba(238, 188, 79, 0.16), 0 14px 26px rgba(0, 0, 0, 0.18);
+}
+
 .scene__voice-trigger--muted .scene__voice-trigger-icon {
   background: rgba(214, 168, 103, 0.14);
   color: #f2dfb9;
+}
+
+.scene__voice-trigger--armed .scene__voice-trigger-icon {
+  background: rgba(238, 201, 106, 0.16);
+  color: #ffe7a2;
+}
+
+.scene__voice-trigger--armed strong {
+  color: #ffe8b1;
 }
 
 .scene__voice-trigger--live .scene__voice-trigger-icon {
